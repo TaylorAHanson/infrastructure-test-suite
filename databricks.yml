@@ -1,0 +1,216 @@
+bundle:
+  name: regression-validation
+  databricks_cli_version: ">=0.283.0"
+
+# ---------------------------------------------------------------------------
+# Resources: Lakebase (operational store), the App, and the scheduled job.
+# ---------------------------------------------------------------------------
+resources:
+  database_instances:
+    rv_db:
+      name: "regression-validation-${var.environment}"
+      enable_pg_native_login: true
+      capacity: "CU_1"
+      lifecycle:
+        # Operational state (run history, audit) must survive redeploys.
+        prevent_destroy: true
+      permissions:
+        # Re-grant the deploying user CAN_MANAGE (authoritative ACL), else the
+        # app's postgres resource attach later fails with "User needs MANAGE".
+        - level: CAN_MANAGE
+          user_name: "${workspace.current_user.userName}"
+        - level: CAN_USE
+          service_principal_name: ${resources.apps.regression-validation.service_principal_client_id}
+        - level: CAN_USE
+          group_name: "users"
+
+  apps:
+    regression-validation:
+      name: ${var.app_name}
+      description: "Databricks-native regression & connectivity validation platform (${var.environment})"
+      source_code_path: "${var.source_code_path}"
+      resources:
+        # Lakebase autoscaling project/branch attach (CAN_CONNECT_AND_CREATE).
+        # Injects PGHOST/PGPORT/PGDATABASE/PGUSER into the app runtime.
+        - name: postgres
+          postgres:
+            branch: projects/${resources.database_instances.rv_db.name}/branches/production
+            database: projects/${resources.database_instances.rv_db.name}/branches/production/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE
+        # SQL warehouse used by SQL-warehouse probes and analytical chart queries.
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+      config:
+        command:
+          - python
+          - backend/run.py
+        env:
+          - name: ENVIRONMENT
+            value: "${var.environment}"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: API_V1_PREFIX
+            value: "/api/v1"
+          - name: SEED_ON_STARTUP
+            value: "${var.seed_on_startup}"
+          - name: POLLER_ENABLED
+            value: "true"
+          - name: POLLER_INTERVAL_SECONDS
+            value: "5"
+          - name: POLLER_BATCH_SIZE
+            value: "25"
+          - name: POLLER_MAX_CONCURRENT
+            value: "10"
+          - name: OTEL_ENABLED
+            value: "${var.otel_enabled}"
+          # SQL warehouse id (also injected by the resource; set explicitly so
+          # the probe defaults resolve without depending on resource var names).
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: "${var.sql_warehouse_id}"
+          - name: MODEL_SERVING_ENDPOINT
+            value: "${var.model_serving_endpoint}"
+          # The scheduled suite-runner job id (created below); lets the app
+          # offload heavy/scheduled fan-out instead of running it inline.
+          - name: SUITE_RUNNER_JOB_ID
+            value: "${resources.jobs.suite_runner.id}"
+          # HMAC secret for verifying signed remote-agent results. Sourced from
+          # a Databricks secret scope - never a plaintext value here.
+          - name: REMOTE_AGENT_SIGNING_SECRET
+            valueFrom: "remote-agent-signing-secret"
+      user_api_scopes:
+        - "sql"
+        - "sql.statement-execution"
+        - "sql.warehouses"
+        - "catalog.connections"
+        - "dashboards.genie"
+      permissions:
+        - level: CAN_MANAGE
+          user_name: "${workspace.current_user.userName}"
+        - level: CAN_USE
+          group_name: "users"
+
+  # Authoritative scheduled-execution engine. Each fire runs the bundled suite
+  # runner, which materialises a run_request and executes the selected probes,
+  # writing results to the same Lakebase store the app reads.
+  jobs:
+    suite_runner:
+      name: "${var.app_name}-suite-runner-${var.environment}"
+      schedule:
+        quartz_cron_expression: "${var.nightly_cron}"
+        timezone_id: "UTC"
+        pause_status: "${var.schedule_pause_status}"
+      tasks:
+        - task_key: run_full_regression
+          environment_key: default
+          spark_python_task:
+            python_file: "databricks/jobs/run_suite.py"
+            parameters: ["--execution_mode", "SMOKE"]
+      environments:
+        - environment_key: default
+          spec:
+            client: "3"
+            dependencies:
+              - sqlmodel>=0.0.22
+              - psycopg2-binary>=2.9.9
+              - databricks-sdk>=0.30.0
+              - croniter>=2.0.0
+              - httpx>=0.27.0
+      permissions:
+        - level: CAN_MANAGE
+          user_name: "${workspace.current_user.userName}"
+
+# ---------------------------------------------------------------------------
+# Sync: ship backend + built frontend; never ship node_modules / venv / dist src.
+# Run `npm run build` (outputs backend/static) before `databricks bundle deploy`.
+# ---------------------------------------------------------------------------
+sync:
+  include:
+    - backend/**
+    - databricks/**
+    - app.yaml
+  exclude:
+    - node_modules/**
+    - "**/node_modules/**"
+    - src/**
+    - public/**
+    - dist/**
+    - .vite/**
+    - backend/venv/**
+    - backend/.venv/**
+    - backend/__pycache__/**
+    - backend/**/__pycache__/**
+    - backend/**/*.pyc
+    - backend/*.db
+    - backend/.env
+    - backend/.env.*
+    - "**/.DS_Store"
+    - "**/*.log"
+
+variables:
+  app_name:
+    description: "Databricks App name"
+    default: "regression-validation"
+  environment:
+    description: "Environment (local|dev|stage|prod)"
+    default: "dev"
+  source_code_path:
+    description: "Path to synced source in the workspace"
+    default: "."
+  sql_warehouse_id:
+    description: "SQL Warehouse id for probes + chart queries"
+    lookup:
+      warehouse: "Serverless Starter Warehouse"
+  model_serving_endpoint:
+    description: "Model Serving endpoint for serving probes"
+    default: "databricks-claude-sonnet-4-5"
+  seed_on_startup:
+    description: "Seed the catalog/demo data on first boot"
+    default: "true"
+  otel_enabled:
+    description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
+    default: "true"
+  nightly_cron:
+    description: "Quartz cron for the nightly full regression run"
+    default: "0 0 7 * * ?"
+  schedule_pause_status:
+    description: "PAUSED or UNPAUSED for the suite-runner schedule"
+    default: "UNPAUSED"
+
+targets:
+  local:
+    mode: development
+    default: true
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: "regression-validation-local"
+      environment: "local"
+      seed_on_startup: "true"
+      schedule_pause_status: "PAUSED"
+
+  dev:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: "regression-validation-dev"
+      environment: "dev"
+
+  stage:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: "regression-validation-stage"
+      environment: "stage"
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: "regression-validation-prod"
+      environment: "prod"
+      seed_on_startup: "false"

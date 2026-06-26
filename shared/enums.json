@@ -1,0 +1,88 @@
+{
+  "AuthMode": [
+    "APP",
+    "USER"
+  ],
+  "CleanupPolicy": [
+    "ALWAYS",
+    "ON_SUCCESS",
+    "NEVER",
+    "BEST_EFFORT"
+  ],
+  "ConnectivityOutcome": [
+    "CONNECTABLE",
+    "NOT_CONNECTABLE",
+    "UNKNOWN"
+  ],
+  "ExecutionMode": [
+    "PREFLIGHT",
+    "SMOKE",
+    "FULL"
+  ],
+  "ExecutorKind": [
+    "DATABRICKS_JOB",
+    "APP_INLINE",
+    "SQL_WAREHOUSE",
+    "MODEL_SERVING",
+    "REMOTE_AGENT"
+  ],
+  "ProbeOutcome": [
+    "PASS",
+    "FAIL",
+    "ERROR",
+    "SKIP",
+    "PARTIAL"
+  ],
+  "RequestSource": [
+    "UI_MANUAL",
+    "SCHEDULE",
+    "API",
+    "REMOTE_AGENT",
+    "CI"
+  ],
+  "RootCauseBucket": [
+    "DNS_RESOLUTION_FAILURE",
+    "PRIVATE_DNS_MISCONFIGURATION",
+    "NCC_NOT_ATTACHED",
+    "NETWORK_POLICY_DENY",
+    "PRIVATELINK_ENDPOINT_NOT_ESTABLISHED",
+    "TLS_HANDSHAKE_FAILURE",
+    "OAUTH_SCOPE_MISSING",
+    "APP_RESOURCE_MISSING",
+    "SECRET_MISSING",
+    "PERMISSION_DENIED",
+    "TARGET_NOT_FOUND",
+    "SERVICE_UNSUPPORTED_IN_REGION",
+    "FEATURE_NOT_ENABLED",
+    "BUILD_EGRESS_BLOCKED",
+    "APP_DEPLOYMENT_FAILURE",
+    "UPSTREAM_TIMEOUT",
+    "DATA_VALIDATION_FAILURE",
+    "CLEANUP_FAILURE",
+    "EXTERNAL_AGENT_UNAVAILABLE",
+    "UNKNOWN"
+  ],
+  "RunStatus": [
+    "PENDING",
+    "QUEUED",
+    "RUNNING",
+    "PASSED",
+    "FAILED",
+    "PARTIAL",
+    "ERROR",
+    "CANCELLED"
+  ],
+  "StepKind": [
+    "PRECHECK",
+    "DNS",
+    "AUTH",
+    "NETWORK",
+    "FUNCTIONAL",
+    "CLEANUP"
+  ],
+  "TestCategory": [
+    "PRODUCER",
+    "PROCESSING",
+    "CONSUMER"
+  ]
+}

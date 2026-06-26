@@ -1,0 +1,34 @@
+# Databricks Apps configuration for direct `databricks apps deploy`.
+#
+# NOTE: When deploying via the Databricks Asset Bundle (databricks.yml), the
+# bundle's `apps.<name>.config.command` is authoritative and supersedes this
+# file. This app.yaml exists for the simple, non-bundle deploy path.
+#
+# The app is a single FastAPI process that serves the API and the built React
+# bundle (backend/static). Node is used only at build time. The port is read
+# from the environment in run.py - do not hardcode it.
+command:
+  - python
+  - backend/run.py
+
+env:
+  - name: ENVIRONMENT
+    value: "dev"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: API_V1_PREFIX
+    value: "/api/v1"
+  - name: POLLER_ENABLED
+    value: "true"
+  - name: POLLER_INTERVAL_SECONDS
+    value: "5"
+  - name: POLLER_MAX_CONCURRENT
+    value: "10"
+  - name: SEED_ON_STARTUP
+    value: "true"
+  - name: OTEL_ENABLED
+    value: "true"
+  # Lakebase PG* vars, SQL warehouse id, model serving endpoint, secrets, and
+  # the suite-runner job id are injected automatically by the attached app
+  # resources - do not set them here. Attach resources in the app UI or via the
+  # bundle's `apps.<name>.resources` block.
