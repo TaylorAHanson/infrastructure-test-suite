@@ -86,30 +86,36 @@ def seed_catalog(demo: bool = False, session: Session = Depends(get_session)) ->
     }
 
 
+def _purge_models(session: Session, models) -> dict[str, int]:
+    """Delete all rows for each model in FK-dependency order.
+
+    We flush after each model so child rows are gone before their parents -
+    Postgres enforces FK constraints and the ORM unit-of-work doesn't infer the
+    order on its own (no declared relationships between these tables).
+    """
+    counts: dict[str, int] = {}
+    for model in models:
+        rows = session.exec(select(model)).all()
+        counts[model.__name__] = len(rows)
+        for row in rows:
+            session.delete(row)
+        session.flush()
+    session.commit()
+    return counts
+
+
 @router.post("/purge-runs")
 def purge_runs(session: Session = Depends(get_session)) -> dict:
-    """Delete all run history (requests, runs, steps) - keeps the catalog."""
-    steps = session.exec(select(TestRunStep)).all()
-    runs = session.exec(select(TestRun)).all()
-    requests = session.exec(select(RunRequest)).all()
-    for s in steps:
-        session.delete(s)
-    for r in runs:
-        session.delete(r)
-    for rq in requests:
-        session.delete(rq)
-    session.commit()
-    return {"purged": True, "steps": len(steps), "runs": len(runs), "requests": len(requests)}
+    """Delete all run history (steps, runs, requests) - keeps the catalog."""
+    counts = _purge_models(session, (TestRunStep, TestRun, RunRequest))
+    return {"purged": True, "counts": counts}
 
 
 @router.post("/purge-all")
 def purge_all(session: Session = Depends(get_session)) -> dict:
     """Delete the entire catalog AND run history (full reset)."""
-    counts: dict[str, int] = {}
-    for model in (TestRunStep, TestRun, RunRequest, SuiteMember, Schedule, TestSuite, TestTarget, TestDefinition):
-        rows = session.exec(select(model)).all()
-        counts[model.__name__] = len(rows)
-        for row in rows:
-            session.delete(row)
-    session.commit()
+    counts = _purge_models(
+        session,
+        (TestRunStep, TestRun, RunRequest, SuiteMember, Schedule, TestSuite, TestTarget, TestDefinition),
+    )
     return {"purged": True, "counts": counts}

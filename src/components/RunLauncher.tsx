@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Play } from 'lucide-react'
 
 import { useCatalogs, useSubmitRun, useSuites } from '../hooks/queries'
@@ -6,6 +7,7 @@ import { useCatalogs, useSubmitRun, useSuites } from '../hooks/queries'
 // Supports full-suite or partial-suite execution and all-catalogs or
 // partial-catalog execution, across the three execution modes.
 export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void }) {
+  const navigate = useNavigate()
   const { data: suites } = useSuites()
   const { data: catalogs } = useCatalogs()
   const submit = useSubmitRun()
@@ -13,15 +15,22 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
   const [suiteId, setSuiteId] = useState('')
   const [catalog, setCatalog] = useState('')
   const [mode, setMode] = useState('SMOKE')
+  const [error, setError] = useState<string | null>(null)
 
   async function launch() {
-    const res = await submit.mutateAsync({
-      suite_ids: suiteId ? [suiteId] : [],
-      catalogs: catalog ? [catalog] : [],
-      execution_mode: mode,
-      requested_by: 'ui-user',
-    })
-    onLaunched?.(res.id)
+    setError(null)
+    try {
+      const res = await submit.mutateAsync({
+        suite_ids: suiteId ? [suiteId] : [],
+        catalogs: catalog ? [catalog] : [],
+        execution_mode: mode,
+        requested_by: 'ui-user',
+      })
+      if (onLaunched) onLaunched(res.id)
+      else navigate('/runs')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to submit run.')
+    }
   }
 
   return (
@@ -60,6 +69,10 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
         <Play size="16" />
         {submit.isPending ? 'Submitting...' : 'Run'}
       </button>
+      {submit.isSuccess && !error && (
+        <span className="text-sm text-pass">Run submitted - opening Runs...</span>
+      )}
+      {error && <span className="w-full text-sm text-fail">{error}</span>}
     </div>
   )
 }

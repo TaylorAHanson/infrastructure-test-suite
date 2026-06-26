@@ -42,6 +42,12 @@ resources:
           sql_warehouse:
             id: ${var.sql_warehouse_id}
             permission: CAN_USE
+        # Foundation Model endpoint for the Model Serving probe + AI test authoring.
+        # Grants the app service principal CAN_QUERY (adds the serving OAuth scope).
+        - name: serving-endpoint
+          serving_endpoint:
+            name: ${var.model_serving_endpoint}
+            permission: CAN_QUERY
       config:
         command:
           - python
@@ -85,11 +91,19 @@ resources:
         - "sql.warehouses"
         - "catalog.connections"
         - "dashboards.genie"
+        # Required to query Model Serving / Foundation Model / AI Gateway
+        # endpoints (the Model Serving probe + AI test authoring). Without it the
+        # forwarded OAuth token is downscoped and serving queries fail with
+        # "OAuth token does not have required scopes".
+        - "serving.serving-endpoints"
+        - "ai-gateway"
       permissions:
         - level: CAN_MANAGE
           user_name: "${workspace.current_user.userName}"
         - level: CAN_USE
           group_name: "users"
+        - level: CAN_USE
+          group_name: "account users"
 
   # Authoritative scheduled-execution engine. Each fire runs the bundled suite
   # runner, which materialises a run_request and executes the selected probes,
@@ -197,10 +211,10 @@ variables:
       warehouse: "Serverless Starter Warehouse"
   model_serving_endpoint:
     description: "Model Serving endpoint for serving probes"
-    default: "databricks-claude-sonnet-4-5"
+    default: "databricks-claude-sonnet-4-6"
   seed_on_startup:
-    description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Off by default - no mock/demo data is ever created."
-    default: "false"
+    description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets + synthetic runs stay off."
+    default: "true"
   otel_enabled:
     description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
     default: "true"

@@ -10,6 +10,7 @@ import {
   ListChecks,
   Settings,
   ShieldAlert,
+  Sparkles,
 } from 'lucide-react'
 
 import { useAdminSettings } from '../hooks/queries'
@@ -18,6 +19,7 @@ const NAV = [
   { to: '/', label: 'Dashboard', icon: Gauge, end: true },
   { to: '/runs', label: 'Runs', icon: ListChecks },
   { to: '/tests', label: 'Test Catalog', icon: FlaskConical },
+  { to: '/authoring', label: 'Test Authoring', icon: Sparkles },
   { to: '/suites', label: 'Suites', icon: Layers },
   { to: '/targets', label: 'Targets & Catalogs', icon: Database },
   { to: '/schedules', label: 'Schedules', icon: CalendarClock },

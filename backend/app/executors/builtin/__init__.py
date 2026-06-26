@@ -4,5 +4,6 @@ from app.executors.builtin import (  # noqa: F401
     outbound_http,
     remote_agent,
     sql_warehouse,
+    workspace_probes,
     stubs,
 )

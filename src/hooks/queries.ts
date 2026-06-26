@@ -15,6 +15,33 @@ import type {
 export const useTests = () =>
   useQuery({ queryKey: ['tests'], queryFn: () => api.get<TestDefinition[]>('/tests') })
 
+export const useCreateTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: Record<string, unknown>) => api.post<TestDefinition>('/tests', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['tests'] }),
+  })
+}
+
+// ---------------- AI authoring ----------------
+export interface AuthoringCapabilities {
+  model_serving_endpoint: string | null
+  ai_available: boolean
+  executors: { executor_key: string; kind: string; purpose: string; params: Record<string, string> }[]
+}
+
+export const useAuthoringCapabilities = () =>
+  useQuery({
+    queryKey: ['authoring-capabilities'],
+    queryFn: () => api.get<AuthoringCapabilities>('/authoring/capabilities'),
+  })
+
+export const useGenerateTest = () =>
+  useMutation({
+    mutationFn: (body: { description: string; category?: string }) =>
+      api.post<{ spec: Record<string, unknown>; endpoint: string | null }>('/authoring/generate', body),
+  })
+
 export const useSuites = () =>
   useQuery({ queryKey: ['suites'], queryFn: () => api.get<Suite[]>('/suites') })
 

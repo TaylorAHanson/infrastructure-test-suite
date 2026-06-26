@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
 import TestCatalog from './pages/TestCatalog'
+import Authoring from './pages/Authoring'
 import Suites from './pages/Suites'
 import Targets from './pages/Targets'
 import Schedules from './pages/Schedules'
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="runs" element={<Runs />} />
         <Route path="runs/:runId" element={<RunDetail />} />
         <Route path="tests" element={<TestCatalog />} />
+        <Route path="authoring" element={<Authoring />} />
         <Route path="suites" element={<Suites />} />
         <Route path="targets" element={<Targets />} />
         <Route path="schedules" element={<Schedules />} />

@@ -46,6 +46,24 @@ if [ ! -d "node_modules" ]; then
   npm install
 fi
 
+# --- Real workspace execution (NO mocking) ---------------------------------
+# Point local probes at a REAL Databricks workspace using your CLI OAuth, so
+# runs execute for real instead of returning simulated/demo results. Override
+# any of these inline, e.g. `DATABRICKS_CONFIG_PROFILE=other ./dev.sh`. To force
+# offline/simulated mode, run with `RV_LOCAL_DEMO=1 ./dev.sh`.
+if [ "${RV_LOCAL_DEMO}" != "1" ]; then
+  # DATABRICKS_PROFILE is what the backend reads (config.py); DATABRICKS_CONFIG_PROFILE
+  # is the SDK/CLI env - export both so they stay consistent.
+  export DATABRICKS_PROFILE="${DATABRICKS_PROFILE:-myenv}"
+  export DATABRICKS_CONFIG_PROFILE="${DATABRICKS_PROFILE}"
+  export DATABRICKS_WAREHOUSE_ID="${DATABRICKS_WAREHOUSE_ID:-238e4114cdfd555f}"
+  export MODEL_SERVING_ENDPOINT="${MODEL_SERVING_ENDPOINT:-databricks-claude-sonnet-4-5}"
+  echo -e "${CYAN}-> live workspace: profile '${DATABRICKS_PROFILE}' (warehouse ${DATABRICKS_WAREHOUSE_ID})${NC}"
+  echo -e "${YELLOW}   (set RV_LOCAL_DEMO=1 to force offline/simulated mode)${NC}"
+else
+  echo -e "${YELLOW}-> RV_LOCAL_DEMO=1: probes run in simulated/offline mode${NC}"
+fi
+
 # Start backend (uvicorn, reload).
 echo -e "${GREEN}-> backend  http://localhost:${BACKEND_PORT}  (docs at /docs)${NC}"
 ( cd backend && exec venv/bin/uvicorn app.main:app --reload --port "$BACKEND_PORT" ) > backend.log 2>&1 &

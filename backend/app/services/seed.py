@@ -89,9 +89,9 @@ CATALOG: list[dict] = [
     dict(name="GitHub access", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
          key="github_access", tags=["git", "github"], target_type="external_system",
          modes=PREFLIGHT_SMOKE, destructive=False, params={}),
-    dict(name="External catalog validation", category=TestCategory.PROCESSING, kind=ExecutorKind.SQL_WAREHOUSE,
-         key="external_catalog", tags=["uc", "catalog"], target_type="catalog",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={}),
+    dict(name="Unity Catalog access", category=TestCategory.PROCESSING, kind=ExecutorKind.SQL_WAREHOUSE,
+         key="unity_catalog_query", tags=["uc", "catalog"], target_type="catalog",
+         modes=ALL_MODES, destructive=False, params={"statement": "SHOW CATALOGS"}),
     dict(name="Genie", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
          key="genie_query", tags=["genie", "ai/bi"], target_type="genie_space",
          modes=[ExecutionMode.PREFLIGHT], destructive=False, params={}),
@@ -118,9 +118,9 @@ CATALOG: list[dict] = [
     dict(name="N8N connectivity", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
          key="n8n_connectivity", tags=["consumer", "n8n", "http"], target_type="external_system",
          modes=PREFLIGHT_SMOKE, destructive=False, params={"connection_name": "n8n_conn"}),
-    dict(name="Other outbound integrations", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
-         key="outbound_generic", tags=["consumer", "outbound", "http"], target_type="external_system",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={"url": "https://example.com", "method": "GET"}),
+    dict(name="Outbound HTTP egress", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
+         key="outbound_http", tags=["consumer", "outbound", "http", "egress"], target_type="external_system",
+         modes=ALL_MODES, destructive=False, params={"url": "https://example.com", "method": "GET", "expected_status": 200}),
 ]
 
 

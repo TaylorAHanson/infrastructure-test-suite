@@ -6,6 +6,7 @@ from app.api.v1 import (
     agents,
     analytics,
     audit,
+    authoring,
     health,
     runs,
     schedules,
@@ -25,3 +26,4 @@ router.include_router(audit.router, prefix="/audit", tags=["audit"])
 router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 router.include_router(agents.router, prefix="/agents", tags=["agents"])
 router.include_router(admin.router, prefix="/admin", tags=["admin"])
+router.include_router(authoring.router, prefix="/authoring", tags=["authoring"])
