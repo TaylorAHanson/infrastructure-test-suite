@@ -57,14 +57,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.error("DB init failed: %s", exc, exc_info=True)
 
-    # Seed demo/catalog data.
+    # Seed the test catalog. Demo data (placeholder targets + synthetic runs) is
+    # gated behind SEED_DEMO_DATA so a real workspace gets only the real catalog.
     if settings.SEED_ON_STARTUP:
         try:
             from app.db.session import session_scope
             from app.services.seed import seed_all
 
             with session_scope() as session:
-                seed_all(session)
+                seed_all(
+                    session,
+                    with_sample_runs=settings.SEED_DEMO_DATA,
+                    with_demo_targets=settings.SEED_DEMO_DATA,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Seeding skipped: %s", exc)
 

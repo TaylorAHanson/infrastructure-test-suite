@@ -75,10 +75,10 @@ resources:
           # offload heavy/scheduled fan-out instead of running it inline.
           - name: SUITE_RUNNER_JOB_ID
             value: "${resources.jobs.suite_runner.id}"
-          # HMAC secret for verifying signed remote-agent results. Sourced from
-          # a Databricks secret scope - never a plaintext value here.
-          - name: REMOTE_AGENT_SIGNING_SECRET
-            valueFrom: "remote-agent-signing-secret"
+          # NOTE: remote-agent result signing is optional. To enable it, create a
+          # secret scope/key, declare a `secret` app resource above, and add an
+          # env entry with `value_from: <resource-name>`. Left out by default so
+          # the bundle deploys without a pre-existing secret.
       user_api_scopes:
         - "sql"
         - "sql.statement-execution"
@@ -122,21 +122,54 @@ resources:
           user_name: "${workspace.current_user.userName}"
 
 # ---------------------------------------------------------------------------
-# Sync: ship backend + built frontend; never ship node_modules / venv / dist src.
-# Run `npm run build` (outputs backend/static) before `databricks bundle deploy`.
+# Sync: ship the frontend SOURCE + backend + job code. The Databricks Apps Node
+# buildpack detects package.json and runs `npm install && npm run build` at
+# deploy time; Vite (vite.config.ts build.outDir) emits to backend/static, which
+# the FastAPI `command` then serves. We never build the client locally. The
+# lockfile is intentionally NOT shipped (see exclude note below).
+#
+# `include` force-syncs the frontend config files that are otherwise gitignored.
+# We only exclude heavy / generated dirs - critically the local `.databricks`
+# CLI working dir, which holds the ~64MB terraform-provider-databricks binary
+# that exceeds the 10MB workspace per-file import limit during app deploy.
 # ---------------------------------------------------------------------------
 sync:
   include:
+    - package.json
+    - vite.config.ts
+    - tsconfig.json
+    - tailwind.config.js
+    - postcss.config.js
+    - eslint.config.js
+    - index.html
+    - src/**
+    - public/**
     - backend/**
     - databricks/**
     - app.yaml
   exclude:
+    # Local CLI/terraform working dir - contains the ~64MB databricks provider
+    # binary that exceeds the 10MB workspace per-file import limit on app deploy.
+    - .databricks/**
+    - "**/.databricks/**"
+    - .git/**
+    # Frontend deps + build output (Databricks reinstalls/rebuilds these)
     - node_modules/**
     - "**/node_modules/**"
-    - src/**
-    - public/**
     - dist/**
     - .vite/**
+    # NEVER ship package-lock.json: its `resolved` URLs are pinned to the
+    # internal npm-proxy.dev.databricks.com registry, which the Databricks Apps
+    # build sandbox can't reach. Shipping it makes the buildpack run `npm ci`
+    # against the proxy and crash ("Exit handler never called"). Omitting it lets
+    # Databricks run plain `npm install` against the default public registry.
+    - package-lock.json
+    # Repo docs / infra / tests not needed in the running app
+    - tests/**
+    - docs/**
+    - infra/**
+    - shared/**
+    # Python + env cruft
     - backend/venv/**
     - backend/.venv/**
     - backend/__pycache__/**
@@ -166,8 +199,8 @@ variables:
     description: "Model Serving endpoint for serving probes"
     default: "databricks-claude-sonnet-4-5"
   seed_on_startup:
-    description: "Seed the catalog/demo data on first boot"
-    default: "true"
+    description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Off by default - no mock/demo data is ever created."
+    default: "false"
   otel_enabled:
     description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
     default: "true"
@@ -179,38 +212,12 @@ variables:
     default: "UNPAUSED"
 
 targets:
-  local:
-    mode: development
-    default: true
-    workspace:
-      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
-    variables:
-      app_name: "regression-validation-local"
-      environment: "local"
-      seed_on_startup: "true"
-      schedule_pause_status: "PAUSED"
 
   dev:
     mode: production
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+      host: "https://fevm-taylor-hanson-build.cloud.databricks.com"
     variables:
       app_name: "regression-validation-dev"
       environment: "dev"
-
-  stage:
-    mode: production
-    workspace:
-      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
-    variables:
-      app_name: "regression-validation-stage"
-      environment: "stage"
-
-  prod:
-    mode: production
-    workspace:
-      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
-    variables:
-      app_name: "regression-validation-prod"
-      environment: "prod"
-      seed_on_startup: "false"

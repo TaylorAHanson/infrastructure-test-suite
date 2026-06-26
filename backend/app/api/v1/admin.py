@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.clients.databricks import databricks_available, get_workspace_context
 from app.core.config import settings
 from app.db.session import get_session
 from app.executors.registry import registry
+from app.models import (
+    RunRequest,
+    Schedule,
+    SuiteMember,
+    TestDefinition,
+    TestRun,
+    TestRunStep,
+    TestSuite,
+    TestTarget,
+)
 
 router = APIRouter()
 
@@ -46,4 +56,60 @@ def get_admin_settings(session: Session = Depends(get_session)) -> dict:
         "workspace": {"name": ctx.workspace_name, "cloud": ctx.cloud, "region": ctx.region},
         "environment": settings.ENVIRONMENT,
         "version": settings.APP_VERSION,
+        "catalog_counts": {
+            "test_definitions": len(session.exec(select(TestDefinition)).all()),
+            "suites": len(session.exec(select(TestSuite)).all()),
+            "targets": len(session.exec(select(TestTarget)).all()),
+            "schedules": len(session.exec(select(Schedule)).all()),
+            "runs": len(session.exec(select(TestRun)).all()),
+        },
     }
+
+
+@router.post("/seed")
+def seed_catalog(demo: bool = False, session: Session = Depends(get_session)) -> dict:
+    """Seed the real test catalog on demand (idempotent).
+
+    Pass ``?demo=true`` to also add placeholder targets + synthetic historical
+    runs (for screenshots/demos). Safe to call repeatedly - it no-ops once
+    definitions already exist.
+    """
+    from app.services.seed import seed_all
+
+    seed_all(session, with_sample_runs=demo, with_demo_targets=demo)
+    return {
+        "seeded": True,
+        "demo": demo,
+        "test_definitions": len(session.exec(select(TestDefinition)).all()),
+        "suites": len(session.exec(select(TestSuite)).all()),
+        "targets": len(session.exec(select(TestTarget)).all()),
+    }
+
+
+@router.post("/purge-runs")
+def purge_runs(session: Session = Depends(get_session)) -> dict:
+    """Delete all run history (requests, runs, steps) - keeps the catalog."""
+    steps = session.exec(select(TestRunStep)).all()
+    runs = session.exec(select(TestRun)).all()
+    requests = session.exec(select(RunRequest)).all()
+    for s in steps:
+        session.delete(s)
+    for r in runs:
+        session.delete(r)
+    for rq in requests:
+        session.delete(rq)
+    session.commit()
+    return {"purged": True, "steps": len(steps), "runs": len(runs), "requests": len(requests)}
+
+
+@router.post("/purge-all")
+def purge_all(session: Session = Depends(get_session)) -> dict:
+    """Delete the entire catalog AND run history (full reset)."""
+    counts: dict[str, int] = {}
+    for model in (TestRunStep, TestRun, RunRequest, SuiteMember, Schedule, TestSuite, TestTarget, TestDefinition):
+        rows = session.exec(select(model)).all()
+        counts[model.__name__] = len(rows)
+        for row in rows:
+            session.delete(row)
+    session.commit()
+    return {"purged": True, "counts": counts}

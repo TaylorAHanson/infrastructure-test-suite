@@ -24,6 +24,39 @@ export const useTargets = () =>
 export const useCatalogs = () =>
   useQuery({ queryKey: ['catalogs'], queryFn: () => api.get<string[]>('/targets/catalogs') })
 
+export interface CreateTargetBody {
+  name: string
+  target_type: string
+  catalog?: string | null
+  schema_name?: string | null
+  workspace_name?: string | null
+  cloud?: string
+  region?: string | null
+  config?: Record<string, unknown>
+}
+
+export const useCreateTarget = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CreateTargetBody) => api.post<Target>('/targets', body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['targets'] })
+      qc.invalidateQueries({ queryKey: ['catalogs'] })
+    },
+  })
+}
+
+export const useDeleteTarget = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.del(`/targets/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['targets'] })
+      qc.invalidateQueries({ queryKey: ['catalogs'] })
+    },
+  })
+}
+
 // ---------------- Runs ----------------
 export interface RunFilters {
   status?: string

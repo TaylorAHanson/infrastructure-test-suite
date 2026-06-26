@@ -146,7 +146,21 @@ def _make_definition(spec: dict) -> TestDefinition:
     )
 
 
-def seed_all(session: Session, with_sample_runs: bool = True) -> None:
+def seed_all(
+    session: Session,
+    with_sample_runs: bool = True,
+    with_demo_targets: bool = True,
+) -> None:
+    """Seed the test catalog (idempotent).
+
+    Always seeds the real test *definitions*, *suites*, and *schedules* - these
+    are generic, environment-agnostic config the app needs to be useful.
+
+    ``with_demo_targets``/``with_sample_runs`` add demo-only data (placeholder
+    catalogs/workspaces and synthetic historical runs) for screenshots and local
+    development. In a real workspace both are off, so probes run workspace-global
+    against the app's own environment and the dashboards start empty.
+    """
     existing = session.exec(select(TestDefinition)).first()
     if existing:
         logger.info("Seed skipped: definitions already present.")
@@ -182,20 +196,24 @@ def seed_all(session: Session, with_sample_runs: bool = True) -> None:
             session.add(SuiteMember(suite_id=suite.id, test_definition_id=d.id, sort_order=i))
     session.commit()
 
-    # Targets, including the sales_dev catalog from the spec.
-    targets = [
-        TestTarget(name="sales_dev (temp schema)", target_type="catalog", catalog="sales_dev",
-                   schema_name="temp", workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
-                   config={"catalog": "sales_dev", "schema": "temp"}),
-        TestTarget(name="analytics_prod", target_type="catalog", catalog="analytics_prod",
-                   workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
-                   config={"catalog": "analytics_prod"}),
-        TestTarget(name="primary workspace", target_type="workspace",
-                   workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1", config={}),
-    ]
-    for t in targets:
-        session.add(t)
-    session.commit()
+    # Demo targets: placeholder catalogs/workspaces for screenshots + local dev.
+    # Off in a real workspace, where probes run workspace-global against the
+    # app's own environment (the expand step uses a null target).
+    targets: list[TestTarget] = []
+    if with_demo_targets:
+        targets = [
+            TestTarget(name="sales_dev (temp schema)", target_type="catalog", catalog="sales_dev",
+                       schema_name="temp", workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
+                       config={"catalog": "sales_dev", "schema": "temp"}),
+            TestTarget(name="analytics_prod", target_type="catalog", catalog="analytics_prod",
+                       workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
+                       config={"catalog": "analytics_prod"}),
+            TestTarget(name="primary workspace", target_type="workspace",
+                       workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1", config={}),
+        ]
+        for t in targets:
+            session.add(t)
+        session.commit()
 
     # A nightly full-regression schedule (materialised as a Databricks Job in prod).
     full_suite = session.exec(select(TestSuite).where(TestSuite.name == "Full Regression")).first()
@@ -210,7 +228,7 @@ def seed_all(session: Session, with_sample_runs: bool = True) -> None:
     ))
     session.commit()
 
-    if with_sample_runs:
+    if with_sample_runs and targets:
         _seed_sample_runs(session, definitions, targets)
 
 

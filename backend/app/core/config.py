@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     PGUSER: Optional[str] = None
     PGSSLMODE: str = "require"
     SQLITE_PATH: str = "regression_platform.db"
+    # Postgres schema the app owns and creates its tables/enums in. We never use
+    # `public`: PG 15+ revokes CREATE on it for non-owner roles, so create_all()
+    # (and Lakebase's app service principal) would hit "permission denied for
+    # schema public". The app role can CREATE its own schema via the postgres
+    # resource's CAN_CONNECT_AND_CREATE grant.
+    DB_SCHEMA: str = "regression"
 
     # ----- Databricks resource bindings (supplied by app resources) -----
     DATABRICKS_PROFILE: str = os.environ.get("DATABRICKS_PROFILE", "DEFAULT")
@@ -79,7 +85,13 @@ class Settings(BaseSettings):
     REMOTE_AGENT_SIGNING_SECRET: Optional[str] = None
 
     # ----- Behaviour flags ----------------------------------------------
-    SEED_ON_STARTUP: bool = True
+    # Auto-seeding is OFF everywhere by default: the platform creates no
+    # mock/demo data. Real targets/tests are added via the UI/API. The built-in
+    # test-definition catalog can still be seeded on demand via POST /admin/seed.
+    SEED_ON_STARTUP: bool = False
+    # Demo-only data (placeholder targets + synthetic historical runs). Never
+    # enabled implicitly; opt in explicitly for screenshots/local dev only.
+    SEED_DEMO_DATA: bool = False
 
     # ---------------- Derived helpers ----------------------------------
     @property

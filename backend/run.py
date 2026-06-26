@@ -13,18 +13,26 @@ import sys
 
 
 def main() -> None:
+    # Resolve the python executable to an ABSOLUTE path BEFORE chdir. On
+    # Databricks Apps sys.executable is a relative path (".venv/bin/python"),
+    # which breaks once we change directories - so capture it up front.
+    python_exe = os.path.abspath(sys.executable)
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
 
-    print(f"[run] cwd={os.getcwd()}", flush=True)
+    print(f"[run] cwd={os.getcwd()} python={python_exe}", flush=True)
 
-    # Install requirements if present (Databricks Apps build step may already
-    # have done this; this is a safety net and a no-op when satisfied).
+    # Install Python deps at startup. The Databricks Apps buildpack only
+    # auto-installs a requirements.txt located at the source-code ROOT; ours
+    # lives in backend/, so we install it here (matches the proven app pattern).
+    # Skippable locally (deps already in the venv) via INSTALL_REQUIREMENTS=0.
     req = os.path.join(script_dir, "requirements.txt")
-    if os.path.exists(req) and os.environ.get("INSTALL_REQUIREMENTS", "0") == "1":
-        subprocess.run([sys.executable, "-m", "pip", "install", "-r", req, "-q"], check=True)
+    if os.path.exists(req) and os.environ.get("INSTALL_REQUIREMENTS", "1") == "1":
+        print(f"[run] installing requirements from {req}", flush=True)
+        subprocess.run([python_exe, "-m", "pip", "install", "-r", req, "-q"], check=True)
 
     port = int(
         os.environ.get("DATABRICKS_APP_PORT")
