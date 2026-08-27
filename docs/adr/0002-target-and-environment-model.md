@@ -1,6 +1,6 @@
 # ADR 0002 — Target & environment model
 
-- **Status:** Accepted (2026-08-27). Resolves [#3](https://github.com/databricks-field-eng/infrastructure-test-suite/issues/3).
+- **Status:** Accepted (2026-08-27). Resolves [#3](https://github.com/databricks-field-eng/infrastructure-test-suite/issues/3). **Refined by [ADR-0005](./0005-ci-invocation-contract.md):** decision §6 (CI/Terraform) and the Target **stack identifier** are superseded — "what changed → which target(s)" resolution shifts **left to the caller** (tool-agnostic); the app takes explicit targets addressed by workspace name/host/id, and carries no stack-identifier resolver.
 - **Context effort:** Wayfinder map [#1](https://github.com/databricks-field-eng/infrastructure-test-suite/issues/1).
 
 ## Context
