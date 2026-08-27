@@ -14,7 +14,7 @@ The old prototype hardcoded a fixed six-step stage ladder (`StepKind`), a binary
 3. Every Check result **maps onto a shared canonical stage spine** (`RESOLVE→CONNECT→TLS→AUTHENTICATE→AUTHORIZE→OPERATE→VERIFY`). Handlers map onto it and skip absent stages; they **do not invent** stages.
 4. **Connectable vs functional is a derived view** over the stage reached, never a stored primitive. **Failure classification** is an **extensible taxonomy** over the stages.
 5. A Check's **expected outcome** supports **counterfactuals** (expected denial at a named stage; pass = correctly blocked).
-6. **Depth rides on the stages** (run up to a threshold). Only a coarse *quick vs. full* dial is required here; the cost/latency strategy is #8.
+6. **Depth rides on the stages** (run up to a threshold). Only a coarse *quick vs. full* dial is required here; the cost/latency strategy is #9 (ADR-0007).
 7. **Assertions are authored in plain text.** The AI assistant **compiles them to deterministic structured assertions** where possible; **deterministic evaluation is the CI default.** Whether/how to support **agentic (LLM-judged)** assertions is deferred to a prototype ([#11](https://github.com/databricks-field-eng/infrastructure-test-suite/issues/11)).
 8. **Storage: Lakebase is the source of truth** — Databricks Apps have no stable filesystem, so the app cannot own YAML files. **Rollback is in-app** (Lakebase); **YAML is an import/export/portability format only**, not the system of record.
 9. **Operations carry a risk tier** (R0 read / R1 safe mutation / R2 destructive / R3 catastrophic), **declared in the handler manifest**. The enforcement matrix (class→max-tier; R3 global denylist) is #6.
