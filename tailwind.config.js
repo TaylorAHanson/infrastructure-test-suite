@@ -17,6 +17,7 @@ export default {
         warn: '#d29922',
         skip: '#6e7681',
         info: '#58a6ff',
+        flaky: '#a371f7', // advisory / non-deterministic (ADR-0008)
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

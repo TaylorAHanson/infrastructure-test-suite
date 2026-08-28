@@ -1,11 +1,10 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import {
-  Activity,
   CalendarClock,
   ClipboardList,
+  Compass,
   Database,
   FlaskConical,
-  Gauge,
   Layers,
   ListChecks,
   Settings,
@@ -18,14 +17,13 @@ import { AssistantProvider } from '../lib/assistantContext'
 import AssistantShelf from './AssistantShelf'
 
 const NAV = [
-  { to: '/', label: 'Dashboard', icon: Gauge, end: true },
+  { to: '/', label: "What's Interesting", icon: Compass, end: true },
   { to: '/runs', label: 'Runs', icon: ListChecks },
   { to: '/tests', label: 'Test Catalog', icon: FlaskConical },
   { to: '/studio', label: 'Test Studio', icon: Sparkles },
   { to: '/suites', label: 'Suites', icon: Layers },
   { to: '/targets', label: 'Targets & Catalogs', icon: Database },
   { to: '/schedules', label: 'Schedules', icon: CalendarClock },
-  { to: '/analytics', label: 'Failure Analytics', icon: Activity },
   { to: '/audit', label: 'Audit Log', icon: ClipboardList },
   { to: '/admin', label: 'Admin & Settings', icon: Settings },
 ]

@@ -8,6 +8,7 @@ import type {
   Check,
   CheckRunDetail,
   CheckRunRow,
+  FindingsFeed,
   PageContext,
   RunRequestOut,
   RunRequestSummary,
@@ -277,6 +278,18 @@ export const useUpdateWebhookConfig = () => {
   })
 }
 
-// ---------------- Analytics (Dashboard + Analytics owned by spec #23) ----------------
-export const useAnalytics = <T,>(name: string, params = '') =>
-  useQuery({ queryKey: ['analytics', name, params], queryFn: () => api.get<T>(`/analytics/${name}${params}`) })
+// ---------------- Findings feed — "What's Interesting" (ADR-0009; #33/#34/#35) ----
+/** The two-lane triage feed (`GET /findings`): findings, not raw runs, split
+ *  into Recent-deployments + Overnight with the non-actionable count collapsed.
+ *  Polls so a triager watching the screen sees new regressions land. */
+export const useFindings = ({ windowHours, limit }: { windowHours?: number; limit?: number } = {}) => {
+  const qs = new URLSearchParams()
+  if (windowHours != null) qs.set('window_hours', String(windowHours))
+  if (limit != null) qs.set('limit', String(limit))
+  const suffix = qs.toString() ? `?${qs}` : ''
+  return useQuery({
+    queryKey: ['findings', windowHours ?? null, limit ?? null],
+    queryFn: () => api.get<FindingsFeed>(`/findings${suffix}`),
+    refetchInterval: 15000,
+  })
+}
