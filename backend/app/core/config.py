@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     # force-reclaimed even if still heartbeating, so a wedged run frees its lock.
     MAX_RUN_DURATION_SECONDS: int = 1800
 
+    # ----- Retained history (ADR-0015) ----------------------------------
+    # The single configurable retention knob: check-result history is pruned to
+    # this rolling window. Cost is a non-goal (ADR-0007) — one generous default,
+    # not a tuned budget. The most-recent green per (target, check) is preserved
+    # past the window regardless, so long-stable-check provenance stays honest.
+    RETENTION_WINDOW_DAYS: int = 90
+
     # ----- Telemetry ----------------------------------------------------
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None
