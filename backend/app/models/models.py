@@ -30,6 +30,7 @@ from app.core.enums import (
     RiskTier,
     RunStatus,
     SafetyClass,
+    TestStatus,
 )
 from app.core.ids import new_id, utcnow
 
@@ -97,6 +98,19 @@ class Test(SQLModel, table=True):
     #: Default identity for the Test: None = the target's own SP; else a
     #: registered role-profile it assumes (ADR-0018; enforcement is Spec 2).
     run_as_role: Optional[str] = Field(default=None)
+
+    #: Test Studio lifecycle (ADR-0006 §8): a ``draft`` never runs until a human
+    #: accepts it into ``active``. Defaults to ``active`` so hand-authored and
+    #: seeded Tests are runnable; the Assistant's write-path creates ``draft``.
+    status: TestStatus = Field(default=TestStatus.ACTIVE, index=True)
+    #: How the Test was authored — "human" | "assistant" — for the derivation
+    #: panel. The Assistant sets "assistant"; manual/seed paths leave "human".
+    origin: str = Field(default="human")
+    #: The Assistant's derivation record for an AI-produced Test: chosen SDK
+    #: operation, param provenance, grounding example, coarse risk tier, chosen
+    #: run-as-role + why, suggested counterfactuals/suite + why. What makes an
+    #: AI-produced Test auditable by a stranger (ADR-0006 §8, user story 11).
+    derivation: dict = _json_col()
 
     version: int = Field(default=1)
     enabled: bool = Field(default=True, index=True)
@@ -192,6 +206,41 @@ class EntityVersion(SQLModel, table=True):
     snapshot: dict = _json_col()
     actor: str = Field(default="system")
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Worked-example library (ADR-0006 §9) — the gold Tests the Assistant grounds on
+# ---------------------------------------------------------------------------
+class WorkedExample(SQLModel, table=True):
+    """A gold worked example the Assistant grounds on via ``search_examples``.
+
+    A **curated seed set ships in the repo** (open-source day-one), and the
+    library is **grown by curated suggest-then-confirm promotion** of accepted
+    Tests (ADR-0006 §9). Each example pairs a plain-English **intent** with the
+    open-SDK operation + assertion it should compile to, so the Assistant can
+    retrieve a close prior for a new sentence.
+    """
+
+    __tablename__ = "worked_examples"
+
+    id: str = Field(default_factory=lambda: new_id("ex"), primary_key=True)
+    #: The plain-English sentence this example teaches ("start a cluster …").
+    intent: str = Field(index=True)
+    title: str = ""
+    description: str = ""
+    #: The open-SDK operation the intent compiles to ({service, method, verb, params}).
+    operation: dict = _json_col()
+    handler_key: str = Field(default="databricks_sdk")
+    assertion: str = ""
+    expectation: Expectation = Field(default=Expectation.PASS)
+    #: A paired counterfactual intent/assertion, when the example teaches one.
+    counterfactual: dict = _json_col()
+    tags: list[str] = _json_list()
+    #: True for the repo-seeded gold set; promoted examples are also curated.
+    curated: bool = Field(default=True)
+    #: Set when this example was promoted from an accepted Test (provenance).
+    source_test_id: Optional[str] = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 # ---------------------------------------------------------------------------

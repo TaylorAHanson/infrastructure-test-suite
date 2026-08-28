@@ -14,12 +14,14 @@ import {
 } from 'lucide-react'
 
 import { useAdminSettings } from '../hooks/queries'
+import { AssistantProvider } from '../lib/assistantContext'
+import AssistantShelf from './AssistantShelf'
 
 const NAV = [
   { to: '/', label: 'Dashboard', icon: Gauge, end: true },
   { to: '/runs', label: 'Runs', icon: ListChecks },
   { to: '/tests', label: 'Test Catalog', icon: FlaskConical },
-  { to: '/authoring', label: 'Test Authoring', icon: Sparkles },
+  { to: '/studio', label: 'Test Studio', icon: Sparkles },
   { to: '/suites', label: 'Suites', icon: Layers },
   { to: '/targets', label: 'Targets & Catalogs', icon: Database },
   { to: '/schedules', label: 'Schedules', icon: CalendarClock },
@@ -69,7 +71,11 @@ export default function Layout() {
       </aside>
       <main className="flex-1 overflow-auto">
         <div className="mx-auto max-w-[1400px] p-6">
-          <Outlet />
+          <AssistantProvider>
+            <Outlet />
+            {/* The one app-wide Assistant, reachable from every page (ADR-0012). */}
+            <AssistantShelf />
+          </AssistantProvider>
         </div>
       </main>
     </div>

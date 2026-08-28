@@ -2,13 +2,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api } from '../lib/api'
 import type {
+  AssistantTurnResponse,
   AuditEvent,
+  PageContext,
   RemoteAgent,
   Run,
   Schedule,
+  StudioTest,
   Suite,
   Target,
   TestDefinition,
+  TestVersion,
+  WorkedExample,
 } from '../types'
 
 // ---------------- Catalog ----------------
@@ -41,6 +46,82 @@ export const useGenerateTest = () =>
     mutationFn: (body: { description: string; category?: string }) =>
       api.post<{ spec: Record<string, unknown>; endpoint: string | null }>('/authoring/generate', body),
   })
+
+// ---------------- The Assistant + Test Studio (spec #22) ----------------
+export const useStudioTests = () =>
+  useQuery({ queryKey: ['studio-tests'], queryFn: () => api.get<StudioTest[]>('/tests') })
+
+export const useTestVersions = (testId?: string) =>
+  useQuery({
+    queryKey: ['test-versions', testId],
+    queryFn: () => api.get<TestVersion[]>(`/tests/${testId}/versions`),
+    enabled: !!testId,
+  })
+
+export const useAssistantTurn = () =>
+  useMutation({
+    mutationFn: (body: { turn: string; page_context: PageContext; mode?: string }) =>
+      api.post<AssistantTurnResponse>('/assistant/turn', body),
+  })
+
+export interface DraftCheckBody {
+  operation: { service: string; method: string; verb?: string; params?: Record<string, unknown> }
+  handler_key: string
+  assertion: string
+  kind?: string
+  counterpart_index?: number | null
+  run_as_role?: string | null
+}
+
+export interface CommitDraftBody {
+  name: string
+  description?: string
+  tags?: string[]
+  checks: DraftCheckBody[]
+  run_as_role?: string | null
+  suite_id?: string | null
+  derivation?: Record<string, unknown>
+}
+
+export const useCommitDraft = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CommitDraftBody) => api.post<StudioTest>('/assistant/draft', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['studio-tests'] }),
+  })
+}
+
+export const useAcceptTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (testId: string) => api.post<StudioTest>(`/tests/${testId}/accept`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['studio-tests'] }),
+  })
+}
+
+export const useRollbackTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ testId, version }: { testId: string; version: number }) =>
+      api.post<StudioTest>(`/tests/${testId}/rollback/${version}`),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: ['studio-tests'] })
+      qc.invalidateQueries({ queryKey: ['test-versions', v.testId] })
+    },
+  })
+}
+
+export const usePromoteExample = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (testId: string) =>
+      api.post<{ id: string }>('/assistant/examples/promote', { test_id: testId }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['examples'] }),
+  })
+}
+
+export const useExamples = () =>
+  useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 
 export const useSuites = () =>
   useQuery({ queryKey: ['suites'], queryFn: () => api.get<Suite[]>('/suites') })

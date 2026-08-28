@@ -132,3 +132,109 @@ export interface RemoteAgent {
   last_seen_at?: string | null
   enabled: boolean
 }
+
+// ---------------- Assistant / Test Studio (spec #22) ----------------
+export type TestStudioStatus = 'draft' | 'active'
+
+export interface Operation {
+  service: string
+  method: string
+  verb?: string
+  params?: Record<string, unknown>
+}
+
+export interface StudioTest {
+  id: string
+  name: string
+  description: string
+  tags: string[]
+  status: TestStudioStatus
+  origin: string
+  run_as_role?: string | null
+  derivation?: Record<string, unknown>
+  version: number
+  enabled: boolean
+  updated_at?: string
+  members: {
+    check_id: string
+    kind: string
+    run_as_role?: string | null
+    counterpart_check_id?: string | null
+    sort_order: number
+  }[]
+}
+
+export interface CheckProposal {
+  display_name: string
+  operation: Operation
+  handler_key: string
+  assertion: string
+  expectation: string
+  evaluator: string
+  compilable: boolean
+  risk_tier: string
+  kind: string
+  needs_tier_confirmation: boolean
+}
+
+export interface DraftProposal {
+  name: string
+  description: string
+  checks: CheckProposal[]
+  refusals: { operation: Operation; reason: string; tier: string }[]
+  max_risk_tier: string
+  suggested_counterfactual?: {
+    assertion: string
+    operation: Operation
+    handler_key: string
+    why: string
+  } | null
+  suggested_suite?: { suite_id: string; name: string; why: string } | null
+  suggested_run_as_role?: { role: Record<string, string>; why: string } | null
+  clarifying_question?: string | null
+  derivation: Record<string, unknown>
+}
+
+export interface RcaSuggestion {
+  suggested_cause: string
+  suggested_lane: string
+  confidence: string
+  evidence: Record<string, unknown>
+  model_available: boolean
+  advisory: boolean
+}
+
+export interface AssistantTurnResponse {
+  mode: 'authoring' | 'rca'
+  page: string
+  draft?: DraftProposal
+  rca?: RcaSuggestion
+  clarifying_question?: string
+}
+
+export interface PageContext {
+  page: string
+  target_id?: string | null
+  target_ids?: string[]
+  test_id?: string | null
+  finding?: { check_id: string; target_id?: string | null } | null
+}
+
+export interface WorkedExample {
+  id: string
+  intent: string
+  title: string
+  operation: Operation
+  assertion: string
+  expectation: string
+  tags: string[]
+  curated: boolean
+  source_test_id?: string | null
+}
+
+export interface TestVersion {
+  version: number
+  actor: string
+  created_at: string
+  snapshot: Record<string, unknown>
+}

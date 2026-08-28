@@ -189,3 +189,78 @@ class RunRequestOut(BaseModel):
 # --------------------------- Assistant / compiler ----------------------------
 class CompileRequest(BaseModel):
     assertion: str
+
+
+class PageContextIn(BaseModel):
+    """The context a surface hands the Assistant so its help is page-aware.
+
+    A contract — *what* each page declares (ADR-0012 §2) — not plumbing: the
+    Test being edited, the target(s) on screen, or the finding under triage.
+    """
+
+    page: str = ""
+    target_id: Optional[str] = None
+    target_ids: list[str] = Field(default_factory=list)
+    test_id: Optional[str] = None
+    #: A finding under triage: {"check_id", "target_id"} — routes to RCA.
+    finding: Optional[dict] = None
+
+
+class AssistantTurnIn(BaseModel):
+    """One turn to the app-wide Assistant (ADR-0012): a page context + a turn."""
+
+    turn: str = ""
+    page_context: PageContextIn = Field(default_factory=PageContextIn)
+    #: "auto" lets the harness pick authoring vs RCA from the page context.
+    mode: str = "auto"
+
+
+class DraftCheckIn(BaseModel):
+    """One Check the human is confirming into a Draft (from a proposal)."""
+
+    operation: OperationIn = Field(default_factory=OperationIn)
+    handler_key: str = "databricks_sdk"
+    assertion: str = ""
+    kind: str = "assertion"  # "assertion" | "counterfactual"
+    counterpart_index: Optional[int] = None
+    run_as_role: Optional[str] = None
+
+
+class DraftCommitIn(BaseModel):
+    """Confirm a suggested Draft into a persisted (but not-yet-Active) Test.
+
+    This is the *confirm* half of suggest-then-human-confirms: the human accepts
+    which Checks/suggestions to persist. The Test is created as a ``Draft`` and
+    **never runs** until a separate accept (user story 7/9).
+    """
+
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    checks: list[DraftCheckIn] = Field(default_factory=list)
+    run_as_role: Optional[str] = None
+    suite_id: Optional[str] = None
+    derivation: dict = Field(default_factory=dict)
+
+
+class ExamplePromoteIn(BaseModel):
+    """Promote an accepted Test into the worked-example library (ADR-0006 §9)."""
+
+    test_id: str
+    title: str = ""
+
+
+class AgenticEvalIn(BaseModel):
+    """Judge a plain-text assertion over structured evidence (advisory, ADR-0008)."""
+
+    assertion: str
+    evidence: dict = Field(default_factory=dict)
+    expectation: Expectation = Expectation.PASS
+
+
+class RcaRequestIn(BaseModel):
+    """Ask the Assistant's read-path to suggest a cause + lane for a finding."""
+
+    check_id: str
+    target_id: Optional[str] = None
+    turn: str = ""

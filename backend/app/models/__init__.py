@@ -12,6 +12,7 @@ from app.models.models import (  # noqa: F401
     TargetLease,
     Test,
     TestCheck,
+    WorkedExample,
 )
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "Target",
     "TargetLease",
     "EntityVersion",
+    "WorkedExample",
     "RunRequest",
     "CheckRun",
     "StageOutcome",

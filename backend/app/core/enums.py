@@ -78,6 +78,19 @@ class Evaluator(str, Enum):
     AGENTIC = "agentic"
 
 
+class TestStatus(str, Enum):
+    """A Test's Test Studio lifecycle state (ADR-0006 §8).
+
+    ``draft`` — authored (by the Assistant or a human) but **not yet accepted**;
+    a Draft **never runs** until a human explicitly promotes it. ``active`` — the
+    accepted, runnable state the nightly "all" run and every trigger select.
+    Editing an Active Test creates a new version (versioning, ADR-0001).
+    """
+
+    DRAFT = "draft"
+    ACTIVE = "active"
+
+
 class Expectation(str, Enum):
     """What a Check asserts about its operation's outcome.
 
