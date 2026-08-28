@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     # past the window regardless, so long-stable-check provenance stays honest.
     RETENTION_WINDOW_DAYS: int = 90
 
+    # ----- Findings feed (ADR-0009, #33) --------------------------------
+    # The Recent-deployments lane is a rolling window of CI-triggered,
+    # commit-scoped runs; a failing series older than this (or not
+    # deploy-attributable) defaults to the Overnight lane. One generous knob,
+    # not a tuned budget — cost stays a non-goal (ADR-0007).
+    FINDINGS_RECENT_WINDOW_HOURS: int = 24
+
     # ----- Telemetry ----------------------------------------------------
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None

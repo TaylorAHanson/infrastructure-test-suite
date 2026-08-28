@@ -268,3 +268,51 @@ class RcaRequestIn(BaseModel):
     check_id: str
     target_id: Optional[str] = None
     turn: str = ""
+
+
+# --------------------------- Findings feed (ADR-0009, #33) ----------------
+class FindingOut(BaseModel):
+    """One finding — the current failing state of a ``(target, check)`` series.
+
+    A finding is *not* a raw run: it's the series' current state, stating its
+    failure as ``bucket @ stage`` and carrying the run that produced it so the
+    view can thread provenance from there (#34).
+    """
+
+    check_id: str
+    check_name: str
+    target_id: Optional[str] = None
+    workspace_name: Optional[str] = None
+    run_id: str
+    verdict: str
+    failure_bucket: Optional[str] = None
+    failure_stage: Optional[str] = None
+    #: The ``bucket @ stage`` label (ADR-0001).
+    bucket_at_stage: Optional[str] = None
+    lane: str
+    #: True = a gating (deterministic) result; False = advisory/agentic (ADR-0008).
+    gating: bool = True
+    evaluator: str
+    request_source: str
+    git_sha: str = "unknown"
+    message: str = ""
+    finished_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class LaneOut(BaseModel):
+    """One lane of the feed: its ranked findings + the collapsed non-actionable count."""
+
+    lane: str
+    findings: list[FindingOut] = Field(default_factory=list)
+    #: Nominal/recovered series in this lane, collapsed (ADR-0009 §6).
+    everything_else: int = 0
+
+
+class FindingsFeedOut(BaseModel):
+    """The two-lane triage feed (Recent-deployments first, then Overnight)."""
+
+    generated_at: datetime
+    #: The rolling window (hours) that bounds the Recent-deployments lane.
+    window_hours: int
+    lanes: list[LaneOut]
