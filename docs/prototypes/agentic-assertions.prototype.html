@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Agentic vs deterministic assertions (#11)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --ink:#e6e9ef; --muted:#9aa3b2;
+    --line:#2a2f3a; --pass:#3fb950; --fail:#f85149; --warn:#d29922; --advisory:#58a6ff;
+    --accent:#a371f7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg);color:var(--ink);padding:24px;max-width:1080px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 4px}
+  h2{font-size:15px;margin:22px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  code,.mono{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  .banner{background:#3a2d00;border:1px solid var(--warn);color:#ffd479;padding:8px 12px;
+    border-radius:6px;font-weight:600;margin-bottom:16px;font-size:12.5px}
+  .q{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:8px}
+  .q b{color:var(--accent)}
+  .muted{color:var(--muted)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:14px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:6px;
+    padding:8px 12px;cursor:pointer;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0f1115;font-weight:600}
+  .policy{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+  .policy label{display:block;flex:1;min-width:280px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:6px;padding:10px 12px;cursor:pointer}
+  .policy label.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .policy .name{font-weight:600}
+  .policy .desc{font-size:12px;color:var(--muted);margin-top:2px}
+  table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  .tag{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600}
+  .t-pass{background:rgba(63,185,80,.15);color:var(--pass)}
+  .t-fail{background:rgba(248,81,73,.15);color:var(--fail)}
+  .t-det{background:rgba(88,166,255,.12);color:var(--advisory)}
+  .t-ag{background:rgba(163,113,247,.15);color:var(--accent)}
+  .t-adv{background:rgba(210,153,34,.12);color:var(--warn)}
+  .t-off{background:#262b34;color:var(--muted)}
+  .gate{font-size:22px;font-weight:700;padding:14px 16px;border-radius:8px;margin-top:12px;text-align:center}
+  .gate.pass{background:rgba(63,185,80,.12);color:var(--pass);border:1px solid var(--pass)}
+  .gate.block{background:rgba(248,81,73,.12);color:var(--fail);border:1px solid var(--fail)}
+  .gate small{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:4px}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .tabs button.act{background:var(--accent);color:#0f1115;border-color:var(--accent);font-weight:600}
+  .walk{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:12px 14px;font-size:13px}
+  .walk h3{margin:0 0 6px;font-size:14px}
+  .log{background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:10px 12px;
+    font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:12px;max-height:200px;overflow:auto;white-space:pre-wrap}
+  .stat{display:inline-block;margin-right:20px}
+  .stat b{font-size:20px;display:block}
+  .ev{font-size:11.5px;color:var(--muted)}
+  details summary{cursor:pointer;color:var(--advisory)}
+  .flip{color:var(--fail);font-weight:700}
+</style>
+</head>
+<body>
+  <div class="banner">⚠ PROTOTYPE — throwaway. Answers Wayfinder ticket #11 (agentic vs deterministic assertions). Not production code. Simulated LLM judge; no live model call.</div>
+
+  <h1>What does a non-deterministic verdict do to a fail-closed CI gate?</h1>
+  <div class="q">
+    <b>The decision (#11):</b> Do we support <b>agentic (LLM-judged)</b> assertions alongside deterministic ones — and if so, how do we keep them CI-safe?
+    <div class="muted" style="margin-top:6px">ADR-0001: assertions are authored in plain text, compiled to <b>deterministic</b> structured Checks where possible, and <b>deterministic evaluation is the CI default</b>. The CI gate (ADR-0005) is <b>fail-closed</b>: only a <span class="t-pass tag">pass</span> Verdict lets the pipeline through — every other terminal state blocks. This prototype makes the danger concrete: a judge that flips its verdict flips a green deploy to a blocked one.</div>
+  </div>
+
+  <div class="panel">
+    <h2>Policy under test</h2>
+    <div class="policy" id="policyBox"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <button class="primary" onclick="runOnce()">▶ Run the CI Suite once</button>
+      <button onclick="runN(30)">Run it ×30 (measure determinism)</button>
+      <button onclick="depthToggle()" id="depthBtn">Depth: quick</button>
+      <button onclick="reset()">Reset log</button>
+    </div>
+    <table id="checks"></table>
+    <div id="gate" class="gate"></div>
+    <div id="stats" style="margin-top:12px"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="walk" id="walk"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Run log</h2>
+    <div class="log" id="log">Pick a policy and hit “Run the CI Suite once”. Every run prints each Check’s verdict, whether it gates under the current policy, and the pipeline outcome.</div>
+  </div>
+
+<script>
+/* ============================================================
+   MODEL — a tiny slice of the validation platform (ADR-0001 vocab)
+   A Suite of Checks. Each Check has a plain-text assertion + evidence,
+   and an evaluator that is either:
+     - deterministic: compiles to a structured predicate over evidence
+                      -> same evidence ALWAYS yields the same verdict.
+     - agentic: an LLM judge over the evidence -> verdict sampled with a
+                per-check flip probability (the thing we're measuring).
+   Verdict is fail-closed at the gate: pipeline PASS iff every GATING check passes.
+   ============================================================ */
+
+const CHECKS = [
+  {
+    id:"cluster-policy-allowed",
+    assertion:"Start a cluster under compute-policy P and confirm it's allowed",
+    stage:"OPERATE",
+    evidence:{cluster_state:"RUNNING", policy_id:"P", denied:false, spin_up_s:412},
+    kind:"deterministic",
+    det:"cluster_state == RUNNING && denied == false",
+    detVerdict:"pass"
+  },
+  {
+    id:"noncompliant-denied",
+    assertion:"A non-compliant cluster is correctly DENIED by policy P (counterfactual)",
+    stage:"AUTHORIZE",
+    evidence:{denied:true, denial_stage:"AUTHORIZE", reason:"policy_violation"},
+    kind:"deterministic",
+    det:"denied == true && denial_stage == AUTHORIZE",
+    detVerdict:"pass"
+  },
+  {
+    id:"warehouse-healthy-ish",
+    assertion:"The SQL warehouse came up “healthy-ish” within a reasonable budget",
+    stage:"VERIFY",
+    evidence:{state:"RUNNING", spin_up_s:58, first_query_ms:1900, autoscale_events:2},
+    kind:"agentic",             // fuzzy: "healthy-ish", "reasonable" -> can't compile cleanly
+    flip:0.15,                  // judge flips ~15% of runs on the same evidence
+    trueVerdict:"pass",
+    note:"ADR-0006 §7 would FLAG this at authoring time as non-compilable."
+  },
+  {
+    id:"error-msg-actionable",
+    assertion:"When denied, the error message is “clear and actionable” for the user",
+    stage:"VERIFY",
+    evidence:{denied:true, message:"Cluster creation failed: policy P forbids instance type i3.16xlarge. Choose an approved type."},
+    kind:"agentic",
+    flip:0.22,                  // subjective judgement -> flips more
+    trueVerdict:"pass",
+    note:"Pure judgement call. No structured predicate expresses “actionable”."
+  }
+];
+
+/* ---- Policies: the decision space in #11 ---- */
+const POLICIES = {
+  A:{ name:"A — Deterministic only",
+      desc:"Agentic assertions NOT supported. Non-compilable ones are flagged & deferred (ADR-0006 §7); they never run.",
+      supportsAgentic:false, agenticGates:false },
+  B:{ name:"B — Agentic gates CI",
+      desc:"Agentic supported AND allowed into the fail-closed gate. The strawman — run it ×30 and watch it bite.",
+      supportsAgentic:true, agenticGates:true },
+  C:{ name:"C — Agentic advisory + deterministic-only CI suite  (recommended)",
+      desc:"Agentic supported but NEVER gates. The CI Suite is deterministic-only; agentic Checks run advisory (nightly / “what's interesting”).",
+      supportsAgentic:true, agenticGates:false }
+};
+
+let policy = "B";      // start on the dangerous one so the problem is visible
+let depth = "quick";   // quick vs full (ADR-0007)
+let history = [];      // pipeline outcomes for determinism stat
+
+/* Depth: quick runs the connectivity end (up to AUTHORIZE); full reaches OPERATE/VERIFY.
+   The fuzzy agentic checks live at VERIFY -> only present in a full run. */
+function inDepth(c){ return depth==="full" ? true : (c.stage!=="OPERATE" && c.stage!=="VERIFY"); }
+
+/* How a check behaves under the current policy this run */
+function classify(c){
+  if(c.kind==="deterministic") return {role:"gates", eval:"det"};
+  // agentic:
+  if(!POLICIES[policy].supportsAgentic) return {role:"excluded", eval:"off"};
+  if(POLICIES[policy].agenticGates)     return {role:"gates", eval:"agentic"};
+  return {role:"advisory", eval:"agentic"};
+}
+
+function evalCheck(c){
+  if(c.kind==="deterministic") return c.detVerdict;
+  // simulate the LLM judge: mostly returns trueVerdict, flips with prob c.flip
+  return Math.random() < c.flip ? (c.trueVerdict==="pass"?"fail":"pass") : c.trueVerdict;
+}
+
+/* Run the whole suite once; returns {rows, gate, blockedBy} */
+function runSuite(){
+  const rows=[], gating=[];
+  for(const c of CHECKS){
+    const present = inDepth(c);
+    const cls = classify(c);
+    let verdict = "—";
+    if(present && cls.role!=="excluded") verdict = evalCheck(c);
+    const flipped = c.kind==="agentic" && verdict!=="—" && verdict!==c.trueVerdict;
+    const gates = present && cls.role==="gates" && cls.eval!=="off";
+    rows.push({c, present, cls, verdict, flipped, gates});
+    if(gates) gating.push({c, verdict});
+  }
+  const failing = gating.filter(g=>g.verdict!=="pass");
+  const gate = failing.length===0 ? "pass" : "block";
+  return {rows, gate, blockedBy:failing.map(f=>f.c.id)};
+}
+
+/* ---------- rendering ---------- */
+function badge(kind){
+  if(kind==="deterministic") return '<span class="tag t-det">deterministic</span>';
+  return '<span class="tag t-ag">agentic (LLM judge)</span>';
+}
+function roleBadge(cls){
+  if(cls.role==="gates")    return '<span class="tag t-fail">GATES CI</span>';
+  if(cls.role==="advisory") return '<span class="tag t-adv">advisory only</span>';
+  return '<span class="tag t-off">not run</span>';
+}
+function verdictBadge(v){
+  if(v==="pass") return '<span class="tag t-pass">pass</span>';
+  if(v==="fail") return '<span class="tag t-fail">fail</span>';
+  return '<span class="tag t-off">—</span>';
+}
+
+function renderChecks(res){
+  let h = `<tr><th>Check / assertion</th><th>Type</th><th>Role now</th><th>Verdict</th></tr>`;
+  for(const r of res.rows){
+    const flip = r.flipped ? ' <span class="flip">◀ FLIPPED</span>' : '';
+    h += `<tr>
+      <td><code>${r.c.id}</code><br><span class="ev">“${r.c.assertion}” <span class="muted">(stage ${r.c.stage})</span></span></td>
+      <td>${badge(r.c.kind)}</td>
+      <td>${r.present?roleBadge(r.cls):'<span class="tag t-off">skipped (quick)</span>'}</td>
+      <td>${verdictBadge(r.verdict)}${flip}</td>
+    </tr>`;
+  }
+  document.getElementById("checks").innerHTML = h;
+  const g = document.getElementById("gate");
+  if(res.gate==="pass"){
+    g.className="gate pass"; g.innerHTML = "PIPELINE ✓ PASS <small>fail-closed gate satisfied — deploy proceeds</small>";
+  }else{
+    g.className="gate block";
+    g.innerHTML = `PIPELINE ✗ BLOCKED <small>gating check(s) not passing: ${res.blockedBy.join(", ")}</small>`;
+  }
+}
+
+function log(line){
+  const el=document.getElementById("log");
+  el.textContent = line + "\n" + el.textContent;
+}
+
+function renderStats(){
+  if(history.length===0){ document.getElementById("stats").innerHTML=""; return; }
+  const passes = history.filter(x=>x==="pass").length;
+  const rate = Math.round(passes/history.length*100);
+  const stable = (passes===history.length || passes===0);
+  document.getElementById("stats").innerHTML =
+    `<span class="stat"><b>${history.length}</b><span class="muted">runs</span></span>
+     <span class="stat"><b style="color:${stable?'var(--pass)':'var(--fail)'}">${rate}%</b><span class="muted">passed the gate</span></span>
+     <span class="stat"><b style="color:${stable?'var(--pass)':'var(--fail)'}">${stable?'DETERMINISTIC':'FLAKY'}</b><span class="muted">same deploy, same verdict?</span></span>`;
+}
+
+function runOnce(){
+  const res = runSuite();
+  renderChecks(res);
+  history.push(res.gate);
+  renderStats();
+  const flips = res.rows.filter(r=>r.flipped).map(r=>r.c.id);
+  log(`[${POLICIES[policy].name.split(" ")[0]}·${depth}] gate=${res.gate.toUpperCase()}${flips.length?"  (judge flipped: "+flips.join(",")+")":""}`);
+}
+function runN(n){
+  let flaky=0, last=null, changed=0;
+  for(let i=0;i<n;i++){
+    const res=runSuite(); history.push(res.gate);
+    if(last!==null && res.gate!==last) changed++;
+    last=res.gate;
+    if(i===n-1) renderChecks(res);
+  }
+  renderStats();
+  const passes = history.slice(-n).filter(x=>x==="pass").length;
+  log(`[${POLICIES[policy].name.split(" ")[0]}·${depth}] ${n} runs of the SAME clean deploy → ${passes}/${n} passed the gate. ${passes===n?"Stable ✓":"⚠ FLAKY: a clean deploy was blocked "+(n-passes)+"× by verdict flips."}`);
+}
+function depthToggle(){
+  depth = depth==="quick"?"full":"quick";
+  document.getElementById("depthBtn").textContent = "Depth: "+depth;
+  log(`— depth set to ${depth} ${depth==="quick"?"(connectivity end; OPERATE/VERIFY checks skipped)":"(reaches OPERATE/VERIFY — agentic checks now present)"}`);
+}
+function reset(){ history=[]; renderStats(); document.getElementById("log").textContent="log cleared."; }
+
+function renderPolicies(){
+  let h="";
+  for(const [k,p] of Object.entries(POLICIES)){
+    h+=`<label class="${k===policy?'sel':''}" onclick="setPolicy('${k}')">
+      <div class="name">${p.name}</div><div class="desc">${p.desc}</div></label>`;
+  }
+  document.getElementById("policyBox").innerHTML=h;
+}
+function setPolicy(k){ policy=k; renderPolicies(); log(`— policy → ${POLICIES[k].name}`); runOnce(); }
+
+/* ---------- guided walkthroughs ---------- */
+const WALKS = [
+  {t:"1. Why it bites", run:()=>{policy="B";depth="full";renderPolicies();document.getElementById("depthBtn").textContent="Depth: full";runN(30);},
+   html:`<h3>Agentic verdict inside the fail-closed gate (policy B)</h3>
+     Same clean deploy, 30 identical full runs. The deterministic checks never move. But the two agentic
+     Checks (<code>warehouse-healthy-ish</code>, <code>error-msg-actionable</code>) each flip ~15–22% of the time —
+     and because the gate is fail-closed, <b>one flip blocks the whole pipeline</b>. You'll see a clean deploy
+     blocked several times out of 30. That's a broken gate: it fails builds for no real regression.`},
+  {t:"2. Deterministic never flips", run:()=>{policy="A";depth="full";renderPolicies();document.getElementById("depthBtn").textContent="Depth: full";runN(30);},
+   html:`<h3>Deterministic only (policy A)</h3>
+     The two deterministic Checks compile to structured predicates over the evidence
+     (<code>cluster_state == RUNNING && denied == false</code>). 30 runs, 30 identical PASS verdicts — 100% stable.
+     This is why ADR-0001 made deterministic evaluation the CI default. The cost: the fuzzy assertions
+     (“healthy-ish”, “actionable message”) simply can't be gated — they're flagged at authoring and don't run.`},
+  {t:"3. The recommendation (C)", run:()=>{policy="C";depth="full";renderPolicies();document.getElementById("depthBtn").textContent="Depth: full";runN(30);},
+   html:`<h3>Agentic advisory + deterministic-only CI suite (policy C)</h3>
+     Agentic assertions ARE supported — but they run <b>advisory</b>, never in the gate. The CI Suite gate is
+     computed from the deterministic Checks only, so 30 runs give 30 stable PASSes (green, reliable gate).
+     Meanwhile the agentic Checks still produce verdicts (watch them flip in the table) — those flow to the
+     <b>nightly full run and the “what's interesting” view (#10)</b> as signal, not as a pipeline blocker.
+     Best of both: a rock-solid gate <i>and</i> the expressive fuzzy checks, quarantined out of CI.`},
+  {t:"4. The genuinely fuzzy ones", run:()=>{policy="C";depth="full";renderPolicies();document.getElementById("depthBtn").textContent="Depth: full";runOnce();},
+   html:`<h3>What about assertions that can't be made deterministic?</h3>
+     “healthy-ish”, “clear and actionable” have no structured predicate — <code>search evidence</code> can't
+     compile them. Under A they're refused for CI. Under C they live as advisory agentic Checks: the AI
+     authoring assistant (ADR-0006 §7) <b>flags them at authoring</b> (“this can't gate CI — it'll run advisory”),
+     and their flaky verdicts never touch a pipeline. Look at the table: their role reads
+     <span class="tag t-adv">advisory only</span>, and the gate ignores them.`}
+];
+function renderTabs(){
+  let h="";
+  WALKS.forEach((w,i)=>{ h+=`<button id="tab${i}" onclick="pickTab(${i})">${w.t}</button>`; });
+  document.getElementById("tabs").innerHTML=h;
+}
+function pickTab(i){
+  WALKS.forEach((w,j)=>document.getElementById("tab"+j).classList.toggle("act",i===j));
+  document.getElementById("walk").innerHTML=WALKS[i].html;
+  history=[]; WALKS[i].run(); renderStats();
+}
+
+/* ---------- boot ---------- */
+renderPolicies(); renderTabs(); pickTab(0);
+</script>
+</body>
+</html>
