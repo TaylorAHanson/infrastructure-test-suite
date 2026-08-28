@@ -23,7 +23,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from app.core.enums import Evaluator, Expectation, RiskTier, RunStatus
+from app.core.enums import Evaluator, Expectation, RiskTier, RunStatus, TestStatus
 from app.core.ids import utcnow
 from app.core.operations import Operation
 from app.executors import HandlerContext, get_handler
@@ -141,12 +141,18 @@ def _selections(session: Session, request: RunRequest) -> list[_Selection]:
 
     test_ids = _test_ids_from_request(session, request)
     if not test_ids and not request.check_ids:
-        # No explicit selection => all enabled Tests ("run all", ADR-0017).
-        test_ids = [t.id for t in session.exec(select(Test).where(Test.enabled == True)).all()]  # noqa: E712
+        # No explicit selection => all enabled, Active Tests ("run all",
+        # ADR-0017). A Draft never enters "all" — it can't run until accepted.
+        test_ids = [t.id for t in session.exec(
+            select(Test).where(Test.enabled == True, Test.status == TestStatus.ACTIVE)  # noqa: E712
+        ).all()]
 
     for test_id in test_ids:
         test = session.get(Test, test_id)
         if not test or not test.enabled:
+            continue
+        if test.status == TestStatus.DRAFT:
+            # A Draft never runs, even when named explicitly (user story 9).
             continue
         members = session.exec(
             select(TestCheck).where(TestCheck.test_id == test_id).order_by(TestCheck.sort_order)  # type: ignore[arg-type]
@@ -404,8 +410,42 @@ def execute_check_run(run_id: str) -> None:
             ))
 
         _aggregate(run, check, stage_results)
+        _maybe_judge_agentic(run, check)
         session.add(run)
         session.commit()
+
+
+def _maybe_judge_agentic(run: CheckRun, check: Check) -> None:
+    """Run the pinned advisory judge over an agentic Check's evidence (ADR-0008).
+
+    Only fires for an ``agentic`` Check when a Model-Serving endpoint is actually
+    configured; otherwise it is a no-op and the operation-outcome advisory signal
+    from :func:`_aggregate` stands (demo/local/CI-without-endpoint). The verdict
+    it produces is **advisory only** — ``run.gating`` was set False at fan-out, so
+    this can never affect the fail-closed roll-up. The judge's cited field(s) are
+    recorded on the evidence so the derivation panel can inspect them.
+    """
+    if run.evaluator != Evaluator.AGENTIC:
+        return
+    try:
+        from app.services.agentic_evaluator import evaluate
+        from app.services.assistant import get_model_call
+
+        model_call = get_model_call()
+        if model_call is None:
+            return
+        verdict = evaluate(check.assertion, run.evidence or {}, model_call,
+                           expectation=run.expectation)
+        evidence = dict(run.evidence or {})
+        evidence["_agentic_judge"] = verdict.to_dict()
+        run.evidence = evidence
+        # Advisory verdict — never gates (gating=False set at fan-out).
+        run.verdict = RunStatus.PASS if verdict.passed else RunStatus.FAIL
+        if not verdict.passed and not run.failure_bucket:
+            run.failure_stage = run.failure_stage or "VERIFY"
+            run.failure_bucket = run.failure_bucket or "ADVISORY_JUDGE_FAIL"
+    except Exception as exc:  # noqa: BLE001 - advisory; a judge failure never breaks a run
+        logger.info("Agentic judge skipped (advisory): %s", exc)
 
 
 def _elapsed_ms(run: CheckRun) -> Optional[int]:

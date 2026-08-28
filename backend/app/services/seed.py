@@ -12,8 +12,16 @@ import logging
 
 from sqlmodel import Session, select
 
-from app.core.enums import SafetyClass
-from app.models import Check, Suite, SuiteMember, Target, Test, TestCheck
+from app.core.enums import Expectation, SafetyClass
+from app.models import (
+    Check,
+    Suite,
+    SuiteMember,
+    Target,
+    Test,
+    TestCheck,
+    WorkedExample,
+)
 from app.schemas.schemas import CheckCreate, OperationIn
 from app.services.authoring import build_check_fields
 
@@ -74,8 +82,63 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 ]
 
 
+# The repo-seeded worked-example library (ADR-0006 §9): gold Tests the Assistant
+# grounds on so an open-source install has a working assistant on day one.
+WORKED_EXAMPLES: list[dict] = [
+    dict(
+        intent="run a SQL query on the warehouse and confirm it returns rows",
+        title="SQL warehouse returns rows",
+        operation=dict(service="statement_execution", method="execute_statement", verb="GET",
+                       params={"statement": "SELECT 1", "demo_row_count": 1}),
+        handler_key="sql_warehouse",
+        assertion="the query returns at least one row",
+        tags=["sql", "warehouse", "connectivity"]),
+    dict(
+        intent="list Unity Catalog catalogs to prove UC access",
+        title="Unity Catalog listing",
+        operation=dict(service="catalogs", method="list", params={"demo_row_count": 3}),
+        handler_key="sql_warehouse",
+        assertion="the query returns at least one row",
+        tags=["uc", "governance", "catalog"]),
+    dict(
+        intent="check outbound egress to an external HTTPS endpoint returns 200",
+        title="Outbound egress probe",
+        operation=dict(service="http", method="get",
+                       params={"url": "https://example.com", "demo_status_code": 200}),
+        handler_key="outbound_http",
+        assertion="HTTP status is 200",
+        tags=["egress", "connectivity", "network"]),
+    dict(
+        intent="start a cluster under the compute policy and confirm it is allowed",
+        title="Cluster policy enforcement (with counterfactual)",
+        operation=dict(service="clusters", method="create", params={}),
+        handler_key="databricks_sdk",
+        assertion="the operation succeeds",
+        counterfactual=dict(
+            assertion="a non-compliant cluster is denied by policy",
+            operation=dict(service="clusters", method="create", params={"demo_outcome": "deny"})),
+        tags=["policy", "safety", "cluster"]),
+]
+
+
 def _make_check(spec: dict) -> Check:
     return Check(**build_check_fields(CheckCreate(**spec)))
+
+
+def _seed_examples(session: Session) -> int:
+    """Seed the worked-example library (idempotent within a fresh seed)."""
+    if session.exec(select(WorkedExample)).first():
+        return 0
+    for spec in WORKED_EXAMPLES:
+        session.add(WorkedExample(
+            intent=spec["intent"], title=spec["title"], description=spec["intent"],
+            operation=spec["operation"], handler_key=spec["handler_key"],
+            assertion=spec["assertion"], expectation=Expectation.PASS,
+            counterfactual=spec.get("counterfactual", {}), tags=spec["tags"],
+            curated=True,
+        ))
+    session.commit()
+    return len(WORKED_EXAMPLES)
 
 
 def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> None:
@@ -84,6 +147,7 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
         logger.info("Seed skipped: checks already present.")
         return
 
+    _seed_examples(session)  # worked-example library (ADR-0006 §9)
     logger.info("Seeding Check/Test/Suite exemplars...")
     checks: dict[str, Check] = {}
     for key, spec in CHECK_SPECS:

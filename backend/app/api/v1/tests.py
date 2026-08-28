@@ -110,3 +110,58 @@ def update_test(test_id: str, payload: TestUpdate, session: Session = Depends(ge
     record_audit(session, actor=actor, action="test.update", entity_type="test", entity_id=test.id,
                  summary=f"Updated test {test.name}", before=before, after=out)
     return out
+
+
+@router.post("/{test_id}/accept")
+def accept_test(test_id: str, session: Session = Depends(get_session),
+                actor: str = Query("api-user")) -> dict:
+    """Promote a Draft Test to Active (explicit human accept, ADR-0006 §8)."""
+    from app.services.assistant import accept_test as _accept
+
+    try:
+        test = _accept(session, test_id, actor=actor)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return _test_out(session, test)
+
+
+@router.get("/{test_id}/versions")
+def list_test_versions(test_id: str, session: Session = Depends(get_session)) -> list[dict]:
+    versions = versioning.list_versions(session, "test", test_id)
+    return [{"version": v.version, "actor": v.actor, "created_at": v.created_at, "snapshot": v.snapshot}
+            for v in versions]
+
+
+@router.post("/{test_id}/rollback/{version}")
+def rollback_test(test_id: str, version: int, session: Session = Depends(get_session),
+                  actor: str = Query("api-user")) -> dict:
+    """Restore a prior Test version as a new current version (ADR-0001)."""
+    test = session.get(Test, test_id)
+    if not test:
+        raise HTTPException(404, "test not found")
+    snap = versioning.get_version(session, "test", test_id, version)
+    if not snap:
+        raise HTTPException(404, "version not found")
+    before = _test_out(session, test)
+    data = snap.snapshot
+    for key in ("name", "description", "tags", "run_as_role", "status", "origin",
+                "derivation", "enabled"):
+        if key in data:
+            setattr(test, key, data[key])
+    if isinstance(data.get("members"), list):
+        _set_members(session, test.id, [
+            TestCheckIn(check_id=m["check_id"], kind=m.get("kind", "assertion"),
+                        run_as_role=m.get("run_as_role"),
+                        counterpart_check_id=m.get("counterpart_check_id"))
+            for m in data["members"]
+        ])
+    test.version += 1
+    test.updated_at = utcnow()
+    session.add(test)
+    session.commit()
+    session.refresh(test)
+    out = _test_out(session, test)
+    versioning.snapshot(session, "test", test.id, test.version, out, actor)
+    record_audit(session, actor=actor, action="test.rollback", entity_type="test", entity_id=test.id,
+                 summary=f"Rolled test back to v{version}", before=before, after=out)
+    return out
