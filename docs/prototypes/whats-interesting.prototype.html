@@ -1,0 +1,1009 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What's Interesting — validation triage (prototype #10)</title>
+<!--
+  THROWAWAY PROTOTYPE — decision ticket #10 ("what's interesting" triage view).
+  Three structurally-different variants of the same view, switchable via ?variant=A|B|C
+  and the floating bottom bar (or ← / → keys). Data is faked but faithful to the
+  post-rebuild model (ADR-0001 stage spine, ADR-0002 safety classes, ADR-0007 quick/full).
+  Not production code. Capture on a prototype/ branch; fold the winner into the real page.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ink: #0b1220;
+    --ink-soft: #1b2435;
+    --panel: #111a2b;
+    --panel-2: #0e1626;
+    --edge: #22304a;
+    --edge-soft: #1a2740;
+    --accent: #ff6b3d;
+    --text: #e6edf3;
+    --muted: #8a97ad;
+    --pass: #3fb950;
+    --fail: #f85149;
+    --warn: #d29922;
+    --skip: #6e7681;
+    --info: #58a6ff;
+    --flaky: #a371f7;
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  /* ---------- shell ---------- */
+  .shell { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 256px; flex-shrink: 0;
+    border-right: 1px solid var(--edge);
+    background: var(--ink);
+    padding: 16px;
+    position: sticky; top: 0; height: 100vh;
+    display: flex; flex-direction: column;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px; margin-bottom: 22px; }
+  .brand svg { color: var(--accent); }
+  .brand-name { font-size: 13px; font-weight: 600; color: #fff; }
+  .brand-sub { font-size: 11px; color: var(--muted); }
+  .nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+  .nav a {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: 500; color: var(--muted);
+    text-decoration: none; transition: background .12s, color .12s;
+  }
+  .nav a:hover { background: var(--ink-soft); color: #fff; }
+  .nav a.active { background: var(--ink-soft); color: #fff; }
+  .nav a.active svg { color: var(--accent); }
+  .nav .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fail); margin-left: auto; }
+  .env-box {
+    margin-top: 16px; border: 1px solid var(--edge); background: var(--panel);
+    border-radius: 10px; padding: 12px; font-size: 11px; color: var(--muted);
+  }
+  .env-box .row { display: flex; justify-content: space-between; }
+  .env-box .row + .row { margin-top: 4px; }
+
+  .main { flex: 1; overflow-x: hidden; }
+  .main-inner { max-width: 1400px; margin: 0 auto; padding: 24px 28px 96px; }
+
+  /* ---------- shared header / context strip ---------- */
+  .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  .page-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .variant-tag {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--edge); border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+  }
+
+  .context-strip {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    border: 1px solid var(--edge); background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 20px;
+  }
+  .ctx-item { display: flex; flex-direction: column; gap: 2px; }
+  .ctx-label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .ctx-value { font-size: 13px; color: var(--text); font-weight: 500; }
+  .ctx-value .mono { font-family: var(--font-mono); }
+  .ctx-sep { width: 1px; align-self: stretch; background: var(--edge); }
+  .ctx-verdict {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 8px;
+    font-weight: 700; font-size: 13px; padding: 6px 12px; border-radius: 8px;
+    background: rgba(248,81,73,.12); color: var(--fail); border: 1px solid rgba(248,81,73,.35);
+  }
+
+  /* ---------- generic bits ---------- */
+  .mono { font-family: var(--font-mono); }
+  .card { border: 1px solid var(--edge); background: var(--panel); border-radius: 12px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    font-family: var(--font-mono);
+  }
+  .chip-fail { background: rgba(248,81,73,.14); color: var(--fail); }
+  .chip-warn { background: rgba(210,153,34,.16); color: var(--warn); }
+  .chip-flaky { background: rgba(163,113,247,.16); color: var(--flaky); }
+  .chip-pass { background: rgba(63,185,80,.14); color: var(--pass); }
+  .chip-info { background: rgba(88,166,255,.14); color: var(--info); }
+  .chip-skip { background: rgba(110,118,129,.18); color: var(--muted); }
+  .sev-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  .safety-tag { font-size: 10px; font-family: var(--font-mono); padding: 1px 6px; border-radius: 5px; letter-spacing: .02em; }
+  .safety-ro { background: rgba(88,166,255,.13); color: var(--info); }
+  .safety-prod { background: rgba(248,81,73,.13); color: var(--fail); }
+  .safety-sandbox { background: rgba(63,185,80,.13); color: var(--pass); }
+
+  /* stage spine */
+  .spine { display: flex; gap: 2px; align-items: center; }
+  .spine .seg {
+    height: 6px; width: 20px; border-radius: 2px; background: var(--edge);
+    position: relative;
+  }
+  .spine .seg.pass { background: var(--pass); }
+  .spine .seg.fail { background: var(--fail); }
+  .spine .seg.blocked { background: var(--info); }
+  .spine-label { font-family: var(--font-mono); font-size: 10px; color: var(--muted); margin-left: 8px; }
+
+  /* sparkline of last verdicts */
+  .spark { display: inline-flex; gap: 3px; align-items: center; }
+  .spark i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; }
+  .spark i.p { background: var(--pass); }
+  .spark i.f { background: var(--fail); }
+  .spark i.e { background: var(--warn); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    border: 1px solid var(--edge); background: var(--ink-soft); color: #fff;
+    border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: 500;
+    font-family: var(--font-sans);
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn-ghost { background: transparent; color: var(--muted); }
+
+  /* ============ VARIANT A — triage feed ============ */
+  .summary-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat-tile {
+    flex: 1; min-width: 130px; border: 1px solid var(--edge); background: var(--panel);
+    border-radius: 12px; padding: 14px 16px;
+  }
+  .stat-tile .n { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .stat-tile .l { font-size: 11px; color: var(--muted); margin-top: 6px; text-transform: uppercase; letter-spacing: .05em; }
+  .stat-tile.crit { border-color: rgba(248,81,73,.4); }
+  .stat-tile.crit .n { color: var(--fail); }
+  .stat-tile.flaky .n { color: var(--flaky); }
+  .stat-tile.good .n { color: var(--pass); }
+
+  .feed { display: flex; flex-direction: column; gap: 10px; }
+  .finding {
+    display: grid; grid-template-columns: 4px 1fr; gap: 0; border: 1px solid var(--edge);
+    background: var(--panel); border-radius: 12px; overflow: hidden;
+  }
+  .finding .stripe { background: var(--fail); }
+  .finding.f-flaky .stripe { background: var(--flaky); }
+  .finding.f-stale .stripe { background: var(--skip); }
+  .finding.f-recovered .stripe { background: var(--pass); }
+  .finding.f-info .stripe { background: var(--info); }
+  .finding .body { padding: 14px 16px; }
+  .finding.dim { opacity: .62; }
+  .f-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .f-rank { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .f-title { font-size: 15px; font-weight: 600; }
+  .f-meta { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  .f-meta .k { color: var(--muted); }
+  .f-meta .v { color: var(--text); }
+  .f-targets { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
+  .tchip { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 6px; border: 1px solid var(--edge); color: var(--text); background: var(--ink); }
+  .tchip.more { color: var(--muted); border-style: dashed; }
+  .correlate { margin-top: 10px; font-size: 12px; color: var(--warn); display: flex; align-items: center; gap: 7px; }
+  .nominal-row {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    border: 1px dashed var(--edge); border-radius: 12px; color: var(--muted); font-size: 13px;
+  }
+  .group-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 20px 0 8px; }
+
+  /* ============ VARIANT B — fleet matrix ============ */
+  .matrix-wrap { border: 1px solid var(--edge); border-radius: 12px; background: var(--panel); overflow: hidden; }
+  .matrix-legend { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding: 12px 16px; border-bottom: 1px solid var(--edge); font-size: 12px; color: var(--muted); }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-cell { width: 14px; height: 14px; border-radius: 3px; }
+  .matrix-scroll { overflow-x: auto; }
+  table.matrix { border-collapse: collapse; width: 100%; min-width: 780px; }
+  table.matrix th, table.matrix td { border-bottom: 1px solid var(--edge-soft); }
+  table.matrix thead th {
+    position: sticky; top: 0; background: var(--panel-2); z-index: 2;
+    font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .03em;
+    padding: 10px 6px; text-align: center; vertical-align: bottom; font-family: var(--font-mono);
+  }
+  table.matrix thead th.col-regressed { color: var(--fail); }
+  table.matrix th.rowhead {
+    position: sticky; left: 0; background: var(--panel); z-index: 1; text-align: left;
+    padding: 8px 12px; min-width: 210px; text-transform: none; letter-spacing: 0;
+  }
+  table.matrix thead th.corner { left: 0; z-index: 3; background: var(--panel-2); }
+  .rowhead-inner { display: flex; align-items: center; gap: 8px; }
+  .rowhead-name { font-family: var(--font-mono); font-size: 12px; color: var(--text); }
+  .group-head td { background: var(--panel-2); padding: 6px 12px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  td.cell { padding: 6px; text-align: center; }
+  .cell-box {
+    width: 26px; height: 26px; border-radius: 6px; margin: 0 auto; display: flex; align-items: center; justify-content: center;
+    position: relative; font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  }
+  .cell-pass { background: rgba(63,185,80,.16); color: var(--pass); }
+  .cell-fail { background: rgba(248,81,73,.18); color: var(--fail); }
+  .cell-flaky { background: rgba(163,113,247,.18); color: var(--flaky); }
+  .cell-blocked { background: rgba(88,166,255,.16); color: var(--info); }
+  .cell-na { background: transparent; color: var(--skip); }
+  .cell-box.changed { outline: 2px solid currentColor; outline-offset: -1px; box-shadow: 0 0 0 3px rgba(248,81,73,.12); }
+  .cell-box.recovered { outline: 2px dashed var(--pass); color: var(--pass); }
+  .matrix-side { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .side-card { flex: 1; min-width: 260px; }
+  .side-card h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--edge); }
+  .side-row { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--edge-soft); font-size: 13px; }
+  .side-row:last-child { border-bottom: none; }
+  .side-row .count { margin-left: auto; font-family: var(--font-mono); font-weight: 600; }
+
+  /* ============ VARIANT C — change diff ============ */
+  .change-hero {
+    border: 1px solid var(--edge); border-radius: 14px; overflow: hidden; margin-bottom: 20px;
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  }
+  .change-hero .top { display: flex; gap: 16px; align-items: flex-start; padding: 18px 20px; }
+  .commit-icon { width: 40px; height: 40px; border-radius: 10px; background: var(--ink-soft); display: flex; align-items: center; justify-content: center; color: var(--accent); flex-shrink: 0; }
+  .commit-msg { font-size: 16px; font-weight: 600; }
+  .commit-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .commit-meta .mono { color: var(--text); }
+  .delta-bar { display: flex; border-top: 1px solid var(--edge); }
+  .delta-cell { flex: 1; padding: 14px 20px; border-right: 1px solid var(--edge); }
+  .delta-cell:last-child { border-right: none; }
+  .delta-cell .k { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .delta-cell .v { font-size: 20px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .delta-cell .d { font-size: 12px; font-weight: 600; margin-left: 8px; }
+  .d-down { color: var(--fail); } .d-up { color: var(--pass); } .d-flat { color: var(--muted); }
+
+  .bucket { border: 1px solid var(--edge); border-radius: 12px; background: var(--panel); margin-bottom: 12px; overflow: hidden; }
+  .bucket.new-bucket { border-color: rgba(248,81,73,.4); }
+  .bucket-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: default; }
+  .bucket-head .stage-badge { font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 5px; background: var(--ink-soft); color: var(--muted); }
+  .bucket-name { font-size: 14px; font-weight: 600; font-family: var(--font-mono); }
+  .bucket-delta { margin-left: auto; font-size: 12px; display: flex; align-items: center; gap: 12px; }
+  .bucket-body { border-top: 1px solid var(--edge-soft); padding: 6px 0; }
+  .move-row { display: flex; align-items: center; gap: 12px; padding: 9px 16px; font-size: 13px; }
+  .move-row + .move-row { border-top: 1px solid var(--edge-soft); }
+  .move-in { color: var(--fail); font-family: var(--font-mono); font-size: 11px; width: 44px; }
+  .move-out { color: var(--pass); font-family: var(--font-mono); font-size: 11px; width: 44px; }
+  .why-note { font-size: 12px; color: var(--muted); padding: 4px 16px 12px; }
+  .why-note strong { color: var(--warn); font-weight: 600; }
+  .noise-tray { border: 1px dashed var(--edge); border-radius: 12px; padding: 14px 16px; margin-top: 8px; }
+  .noise-head { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+  .noise-body { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .noise-item { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+
+  /* ============ VARIANT A2 — quiet triage feed (pared down) ============ */
+  .run-line { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:13px; color:var(--muted); margin-bottom:14px; padding:10px 14px; border:1px solid var(--edge); border-radius:10px; background:var(--panel); }
+  .run-line .mono { color:var(--text); }
+  .run-line .gate { margin-left:auto; color:var(--fail); font-weight:700; display:inline-flex; gap:6px; align-items:center; }
+  .count-line { font-size:13px; color:var(--muted); margin-bottom:16px; }
+  .count-line b { color:var(--text); font-variant-numeric:tabular-nums; }
+  .count-line .crit { color:var(--fail); } .count-line .flaky { color:var(--flaky); } .count-line .good { color:var(--pass); }
+
+  .qfeed { display:flex; flex-direction:column; gap:8px; }
+  details.qf { border:1px solid var(--edge); background:var(--panel); border-radius:12px; overflow:hidden; }
+  details.qf > summary { list-style:none; cursor:pointer; padding:14px 16px; display:flex; align-items:center; gap:12px; }
+  details.qf > summary::-webkit-details-marker { display:none; }
+  details.qf > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .qf-dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; background:var(--fail); }
+  .qf.q-flaky .qf-dot { background:var(--flaky); }
+  .qf-what { font-weight:600; font-size:14px; }
+  .qf-count { color:var(--muted); font-size:13px; }
+  .qf-since { margin-left:auto; font-size:12px; color:var(--muted); white-space:nowrap; }
+  .qf-since .mono { color:var(--warn); }
+  .qf-chev { color:var(--muted); transition:transform .15s; font-size:16px; }
+  details.qf[open] .qf-chev { transform:rotate(90deg); }
+  .qf-detail { padding:14px 16px 16px 40px; border-top:1px solid var(--edge-soft); display:flex; flex-direction:column; gap:12px; }
+  .qf-cause { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+  .commit-thread { display:flex; align-items:center; gap:10px; font-size:12px; flex-wrap:wrap; }
+  .ct-node { display:flex; flex-direction:column; gap:2px; border:1px solid var(--edge); border-radius:8px; padding:6px 10px; background:var(--ink); }
+  .ct-node .sha { font-family:var(--font-mono); }
+  .ct-node .when { color:var(--muted); font-size:11px; }
+  .ct-good { border-color:rgba(63,185,80,.4); } .ct-good .sha { color:var(--pass); }
+  .ct-bad { border-color:rgba(248,81,73,.4); } .ct-bad .sha { color:var(--fail); }
+  .ct-arrow { color:var(--muted); }
+  .ct-between { color:var(--muted); font-style:italic; }
+
+  .rca-box { border:1px dashed var(--accent); border-radius:10px; padding:10px 12px; background:rgba(255,107,61,.06); }
+  .rca-q { display:flex; align-items:center; gap:8px; }
+  .rca-q svg { color:var(--accent); flex-shrink:0; }
+  .rca-input { flex:1; background:var(--ink); border:1px solid var(--edge); border-radius:7px; padding:6px 10px; color:var(--text); font-size:12px; font-family:var(--font-sans); }
+  .rca-ans { margin-top:8px; font-size:12px; color:var(--muted); border-left:2px solid var(--accent); padding-left:10px; line-height:1.5; }
+  .rca-ans .mono { color:var(--text); }
+
+  /* ============ VARIANT A3 — two lanes ============ */
+  .lane { margin-bottom: 22px; }
+  .lane-head { display:flex; align-items:center; gap:14px; padding:0 2px 10px; }
+  .lane-title { font-size:15px; font-weight:700; }
+  .lane-ref { font-size:12px; color:var(--muted); margin-top:2px; }
+  .lane-ref .mono { color:var(--text); }
+  .lane-gate { margin-left:auto; color:var(--fail); font-weight:700; font-size:12px; white-space:nowrap; }
+  .lane-count { margin-left:auto; color:var(--muted); font-size:12px; white-space:nowrap; }
+  .lane-deploy { border-left:3px solid var(--accent); padding-left:12px; }
+
+  .deploy-scroll { max-height:340px; overflow-y:auto; border:1px solid var(--edge); border-radius:12px; background:var(--panel); }
+  .deploy-scroll::-webkit-scrollbar { width:10px; }
+  .deploy-scroll::-webkit-scrollbar-thumb { background:var(--edge); border-radius:6px; }
+  details.deploy { border-bottom:1px solid var(--edge-soft); }
+  details.deploy > summary { list-style:none; cursor:pointer; padding:11px 14px; display:flex; align-items:center; gap:12px; }
+  details.deploy > summary::-webkit-details-marker { display:none; }
+  details.deploy > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  details.deploy.dep-fail > summary { background:rgba(248,81,73,.05); }
+  .dep-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .dep-dot.d-fail { background:var(--fail); } .dep-dot.d-pass { background:var(--pass); }
+  .deploy .sha { font-size:12px; color:var(--info); flex-shrink:0; }
+  .dep-msg { font-size:13px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .dep-meta { font-size:12px; color:var(--muted); white-space:nowrap; flex-shrink:0; }
+  .dep-summary { margin-left:auto; font-size:12px; white-space:nowrap; flex-shrink:0; font-variant-numeric:tabular-nums; }
+  .deploy .qf-chev { font-size:16px; color:var(--muted); transition:transform .15s; flex-shrink:0; }
+  details.deploy[open] > summary .qf-chev { transform:rotate(90deg); }
+  .dep-body { padding:10px 14px 14px; border-top:1px solid var(--edge-soft); background:var(--panel-2); }
+  .dep-clean { font-size:12px; color:var(--muted); padding:4px 2px; }
+  .dep-sentinel { padding:14px; text-align:center; font-size:11px; color:var(--muted); font-style:italic; }
+
+  .everything-else { margin-top:8px; border:1px dashed var(--edge); border-radius:12px; background:transparent; }
+  .everything-else > summary { list-style:none; cursor:pointer; padding:12px 16px; color:var(--muted); font-size:13px; display:flex; align-items:center; gap:10px; }
+  .everything-else > summary::-webkit-details-marker { display:none; }
+  .everything-else > summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .everything-else b { color:var(--text); font-variant-numeric:tabular-nums; }
+  .everything-else[open] > summary { border-bottom:1px solid var(--edge-soft); }
+  .everything-else .qf-chev { font-size:16px; transition:transform .15s; }
+  .everything-else[open] > summary .qf-chev { transform:rotate(90deg); }
+  .ee-body { padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+  .ee-row { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+  /* ---------- switcher ---------- */
+  .switcher {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 4px; z-index: 100;
+    background: rgba(5,10,20,.92); border: 1px solid var(--accent);
+    border-radius: 999px; padding: 6px 8px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+    backdrop-filter: blur(6px);
+  }
+  .switcher button {
+    background: transparent; border: none; color: var(--muted); cursor: pointer;
+    width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+  .switcher button:hover { background: var(--ink-soft); color: #fff; }
+  .switcher .label { font-size: 12px; font-weight: 600; color: #fff; padding: 0 10px; white-space: nowrap; font-family: var(--font-mono); }
+  .switcher .label .sub { color: var(--muted); font-weight: 500; }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      <div>
+        <div class="brand-name">Regression Validation</div>
+        <div class="brand-sub">Databricks validation platform</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="env-box">
+      <div class="row"><span>Environment</span><span style="color:#fff">field-eng</span></div>
+      <div class="row"><span>Mode</span><span style="color:var(--pass)">Live</span></div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="main-inner" id="view"></div>
+  </main>
+</div>
+
+<div class="switcher" id="switcher">
+  <button id="prev" aria-label="Previous variant">‹</button>
+  <span class="label" id="sw-label"></span>
+  <button id="next" aria-label="Next variant">›</button>
+</div>
+
+<script>
+/* ---------------- faithful-but-fake data (post-rebuild model) ---------------- */
+const STAGES = ['RESOLVE','CONNECT','TLS','AUTHENTICATE','AUTHORIZE','OPERATE','VERIFY'];
+const STAGE_SHORT = ['RSLV','CONN','TLS','AUTHN','AUTHZ','OPER','VRFY'];
+
+const RUN = {
+  suite: 'core-connectivity',
+  depth: 'full',
+  trigger: 'GitHub Action',
+  targets: 98,
+  commit: 'a1f2c9d',
+  commitMsg: 'bump databricks-sdk 0.31 + rotate M2M service-principal creds',
+  author: 'you',
+  ago: '14 min ago',
+  prevGreen: 84,
+  nowGreen: 78,
+};
+
+// findings, pre-scored by "interestingness" (new regression > newly flaky > new-ish > recovered > stale)
+const FINDINGS = [
+  {
+    kind: 'regression', score: 98,
+    title: 'Authentication failing on 6 targets',
+    check: 'oauth-m2m-auth', stage: 3, bucket: 'AUTH_TOKEN_EXPIRED',
+    connectable: true, functional: false,
+    firstSeen: 'this run', sinceSha: 'a1f2c9d',
+    targets: ['field-eng-prod-aws-us-east','field-eng-prod-gcp','demo-shard-42','demo-shard-51','sandbox-us-west-2','partner-poc-03'],
+    correlate: 'All 6 share service-principal sp-rotate-2026 — rotated in this commit.',
+    verdicts: ['p','p','p','p','p','f'],
+  },
+  {
+    kind: 'regression', score: 95,
+    title: 'Unity Catalog grant check denied — systemic across 12 targets',
+    check: 'uc-grant-read', stage: 4, bucket: 'PERMISSION_DENIED',
+    connectable: true, functional: false,
+    firstSeen: 'this run', sinceSha: 'a1f2c9d',
+    targets: ['field-eng-prod-aws-us-east','field-eng-prod-azure','customer-mirror-01','customer-mirror-02','analytics-ro-prod','emea-prod-01','emea-prod-02','apac-prod-01'],
+    extra: 4,
+    correlate: 'Spans 3 environments + all cloud regions → shared metastore grant, not per-target.',
+    verdicts: ['p','p','p','p','p','f'],
+  },
+  {
+    kind: 'flaky', score: 74,
+    title: 'SQL warehouse cold-start is newly flaky',
+    check: 'sql-warehouse-cold-start', stage: 5, bucket: 'OPERATION_TIMEOUT',
+    connectable: true, functional: false,
+    firstSeen: '3 runs ago', sinceSha: null,
+    targets: ['emea-prod-02','apac-prod-01','sandbox-us-west-2'],
+    correlate: 'Oscillating pass/fail over last 6 runs — not correlated to this commit. Likely serverless cold-start latency.',
+    verdicts: ['p','f','p','f','p','f'],
+  },
+  {
+    kind: 'stale', score: 40,
+    title: 'DNS resolution still failing (5 days)',
+    check: 'dns-resolve', stage: 0, bucket: 'DNS_RESOLUTION',
+    connectable: false, functional: false,
+    firstSeen: '5 days ago', sinceSha: null,
+    targets: ['sandbox-eu-west-2'],
+    correlate: 'Known / pre-existing — private DNS zone teardown. Tracked, not new.',
+    verdicts: ['f','f','f','f','f','f'],
+  },
+  {
+    kind: 'info', score: 30,
+    title: 'Destructive op correctly blocked on prod-for-us (expected)',
+    check: 'catalog-drop-guard', stage: 4, bucket: 'BLOCKED_BY_SAFETY',
+    connectable: true, functional: true, counterfactual: true,
+    firstSeen: 'this run', sinceSha: null,
+    targets: ['field-eng-prod-aws-us-east'],
+    correlate: 'Counterfactual check: pass = correctly denied. Safety class prod-for-us caps at R1; drop is R2.',
+    verdicts: ['p','p','p','p','p','p'],
+  },
+  {
+    kind: 'recovered', score: 20,
+    title: '4 targets recovered since last run',
+    check: 'serving-endpoint-ping', stage: 6, bucket: null,
+    connectable: true, functional: true,
+    firstSeen: null, sinceSha: 'a1f2c9d',
+    targets: ['dev-scratch-11','dev-scratch-12','qa-eu-01','qa-eu-02'],
+    correlate: 'Endpoint warm-up fix in this commit — back to green.',
+    verdicts: ['f','f','p','f','p','p'],
+  },
+];
+
+const NOMINAL = 71;
+
+// ---- recent deployments (variant A3, lane 1): 24h of CI runs, newest first ----
+const DEPLOYS = [
+  { sha:'a1f2c9d', msg:'bump databricks-sdk 0.31 + rotate M2M service-principal creds', author:'you', ago:'14m ago', verdict:'fail', targets:98, finding:'oauth-m2m-auth' },
+  { sha:'7c3d0a1', msg:'add serving-endpoint cold-start warmup retry', author:'you', ago:'2h ago', verdict:'pass', targets:98 },
+  { sha:'3b9f22e', msg:'docs: expand target-onboarding runbook', author:'a teammate', ago:'3h ago', verdict:'pass', targets:12 },
+  { sha:'e4a7c05', msg:'tighten uc-grant-read assertion evidence', author:'a teammate', ago:'4h ago', verdict:'pass', targets:98 },
+  { sha:'0d1b8f3', msg:'add apac-prod-01 to core-connectivity suite', author:'a teammate', ago:'5h ago', verdict:'pass', targets:99 },
+  { sha:'b62e491', msg:'handler: retry TLS on transient reset', author:'you', ago:'6h ago', verdict:'pass', targets:98 },
+  { sha:'f90c7aa', msg:'chore: pin serverless warehouse channel', author:'a teammate', ago:'7h ago', verdict:'pass', targets:98 },
+  { sha:'2a5d3c8', msg:'seed demo-shard-51 catalog + schema', author:'a teammate', ago:'8h ago', verdict:'pass', targets:14 },
+  { sha:'cc1074b', msg:'fix flaky job-submit-run timeout window', author:'you', ago:'9h ago', verdict:'pass', targets:98 },
+  { sha:'71ee3f2', msg:'raise concurrency cap 12→16 for nightly', author:'a teammate', ago:'10h ago', verdict:'pass', targets:98 },
+  { sha:'9e2b1c4', msg:'refactor stage-spine mapper (RESOLVE→VERIFY)', author:'you', ago:'11h ago', verdict:'pass', targets:98 },
+  { sha:'44a9d0e', msg:'add emea-prod-02 service principal', author:'a teammate', ago:'13h ago', verdict:'pass', targets:98 },
+  { sha:'8fb2137', msg:'safety: cap prod-for-us at R1 in manifest', author:'you', ago:'15h ago', verdict:'pass', targets:98 },
+  { sha:'1c6e0aa', msg:'docs: OSS quickstart for new handlers', author:'a teammate', ago:'17h ago', verdict:'pass', targets:5 },
+  { sha:'d3f8b52', msg:'add serving-endpoint-ping check', author:'a teammate', ago:'19h ago', verdict:'pass', targets:98 },
+  { sha:'a70c194', msg:'bump lakebase client 2.4', author:'you', ago:'21h ago', verdict:'pass', targets:98 },
+  { sha:'6b5e2f0', msg:'nightly: switch depth default to quick', author:'a teammate', ago:'23h ago', verdict:'pass', targets:98 },
+];
+
+// ---- matrix data (variant B): representative rows x check columns ----
+const CHECKS = ['dns-resolve','oauth-m2m-auth','uc-grant-read','sql-warehouse-cold-start','job-submit-run','serving-endpoint-ping','catalog-drop-guard'];
+const CHECK_REGRESSED = { 'oauth-m2m-auth': true, 'uc-grant-read': true };
+// status: p pass, f fail, k flaky, b blocked(expected), n n/a ; change: '' none, 'r' regressed, 'g' recovered
+function mk(s, c){ return {s, c: c||''}; }
+const TARGETS = [
+  { name:'field-eng-prod-aws-us-east', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'field-eng-prod-gcp', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'field-eng-prod-azure', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'emea-prod-01', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'emea-prod-02', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('k'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'apac-prod-01', cls:'prod', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('k'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('b') } },
+  { name:'customer-mirror-01', cls:'ro', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('n'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('n') } },
+  { name:'customer-mirror-02', cls:'ro', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('n'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('n') } },
+  { name:'analytics-ro-prod', cls:'ro', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('f','r'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('n'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('n') } },
+  { name:'demo-shard-42', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('p') } },
+  { name:'demo-shard-51', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('p') } },
+  { name:'sandbox-us-west-2', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('k'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('p') } },
+  { name:'sandbox-eu-west-2', cls:'sandbox', cells:{ 'dns-resolve':mk('f'), 'oauth-m2m-auth':mk('n'), 'uc-grant-read':mk('n'), 'sql-warehouse-cold-start':mk('n'), 'job-submit-run':mk('n'), 'serving-endpoint-ping':mk('n'), 'catalog-drop-guard':mk('n') } },
+  { name:'partner-poc-03', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('f','r'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p'), 'catalog-drop-guard':mk('p') } },
+  { name:'dev-scratch-11', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p','g'), 'catalog-drop-guard':mk('p') } },
+  { name:'qa-eu-01', cls:'sandbox', cells:{ 'dns-resolve':mk('p'), 'oauth-m2m-auth':mk('p'), 'uc-grant-read':mk('p'), 'sql-warehouse-cold-start':mk('p'), 'job-submit-run':mk('p'), 'serving-endpoint-ping':mk('p','g'), 'catalog-drop-guard':mk('p') } },
+];
+
+const NAV_ITEMS = [
+  ['What\'s Interesting', true, true], ['Runs', false], ['Test Catalog', false], ['Test Authoring', false],
+  ['Suites', false], ['Targets & Catalogs', false], ['Schedules', false], ['Failure Analytics', false],
+  ['Audit Log', false], ['Admin & Settings', false],
+];
+
+/* ---------------- render helpers ---------------- */
+function el(html){ const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+function safetyTag(cls){
+  const map = { ro:['safety-ro','read-only'], prod:['safety-prod','prod-for-us'], sandbox:['safety-sandbox','sandbox'] };
+  const [c,l] = map[cls]; return `<span class="safety-tag ${c}">${l}</span>`;
+}
+function spine(failIdx, kind){
+  let segs = '';
+  for (let i=0;i<STAGES.length;i++){
+    let cl = 'seg';
+    if (failIdx === -1) cl += ' pass';
+    else if (i < failIdx) cl += ' pass';
+    else if (i === failIdx) cl += (kind==='info' ? ' blocked' : ' fail');
+    segs += `<span class="${cl}" title="${STAGES[i]}"></span>`;
+  }
+  const lbl = failIdx === -1 ? 'reached VERIFY' : `${kind==='info'?'blocked at':'failed at'} ${STAGES[failIdx]}`;
+  return `<span class="spine">${segs}<span class="spine-label">${lbl}</span></span>`;
+}
+function spark(v){ return `<span class="spark">${v.map(x=>`<i class="${x}"></i>`).join('')}</span>`; }
+function derived(f){
+  const parts = [];
+  parts.push(f.connectable ? `<span class="chip chip-pass">connectable</span>` : `<span class="chip chip-fail">not connectable</span>`);
+  parts.push(f.functional ? `<span class="chip chip-pass">functional</span>` : `<span class="chip chip-skip">not functional</span>`);
+  return parts.join(' ');
+}
+function contextStrip(){
+  return `<div class="context-strip">
+    <div class="ctx-item"><span class="ctx-label">Trigger</span><span class="ctx-value">${RUN.trigger}</span></div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item"><span class="ctx-label">Suite</span><span class="ctx-value mono">${RUN.suite}</span></div>
+    <div class="ctx-item"><span class="ctx-label">Depth</span><span class="ctx-value mono">${RUN.depth}</span></div>
+    <div class="ctx-item"><span class="ctx-label">Targets</span><span class="ctx-value">${RUN.targets}</span></div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item"><span class="ctx-label">Since your deploy</span><span class="ctx-value"><span class="mono">${RUN.commit}</span> · ${RUN.ago}</span></div>
+    <div class="ctx-verdict">● GATE FAILED</div>
+  </div>`;
+}
+function pageHead(title, sub, variant){
+  return `<div class="page-head">
+    <div><h1>${title}</h1><div class="page-sub">${sub}</div></div>
+    <span class="variant-tag">?variant=${variant}</span>
+  </div>`;
+}
+const CHIP_FOR = { regression:'chip-fail', flaky:'chip-flaky', stale:'chip-skip', info:'chip-info', recovered:'chip-pass' };
+
+/* ---------------- VARIANT A — triage feed ---------------- */
+function renderA(){
+  let h = pageHead('What\'s interesting', 'Ranked by signal — the few findings that matter, newest regressions first.', 'A');
+  h += contextStrip();
+  h += `<div class="summary-row">
+    <div class="stat-tile crit"><div class="n">2</div><div class="l">New regressions</div></div>
+    <div class="stat-tile flaky"><div class="n">1</div><div class="l">Newly flaky</div></div>
+    <div class="stat-tile"><div class="n">1</div><div class="l">Still failing</div></div>
+    <div class="stat-tile good"><div class="n">4</div><div class="l">Recovered</div></div>
+    <div class="stat-tile"><div class="n">${NOMINAL}</div><div class="l">Nominal</div></div>
+  </div>`;
+
+  const active = FINDINGS.filter(f => f.kind !== 'recovered');
+  const recovered = FINDINGS.filter(f => f.kind === 'recovered');
+
+  h += `<div class="feed">`;
+  active.forEach((f, i) => {
+    const chip = CHIP_FOR[f.kind];
+    const shown = f.targets.slice(0, 4);
+    const more = (f.targets.length - shown.length) + (f.extra||0);
+    h += `<div class="finding f-${f.kind}${f.kind==='stale'||f.kind==='info'?' dim':''}">
+      <div class="stripe"></div>
+      <div class="body">
+        <div class="f-top">
+          <span class="f-rank">#${i+1}</span>
+          <span class="chip ${chip}">${f.kind}</span>
+          <span class="f-title">${f.title}</span>
+        </div>
+        <div class="f-meta">
+          <span><span class="k">check</span> <span class="v mono">${f.check}</span></span>
+          <span><span class="k">bucket</span> <span class="chip ${chip}">${f.bucket||'—'}</span></span>
+          <span>${derived(f)}</span>
+        </div>
+        <div class="f-meta">
+          ${spine(f.kind==='recovered'?-1:f.stage, f.kind)}
+          <span><span class="k">first seen</span> <span class="v">${f.firstSeen||'—'}</span></span>
+          ${f.sinceSha?`<span><span class="k">since</span> <span class="v mono">${f.sinceSha}</span></span>`:''}
+          <span><span class="k">last 6</span> ${spark(f.verdicts)}</span>
+        </div>
+        <div class="f-targets">
+          ${shown.map(t=>`<span class="tchip">${t}</span>`).join('')}
+          ${more>0?`<span class="tchip more">+${more} more</span>`:''}
+        </div>
+        ${f.correlate?`<div class="correlate">⤷ ${f.correlate}</div>`:''}
+      </div>
+    </div>`;
+  });
+  h += `</div>`;
+
+  h += `<div class="group-label">Recovered · good news</div><div class="feed">`;
+  recovered.forEach(f => {
+    h += `<div class="finding f-recovered dim">
+      <div class="stripe"></div>
+      <div class="body">
+        <div class="f-top"><span class="chip chip-pass">recovered</span><span class="f-title">${f.title}</span></div>
+        <div class="f-meta"><span><span class="k">check</span> <span class="v mono">${f.check}</span></span>${spine(-1,'recovered')}<span class="k">${f.correlate}</span></div>
+        <div class="f-targets">${f.targets.map(t=>`<span class="tchip">${t}</span>`).join('')}</div>
+      </div>
+    </div>`;
+  });
+  h += `</div>`;
+
+  h += `<div class="group-label">Everything else</div>
+    <div class="nominal-row"><span class="sev-dot" style="background:var(--pass)"></span>
+    <strong style="color:var(--pass)">${NOMINAL} targets nominal</strong> — passed the full suite, unchanged since last good run. Collapsed.</div>`;
+  return h;
+}
+
+/* ---------------- VARIANT B — fleet matrix ---------------- */
+const CELL_CLASS = { p:'cell-pass', f:'cell-fail', k:'cell-flaky', b:'cell-blocked', n:'cell-na' };
+const CELL_TXT = { p:'✓', f:'✕', k:'~', b:'⛨', n:'·' };
+function renderB(){
+  let h = pageHead('What\'s interesting', 'The fleet at a glance — cells that moved since last-good are outlined. Read columns for systemic breaks, rows for a target down.', 'B');
+  h += contextStrip();
+
+  h += `<div class="matrix-wrap">
+    <div class="matrix-legend">
+      <span class="legend-item"><span class="legend-cell cell-pass"></span> pass</span>
+      <span class="legend-item"><span class="legend-cell cell-fail"></span> fail</span>
+      <span class="legend-item"><span class="legend-cell cell-flaky"></span> flaky</span>
+      <span class="legend-item"><span class="legend-cell cell-blocked"></span> blocked (expected)</span>
+      <span class="legend-item"><span class="legend-cell cell-na"></span> n/a</span>
+      <span class="legend-item" style="margin-left:auto"><span class="legend-cell" style="outline:2px solid var(--fail);outline-offset:-1px"></span> regressed vs last-good</span>
+      <span class="legend-item"><span class="legend-cell" style="outline:2px dashed var(--pass);outline-offset:-1px"></span> recovered</span>
+    </div>
+    <div class="matrix-scroll"><table class="matrix">
+      <thead><tr><th class="rowhead corner">Target · showing 16 of 98</th>`;
+  CHECKS.forEach(c => { h += `<th class="${CHECK_REGRESSED[c]?'col-regressed':''}">${c.replace(/-/g,'‑')}</th>`; });
+  h += `</tr></thead><tbody>`;
+
+  const groups = [['prod','prod-for-us'],['ro','read-only'],['sandbox','sandbox']];
+  groups.forEach(([cls,label]) => {
+    h += `<tr class="group-head"><td colspan="${CHECKS.length+1}">${label}</td></tr>`;
+    TARGETS.filter(t=>t.cls===cls).forEach(t => {
+      h += `<tr><th class="rowhead"><div class="rowhead-inner">${safetyTag(t.cls)}<span class="rowhead-name">${t.name}</span></div></th>`;
+      CHECKS.forEach(c => {
+        const cell = t.cells[c];
+        let extra = '';
+        if (cell.c === 'r') extra = ' changed';
+        else if (cell.c === 'g') extra = ' recovered';
+        h += `<td class="cell"><div class="cell-box ${CELL_CLASS[cell.s]}${extra}" title="${c}: ${cell.s}${cell.c==='r'?' (regressed)':cell.c==='g'?' (recovered)':''}">${CELL_TXT[cell.s]}</div></td>`;
+      });
+      h += `</tr>`;
+    });
+  });
+  h += `</tbody></table></div>
+    <div class="matrix-legend" style="border-top:1px solid var(--edge);border-bottom:none">
+      <span>+82 nominal targets hidden</span>
+      <button class="btn btn-ghost" style="margin-left:auto">Show all 98</button>
+    </div>
+  </div>`;
+
+  h += `<div class="matrix-side">
+    <div class="side-card card">
+      <h3>Columns that regressed — systemic</h3>
+      <div class="side-row"><span class="chip chip-fail">uc-grant-read</span><span>AUTHORIZE · PERMISSION_DENIED · spans 3 envs</span><span class="count" style="color:var(--fail)">12 ▲</span></div>
+      <div class="side-row"><span class="chip chip-fail">oauth-m2m-auth</span><span>AUTHENTICATE · shared SP sp-rotate-2026</span><span class="count" style="color:var(--fail)">6 ▲</span></div>
+    </div>
+    <div class="side-card card">
+      <h3>Rows that regressed — target-local</h3>
+      <div class="side-row"><span class="mono">sandbox-eu-west-2</span><span>DNS_RESOLUTION · 5 days (stale)</span><span class="count" style="color:var(--skip)">1</span></div>
+      <div class="side-row"><span class="mono">emea-prod-02 · apac-prod-01</span><span>warehouse cold-start flaky</span><span class="count" style="color:var(--flaky)">~</span></div>
+    </div>
+  </div>`;
+  return h;
+}
+
+/* ---------------- VARIANT C — change diff ---------------- */
+function renderC(){
+  let h = pageHead('What\'s interesting', 'What your change did — every verdict that moved, grouped by root cause. Noise set aside.', 'C');
+
+  h += `<div class="change-hero">
+    <div class="top">
+      <div class="commit-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg></div>
+      <div style="flex:1">
+        <div class="commit-msg">${RUN.commitMsg}</div>
+        <div class="commit-meta">commit <span class="mono">${RUN.commit}</span> · ${RUN.author} · ${RUN.ago} · triggered <span class="mono">${RUN.suite}</span> (${RUN.depth}) across ${RUN.targets} targets</div>
+      </div>
+      <div class="ctx-verdict">● GATE FAILED</div>
+    </div>
+    <div class="delta-bar">
+      <div class="delta-cell"><div class="k">Passing targets</div><div class="v">${RUN.nowGreen}<span class="d d-down">−6</span></div></div>
+      <div class="delta-cell"><div class="k">Moved to failing</div><div class="v" style="color:var(--fail)">18</div></div>
+      <div class="delta-cell"><div class="k">Recovered</div><div class="v" style="color:var(--pass)">4</div></div>
+      <div class="delta-cell"><div class="k">Newly flaky</div><div class="v" style="color:var(--flaky)">3</div></div>
+    </div>
+  </div>`;
+
+  h += `<div class="group-label">Regressions caused by this change — grouped by root cause</div>`;
+
+  const buckets = [
+    { name:'PERMISSION_DENIED', stage:4, isNew:true, inN:12, outN:0, targets:['field-eng-prod-aws-us-east','field-eng-prod-azure','customer-mirror-01','+9 more'],
+      why:'<strong>Likely cause:</strong> a metastore grant referenced by <span class="mono">uc-grant-read</span> was revoked. Spans 3 environments — points at the shared metastore, not the deploy. Worth confirming this commit did not touch UC grants.' },
+    { name:'AUTH_TOKEN_EXPIRED', stage:3, isNew:true, inN:6, outN:0, targets:['field-eng-prod-aws-us-east','field-eng-prod-gcp','demo-shard-42','+3 more'],
+      why:'<strong>Direct cause:</strong> this commit rotated <span class="mono">sp-rotate-2026</span>; all 6 failing targets authenticate with it. Almost certainly the new secret is not yet in their scopes.' },
+  ];
+  buckets.forEach(b => {
+    h += `<div class="bucket new-bucket">
+      <div class="bucket-head">
+        <span class="stage-badge">${STAGE_SHORT[b.stage]} · ${STAGES[b.stage]}</span>
+        <span class="bucket-name">${b.name}</span>
+        <span class="bucket-delta"><span style="color:var(--fail)">▲ ${b.inN} moved in</span>${b.outN?`<span style="color:var(--pass)">▼ ${b.outN} out</span>`:''}</span>
+      </div>
+      <div class="bucket-body">
+        <div class="move-row"><span class="move-in">+ in</span><div>${b.targets.map(t=>`<span class="tchip">${t}</span>`).join(' ')}</div></div>
+      </div>
+      <div class="why-note">${b.why}</div>
+    </div>`;
+  });
+
+  h += `<div class="group-label">Recovered</div>
+    <div class="bucket">
+      <div class="bucket-head"><span class="stage-badge">VRFY · VERIFY</span><span class="bucket-name" style="color:var(--pass)">serving-endpoint-ping</span>
+      <span class="bucket-delta"><span style="color:var(--pass)">▼ 4 recovered</span></span></div>
+      <div class="bucket-body"><div class="move-row"><span class="move-out">− out</span><div><span class="tchip">dev-scratch-11</span> <span class="tchip">dev-scratch-12</span> <span class="tchip">qa-eu-01</span> <span class="tchip">qa-eu-02</span></div></div></div>
+      <div class="why-note">Endpoint warm-up fix in this commit — these are back to green.</div>
+    </div>`;
+
+  h += `<div class="noise-tray">
+    <div class="noise-head">⚠︎ <strong style="color:var(--flaky)">Noise</strong> — non-deterministic, set aside so it doesn't pollute the signal. Not attributed to your change.</div>
+    <div class="noise-body">
+      <div class="noise-item">${spark(['p','f','p','f','p','f'])} <span class="chip chip-flaky">OPERATION_TIMEOUT</span> <span class="mono">sql-warehouse-cold-start</span> — flaky on emea-prod-02, apac-prod-01, sandbox-us-west-2 (oscillating 6 runs)</div>
+      <div class="noise-item">${spark(['f','f','f','f','f','f'])} <span class="chip chip-skip">DNS_RESOLUTION</span> <span class="mono">dns-resolve</span> — sandbox-eu-west-2 failing 5 days (pre-existing, tracked)</div>
+      <div class="noise-item"><span class="chip chip-info">BLOCKED_BY_SAFETY</span> <span class="mono">catalog-drop-guard</span> — prod-for-us destructive op correctly denied (expected pass)</div>
+    </div>
+  </div>`;
+  return h;
+}
+
+/* ---------------- VARIANT A2 — quiet triage feed (pared down) ---------------- */
+function commitThread(kind){
+  if (kind === 'meta') {
+    return `<div class="commit-thread">
+      <div class="ct-node ct-good"><span class="sha">21:00</span><span class="when">last green · overnight</span></div>
+      <span class="ct-arrow">→</span>
+      <span class="ct-between">metastore grant change · 21:14</span>
+      <span class="ct-arrow">→</span>
+      <div class="ct-node ct-bad"><span class="sha">01:30</span><span class="when">first bad · nightly run</span></div>
+    </div>`;
+  }
+  return `<div class="commit-thread">
+    <div class="ct-node ct-good"><span class="sha">9e2b1c4</span><span class="when">last green · 2h ago</span></div>
+    <span class="ct-arrow">→</span>
+    <span class="ct-between">3 commits</span>
+    <span class="ct-arrow">→</span>
+    <div class="ct-node ct-bad"><span class="sha">a1f2c9d</span><span class="when">first bad · your deploy</span></div>
+  </div>`;
+}
+function rcaBox(f){
+  const ans = f.check === 'oauth-m2m-auth'
+    ? `The rotation in <span class="mono">a1f2c9d</span> changed <span class="mono">sp-rotate-2026</span>'s secret, but the new secret isn't in these 6 targets' secret scopes yet. The same failure last occurred <span class="mono">2026-05-02</span> — also a rotation. Fix that worked then: re-run <span class="mono">rotate-secrets</span> for the affected scopes.`
+    : `The failure appeared with <span class="mono">a1f2c9d</span>, but that commit doesn't touch UC grants. A metastore grant change at <span class="mono">2026-08-27 21:14</span> lines up better and is the likely real cause — all 12 targets share that metastore.`;
+  return `<div class="rca-box">
+    <div class="rca-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>
+      <input class="rca-input" value="Why did this start failing?" readonly aria-label="Ask the RCA assistant">
+    </div>
+    <div class="rca-ans"><strong style="color:var(--accent)">Assistant</strong> — ${ans} <span style="color:var(--muted)">· queried commit history + prior failures</span></div>
+  </div>`;
+}
+function renderA2(){
+  let h = pageHead('What\'s interesting', 'The few things that changed since your deploy. Everything calm stays out of the way — open a row for the detail.', 'A2');
+  h += `<div class="run-line">
+    <span>GitHub Action ran <span class="mono">${RUN.suite}</span> (<span class="mono">${RUN.depth}</span>) across <span class="mono">${RUN.targets}</span> targets, since your deploy <span class="mono">${RUN.commit}</span> · ${RUN.ago}</span>
+    <span class="gate">● GATE FAILED</span>
+  </div>`;
+  h += `<div class="count-line"><b class="crit">2</b> new regressions · <b class="flaky">1</b> newly flaky · <b>1</b> still failing · <b class="good">4</b> recovered · <b>${NOMINAL}</b> nominal</div>`;
+
+  const active = FINDINGS.filter(f => ['regression','flaky'].includes(f.kind));
+  h += `<div class="qfeed">`;
+  active.forEach((f, i) => {
+    const open = i === 0 ? ' open' : '';
+    const cnt = f.targets.length + (f.extra || 0);
+    const shortWhat = f.title.replace(/ on \d+ targets| — .*| across .*/, '');
+    const since = f.kind === 'flaky'
+      ? `oscillating — no single first-bad commit`
+      : `since <span class="mono">${f.sinceSha}</span>`;
+    const shown = Math.min(5, f.targets.length);
+    const more = cnt - shown;
+    h += `<details class="qf q-${f.kind}"${open}>
+      <summary>
+        <span class="qf-dot"></span>
+        <span class="qf-what">${shortWhat}</span>
+        <span class="qf-count">· ${cnt} target${cnt>1?'s':''}</span>
+        <span class="qf-since">${since}</span>
+        <span class="qf-chev">›</span>
+      </summary>
+      <div class="qf-detail">
+        <div class="qf-cause"><span class="chip ${CHIP_FOR[f.kind]}">${f.bucket}</span> at <span class="mono">${STAGES[f.stage]}</span> · check <span class="mono">${f.check}</span></div>
+        ${f.kind === 'flaky' ? `<div class="qf-cause">last 6 runs ${spark(f.verdicts)} &nbsp; ${f.correlate}</div>` : commitThread()}
+        ${f.kind !== 'flaky' ? `<div class="qf-cause">⤷ ${f.correlate}</div>` : ''}
+        <div class="f-targets">${f.targets.slice(0, shown).map(t=>`<span class="tchip">${t}</span>`).join('')}${more>0?`<span class="tchip more">+${more} more</span>`:''}</div>
+        ${f.kind !== 'flaky' ? rcaBox(f) : ''}
+      </div>
+    </details>`;
+  });
+  h += `</div>`;
+
+  h += `<div class="group-label">Quieter — not from your change</div>
+    <div class="qfeed">
+      <div class="nominal-row"><span class="qf-dot" style="background:var(--skip)"></span> <span class="mono">dns-resolve</span> still failing on sandbox-eu-west-2 — 5 days, tracked (pre-existing)</div>
+      <div class="nominal-row"><span class="qf-dot" style="background:var(--info)"></span> <span class="mono">catalog-drop-guard</span> correctly blocked a destructive op on prod-for-us — expected pass</div>
+      <div class="nominal-row"><span class="qf-dot" style="background:var(--pass)"></span> <strong style="color:var(--pass)">4 recovered</strong> · <strong style="color:var(--pass)">${NOMINAL} nominal</strong> — unchanged, collapsed</div>
+    </div>`;
+  return h;
+}
+
+/* ---------------- VARIANT A3 — two lanes (deploy + overnight) ---------------- */
+function fold(f, opts){
+  const cnt = f.targets.length + (f.extra || 0);
+  const shortWhat = f.title.replace(/ on \d+ targets| — .*| across .*/, '');
+  const shown = Math.min(5, f.targets.length);
+  const more = cnt - shown;
+  return `<details class="qf q-${f.kind}"${opts.open ? ' open' : ''}>
+    <summary>
+      <span class="qf-dot"></span>
+      <span class="qf-what">${shortWhat}</span>
+      <span class="qf-count">· ${cnt} target${cnt>1?'s':''}</span>
+      <span class="qf-since">${opts.since}</span>
+      <span class="qf-chev">›</span>
+    </summary>
+    <div class="qf-detail">
+      <div class="qf-cause"><span class="chip ${CHIP_FOR[f.kind]}">${f.bucket}</span> at <span class="mono">${STAGES[f.stage]}</span> · check <span class="mono">${f.check}</span></div>
+      ${f.kind === 'flaky' ? `<div class="qf-cause">last 6 runs ${spark(f.verdicts)} &nbsp; ${f.correlate}</div>` : commitThread(opts.thread)}
+      ${f.kind !== 'flaky' ? `<div class="qf-cause">⤷ ${f.correlate}</div>` : ''}
+      <div class="f-targets">${f.targets.slice(0, shown).map(t=>`<span class="tchip">${t}</span>`).join('')}${more>0?`<span class="tchip more">+${more} more</span>`:''}</div>
+      ${f.kind !== 'flaky' ? rcaBox(f) : ''}
+    </div>
+  </details>`;
+}
+function depSummary(d){
+  return d.verdict === 'fail'
+    ? `<span style="color:var(--fail)">${d.findings || 1} regression · 6 targets</span>`
+    : `<span style="color:var(--muted)">clean · ${d.targets} targets</span>`;
+}
+function depHTML(d, open){
+  const body = d.verdict === 'fail'
+    ? fold(FINDINGS.find(f => f.check === d.finding), { open: true, since: 'since <span class="mono">'+d.sha+'</span>', thread: 'deploy' })
+    : `<div class="dep-clean">✓ All ${d.targets} targets passed the suite. Nothing regressed vs. last good run.</div>`;
+  return `<details class="deploy${d.verdict==='fail'?' dep-fail':''}"${open?' open':''}>
+    <summary>
+      <span class="dep-dot ${d.verdict==='fail'?'d-fail':'d-pass'}"></span>
+      <span class="mono sha">${d.sha}</span>
+      <span class="dep-msg" title="${d.msg}">${d.msg}</span>
+      <span class="dep-meta">${d.author} · ${d.ago}</span>
+      <span class="dep-summary">${depSummary(d)}</span>
+      <span class="qf-chev">›</span>
+    </summary>
+    <div class="dep-body">${body}</div>
+  </details>`;
+}
+let depIdx = 0;
+function appendDeploys(){
+  const sc = document.getElementById('depScroll');
+  const sentinel = document.getElementById('depSentinel');
+  if (!sc || !sentinel) return;
+  if (depIdx >= DEPLOYS.length) { sentinel.textContent = '— start of 24h window —'; return; }
+  DEPLOYS.slice(depIdx, depIdx + 6).forEach((d) => {
+    sentinel.insertAdjacentHTML('beforebegin', depHTML(d, false));
+  });
+  depIdx = Math.min(depIdx + 6, DEPLOYS.length);
+  if (depIdx >= DEPLOYS.length) sentinel.textContent = '— start of 24h window —';
+}
+function mountDeploys(){
+  const sc = document.getElementById('depScroll');
+  if (!sc) return;
+  depIdx = 0;
+  sc.innerHTML = '<div id="depSentinel" class="dep-sentinel">loading older…</div>';
+  appendDeploys();
+  sc.onscroll = () => {
+    if (sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 48) appendDeploys();
+  };
+}
+function renderA3(){
+  const ucF = FINDINGS.find(f => f.check === 'uc-grant-read');
+  const flakyF = FINDINGS.find(f => f.kind === 'flaky');
+  const failCount = DEPLOYS.filter(d => d.verdict === 'fail').length;
+
+  let h = pageHead('What\'s interesting', 'Two questions, one screen: what recent deployments did, and what drifted while you were away.', 'A3');
+
+  h += `<section class="lane">
+    <div class="lane-head lane-deploy">
+      <div>
+        <div class="lane-title">Recent deployments</div>
+        <div class="lane-ref">last 24h · newest first · ${DEPLOYS.length} CI runs · <span style="color:var(--fail)">${failCount} gate-failed</span></div>
+      </div>
+      <span class="lane-count">scroll for older ↓</span>
+    </div>
+    <div class="deploy-scroll" id="depScroll"></div>
+  </section>`;
+
+  h += `<section class="lane">
+    <div class="lane-head">
+      <div>
+        <div class="lane-title">Overnight — while you were away</div>
+        <div class="lane-ref">3 nightly runs · since <span class="mono">21:00</span> (last 12h) · not tied to your deploy</div>
+      </div>
+      <span class="lane-count">2 changed</span>
+    </div>
+    <div class="qfeed">
+      ${fold(ucF, { open: false, since: 'since <span class="mono">~21:14</span>', thread: 'meta' })}
+      ${fold(flakyF, { open: false, since: 'oscillating overnight', thread: null })}
+    </div>
+  </section>`;
+
+  h += `<details class="everything-else">
+    <summary><span class="qf-chev">›</span> Everything else — <b>71</b> nominal · <b>4</b> recovered · <b>2</b> known / pre-existing</summary>
+    <div class="ee-body">
+      <div class="ee-row"><span class="chip chip-pass">recovered</span> dev-scratch-11, dev-scratch-12, qa-eu-01, qa-eu-02 — endpoint warm-up fixed by <span class="mono">a1f2c9d</span></div>
+      <div class="ee-row"><span class="chip chip-skip">pre-existing</span> <span class="mono">dns-resolve</span> on sandbox-eu-west-2 (5 days, tracked) · <span class="mono">catalog-drop-guard</span> correctly blocked on prod-for-us (expected)</div>
+      <div class="ee-row"><span class="chip chip-pass">nominal</span> 71 targets passed the full suite, unchanged since last good run</div>
+    </div>
+  </details>`;
+  return h;
+}
+
+/* ---------------- switcher wiring ---------------- */
+const VARIANTS = {
+  A3: { name: 'Two lanes', render: renderA3 },
+  A2: { name: 'Triage — Quiet', render: renderA2 },
+  A: { name: 'Triage Feed (busy)', render: renderA },
+  B: { name: 'Fleet Matrix', render: renderB },
+  C: { name: 'Change Diff', render: renderC },
+};
+const ORDER = ['A3','A2','A','B','C'];
+
+function currentVariant(){
+  const v = new URLSearchParams(location.search).get('variant');
+  return VARIANTS[v] ? v : 'A3';
+}
+function setVariant(v){
+  const url = new URL(location.href); url.searchParams.set('variant', v);
+  history.replaceState(null, '', url);
+  draw();
+}
+function draw(){
+  const v = currentVariant();
+  document.getElementById('view').innerHTML = VARIANTS[v].render();
+  if (v === 'A3') mountDeploys();
+  document.getElementById('sw-label').innerHTML = `${v} — ${VARIANTS[v].name} <span class="sub">(${ORDER.indexOf(v)+1}/${ORDER.length})</span>`;
+  // nav
+  document.getElementById('nav').innerHTML = NAV_ITEMS.map(([label, active, badge]) =>
+    `<a href="#" class="${active?'active':''}" onclick="return false">
+      <span style="width:16px;display:inline-block;text-align:center">${active?'◆':'○'}</span>${label}${badge?'<span class="dot"></span>':''}
+    </a>`).join('');
+  window.scrollTo(0,0);
+}
+function cycle(dir){
+  const i = ORDER.indexOf(currentVariant());
+  setVariant(ORDER[(i + dir + ORDER.length) % ORDER.length]);
+}
+document.getElementById('prev').onclick = () => cycle(-1);
+document.getElementById('next').onclick = () => cycle(1);
+document.addEventListener('keydown', e => {
+  const tag = (e.target.tagName||'').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  if (e.key === 'ArrowLeft') cycle(-1);
+  if (e.key === 'ArrowRight') cycle(1);
+});
+draw();
+</script>
+</body>
+</html>
