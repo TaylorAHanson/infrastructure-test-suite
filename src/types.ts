@@ -1,41 +1,208 @@
-// Shared TypeScript types mirroring the backend Pydantic/SQLModel schemas.
+// Shared TypeScript types mirroring the backend Pydantic/SQLModel schemas —
+// the rebuilt Check / Test / Suite / Run model (ADR-0001/0005/0007/0017).
 
-export type TestCategory = 'PRODUCER' | 'PROCESSING' | 'CONSUMER'
-export type ExecutionMode = 'PREFLIGHT' | 'SMOKE' | 'FULL'
-export type ProbeOutcome = 'PASS' | 'FAIL' | 'ERROR' | 'SKIP' | 'PARTIAL'
-export type ConnectivityOutcome = 'CONNECTABLE' | 'NOT_CONNECTABLE' | 'UNKNOWN'
-export type RunStatus =
-  | 'PENDING' | 'QUEUED' | 'RUNNING' | 'PASSED' | 'FAILED' | 'PARTIAL' | 'ERROR' | 'CANCELLED'
-export type StepKind = 'PRECHECK' | 'DNS' | 'AUTH' | 'NETWORK' | 'FUNCTIONAL' | 'CLEANUP'
+// ---------------- Small closed vocab (mirrors app.core.enums) ----------------
+export type Depth = 'quick' | 'full'
+/** Coarse lifecycle phase for the async poll contract (ADR-0005/0011). */
+export type Phase = 'queued' | 'running' | 'terminal'
+/** How a Check's assertion is judged (ADR-0008). */
+export type Evaluator = 'deterministic' | 'agentic'
+/** Whether a Check expects success or a denial/counterfactual. */
+export type Expectation = 'PASS' | 'DENY'
+/** Outcome of a single stage on the canonical spine. */
+export type StageOutcomeStatus = 'PASS' | 'FAIL' | 'SKIP' | 'ERROR'
+/** A Run's lifecycle + terminal verdict (RunStatus). Only PASS gates a pipeline. */
+export type Verdict =
+  | 'PENDING'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'PASS'
+  | 'FAIL'
+  | 'ERROR'
+  | 'BLOCKED_BY_SAFETY'
+  | 'SKIPPED'
+  | 'CANCELLED'
 
-export interface TestDefinition {
+/** The canonical stage spine, in order (RESOLVE → … → VERIFY). Handlers skip
+ *  stages they lack; failure ≤ AUTHORIZE is connectivity, OPERATE/VERIFY is
+ *  functional (derived, never stored). */
+export const CANONICAL_STAGES = [
+  'RESOLVE',
+  'CONNECT',
+  'TLS',
+  'AUTHENTICATE',
+  'AUTHORIZE',
+  'OPERATE',
+  'VERIFY',
+] as const
+
+// ---------------- Catalog: Check / Test / Suite ----------------
+/** An open-SDK Databricks call (bounded by the blocklist, not an allowlist). */
+export interface Operation {
+  service: string
+  method: string
+  verb?: string
+  params?: Record<string, unknown>
+}
+
+/** The atomic unit of validation: one operation + its expectation + evaluator. */
+export interface Check {
   id: string
   display_name: string
   description: string
-  category: TestCategory
-  tags: string[]
-  target_type: string
-  required_capabilities: string[]
-  supported_execution_modes: ExecutionMode[]
-  executor_kind: string
-  executor_key: string
-  auth_mode: string
-  enterprise_only: boolean
-  destructive: boolean
+  operation: Operation
+  handler_key: string
+  assertion: string
+  expectation: Expectation
+  evaluator: Evaluator
+  compiled_predicate: Record<string, unknown>
+  compilable: boolean
+  expected_stage?: string | null
+  risk_tier: string
+  confirmed_risk_tier?: string | null
+  hints: Record<string, unknown>
+  version: number
   enabled: boolean
-  timeout_seconds: number
-  cleanup_policy: string
+  created_at?: string
+  updated_at?: string
 }
 
+/** A named selection of Tests for a Run (grouping only; ADR-0007). May be flagged
+ *  `deterministic_only` — its fail-closed verdict ignores agentic Checks (ADR-0008). */
 export interface Suite {
   id: string
   name: string
   description: string
   tags: string[]
+  deterministic_only: boolean
+  version: number
   enabled: boolean
-  test_definition_ids: string[]
+  test_ids: string[]
+  created_at?: string
+  updated_at?: string
 }
 
+// ---------------- Run API (rebuilt, ADR-0005/0011) ----------------
+/** A row from `GET /runs/requests` — the raw RunRequest. Once terminal, `status`
+ *  holds the rolled-up fail-closed verdict; `phase` is derived from it. */
+export interface RunRequestSummary {
+  id: string
+  requested_by: string
+  request_source: string
+  suite_ids: string[]
+  test_ids: string[]
+  check_ids: string[]
+  target_ids: string[]
+  depth: Depth
+  status: Verdict
+  override: Record<string, unknown>
+  git_sha: string
+  app_version: string
+  created_at: string
+}
+
+/** The `POST /runs` acknowledgement (ADR-0005 §2). */
+export interface RunRequestOut {
+  id: string
+  run_id: string
+  status: string
+  phase: string
+  depth: string
+  requested_by: string
+  created_at: string
+  run_ids: string[]
+}
+
+export interface FailureSummary {
+  gating: Record<string, number>
+  advisory: Record<string, number>
+}
+
+/** The one shared verdict resource for a Run (`GET /runs/{req_id}`, ADR-0005 §5). */
+export interface VerdictResource extends RunRequestSummary {
+  run_id: string
+  run_ids: string[]
+  phase: Phase
+  verdict: Verdict
+  /** {test_id | "(ad-hoc)": verdict} over each Test's gating CheckRuns. */
+  test_rollup: Record<string, Verdict>
+  failure_summary: FailureSummary
+  /** Derived connectable/functional aggregate (null when there are no gating runs). */
+  connectable: boolean | null
+  functional: boolean | null
+}
+
+/** One stage on the canonical spine within a CheckRun. */
+export interface StageOutcome {
+  id: string
+  run_id: string
+  stage: string
+  sort_order: number
+  outcome: StageOutcomeStatus
+  message: string
+  failure_bucket?: string | null
+  raw_excerpt?: string | null
+  evidence: Record<string, unknown>
+  started_at?: string | null
+  finished_at?: string | null
+  duration_ms?: number | null
+}
+
+/** One Check executed against one Target — the atomic result (`GET /runs?request_id=`). */
+export interface CheckRunRow {
+  run_id: string
+  request_id?: string | null
+  test_id?: string | null
+  check_id: string
+  target_id?: string | null
+  requested_by: string
+  request_source: string
+  depth: Depth
+  evaluator: Evaluator
+  expectation: Expectation
+  /** True = deterministic (gates); false = agentic (advisory, never gates). */
+  gating: boolean
+  run_as_role?: string | null
+  risk_tier: string
+  verdict: Verdict
+  failure_bucket?: string | null
+  failure_stage?: string | null
+  message: string
+  workspace_name?: string | null
+  git_sha: string
+  app_version: string
+  duration_ms?: number | null
+  started_at?: string | null
+  finished_at?: string | null
+  created_at: string
+  check_name: string
+  /** `bucket @ stage` (ADR-0001) — null when the run passed. */
+  bucket_at_stage?: string | null
+}
+
+/** A single CheckRun's detail (`GET /runs/{run_id}`) — stage outcomes + derived view. */
+export interface CheckRunDetail extends CheckRunRow {
+  handler_key?: string | null
+  stage_outcomes: StageOutcome[]
+  connectable: boolean | null
+  functional: boolean | null
+}
+
+// ---------------- Audit (config-plane mutations, ADR-0014) ----------------
+export interface AuditEvent {
+  id: string
+  ts: string
+  actor: string
+  actor_kind: string
+  action: string
+  entity_type: string
+  entity_id?: string | null
+  summary: string
+}
+
+// ---------------- Target ----------------
+// NOTE: the Targets page + registration ceremony are owned by spec #24; this
+// type still reflects the prototype shape and is rebuilt there.
 export interface Target {
   id: string
   name: string
@@ -48,100 +215,8 @@ export interface Target {
   enabled: boolean
 }
 
-export interface Schedule {
-  id: string
-  name: string
-  cron: string
-  timezone: string
-  enabled: boolean
-  suite_ids: string[]
-  test_definition_ids: string[]
-  target_ids: string[]
-  catalogs: string[]
-  execution_mode: ExecutionMode
-  databricks_job_id?: string | null
-  last_fired_at?: string | null
-}
-
-export interface RunStep {
-  id: string
-  step_kind: StepKind
-  sort_order: number
-  outcome: ProbeOutcome
-  connectivity: ConnectivityOutcome
-  duration_ms?: number | null
-  message: string
-  error_class?: string | null
-  root_cause_bucket?: string | null
-  recommendation?: string | null
-  raw_payload_excerpt?: string | null
-  evidence: Record<string, unknown>
-}
-
-export interface Run {
-  run_id: string
-  test_definition_id: string
-  test_name?: string
-  category?: string | null
-  executor_key?: string | null
-  target_id?: string | null
-  catalog?: string | null
-  workspace_name?: string | null
-  cloud: string
-  region?: string | null
-  execution_mode: ExecutionMode
-  requested_by: string
-  request_source: string
-  status: RunStatus
-  probe_outcome?: ProbeOutcome | null
-  connectivity_outcome?: ConnectivityOutcome | null
-  started_at?: string | null
-  finished_at?: string | null
-  duration_ms?: number | null
-  summary_counts: Record<string, number>
-  connectivity_summary: Record<string, number>
-  failure_buckets: string[]
-  root_cause_bucket?: string | null
-  recommendation?: string | null
-  databricks_job_run_url?: string | null
-  telemetry_logs_url?: string | null
-  telemetry_trace_id?: string | null
-  git_sha: string
-  app_version: string
-  created_at: string
-  steps?: RunStep[]
-}
-
-export interface AuditEvent {
-  id: string
-  ts: string
-  actor: string
-  actor_kind: string
-  action: string
-  entity_type: string
-  entity_id?: string | null
-  summary: string
-}
-
-export interface RemoteAgent {
-  id: string
-  name: string
-  vantage_point: string
-  capabilities: string[]
-  status: string
-  last_seen_at?: string | null
-  enabled: boolean
-}
-
 // ---------------- Assistant / Test Studio (spec #22) ----------------
 export type TestStudioStatus = 'draft' | 'active'
-
-export interface Operation {
-  service: string
-  method: string
-  verb?: string
-  params?: Record<string, unknown>
-}
 
 export interface StudioTest {
   id: string

@@ -3,12 +3,16 @@ import { Plus, Trash2 } from 'lucide-react'
 
 import { PageHeader } from '../components/PageHeader'
 import {
-  useCatalogs,
   useCreateTarget,
   useDeleteTarget,
   useTargets,
   type CreateTargetBody,
 } from '../hooks/queries'
+
+// NOTE: the full Targets rebuild (safety class, identity handle, assumable
+// roles, the friction ceremony) is owned by spec #24. The only change here is
+// removing the dead `/targets/catalogs` call the prototype relied on — the
+// catalog concept no longer exists in the rebuilt Target model (ADR-0005).
 
 const EMPTY: CreateTargetBody = {
   name: '',
@@ -22,7 +26,6 @@ const EMPTY: CreateTargetBody = {
 
 export default function Targets() {
   const { data: targets } = useTargets()
-  const { data: catalogs } = useCatalogs()
   const create = useCreateTarget()
   const del = useDeleteTarget()
 
@@ -127,14 +130,6 @@ export default function Targets() {
           </button>
         </div>
         {error && <div className="mt-2 text-sm text-fail">{error}</div>}
-      </div>
-
-      <div className="card mb-4">
-        <div className="card-title mb-2">Catalogs</div>
-        <div className="flex flex-wrap gap-2">
-          {catalogs?.map((c) => <span key={c} className="badge bg-ink-soft text-info">{c}</span>)}
-          {!catalogs?.length && <span className="text-sm text-muted">No catalogs configured. Add a catalog target above.</span>}
-        </div>
       </div>
 
       <div className="card overflow-hidden p-0">

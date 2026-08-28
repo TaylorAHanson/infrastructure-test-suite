@@ -4,48 +4,34 @@ import { api } from '../lib/api'
 import type {
   AssistantTurnResponse,
   AuditEvent,
+  Check,
+  CheckRunDetail,
+  CheckRunRow,
   PageContext,
-  RemoteAgent,
-  Run,
-  Schedule,
+  RunRequestOut,
+  RunRequestSummary,
   StudioTest,
   Suite,
   Target,
-  TestDefinition,
   TestVersion,
+  VerdictResource,
   WorkedExample,
 } from '../types'
 
-// ---------------- Catalog ----------------
+// ---------------- Catalog: Checks / Tests / Suites ----------------
+/** The Check catalog — the atomic operation+expectation+evaluator units. */
+export const useChecks = () =>
+  useQuery({ queryKey: ['checks'], queryFn: () => api.get<Check[]>('/checks') })
+
+/** The Test catalog (`/tests`) — target-agnostic ordered Check bundles. */
 export const useTests = () =>
-  useQuery({ queryKey: ['tests'], queryFn: () => api.get<TestDefinition[]>('/tests') })
+  useQuery({ queryKey: ['tests'], queryFn: () => api.get<StudioTest[]>('/tests') })
 
-export const useCreateTest = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (body: Record<string, unknown>) => api.post<TestDefinition>('/tests', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['tests'] }),
-  })
-}
+export const useSuites = () =>
+  useQuery({ queryKey: ['suites'], queryFn: () => api.get<Suite[]>('/suites') })
 
-// ---------------- AI authoring ----------------
-export interface AuthoringCapabilities {
-  model_serving_endpoint: string | null
-  ai_available: boolean
-  executors: { executor_key: string; kind: string; purpose: string; params: Record<string, string> }[]
-}
-
-export const useAuthoringCapabilities = () =>
-  useQuery({
-    queryKey: ['authoring-capabilities'],
-    queryFn: () => api.get<AuthoringCapabilities>('/authoring/capabilities'),
-  })
-
-export const useGenerateTest = () =>
-  useMutation({
-    mutationFn: (body: { description: string; category?: string }) =>
-      api.post<{ spec: Record<string, unknown>; endpoint: string | null }>('/authoring/generate', body),
-  })
+export const useTargets = () =>
+  useQuery({ queryKey: ['targets'], queryFn: () => api.get<Target[]>('/targets') })
 
 // ---------------- The Assistant + Test Studio (spec #22) ----------------
 export const useStudioTests = () =>
@@ -123,15 +109,7 @@ export const usePromoteExample = () => {
 export const useExamples = () =>
   useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 
-export const useSuites = () =>
-  useQuery({ queryKey: ['suites'], queryFn: () => api.get<Suite[]>('/suites') })
-
-export const useTargets = () =>
-  useQuery({ queryKey: ['targets'], queryFn: () => api.get<Target[]>('/targets') })
-
-export const useCatalogs = () =>
-  useQuery({ queryKey: ['catalogs'], queryFn: () => api.get<string[]>('/targets/catalogs') })
-
+// ---------------- Targets (registration ceremony rebuilt in spec #24) ----------------
 export interface CreateTargetBody {
   name: string
   target_type: string
@@ -147,10 +125,7 @@ export const useCreateTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: CreateTargetBody) => api.post<Target>('/targets', body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['targets'] })
-      qc.invalidateQueries({ queryKey: ['catalogs'] })
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
   })
 }
 
@@ -158,78 +133,60 @@ export const useDeleteTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => api.del(`/targets/${id}`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['targets'] })
-      qc.invalidateQueries({ queryKey: ['catalogs'] })
-    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
   })
 }
 
-// ---------------- Runs ----------------
-export interface RunFilters {
-  status?: string
-  category?: string
-  catalog?: string
-  suite_id?: string
-  target_id?: string
-  test_definition_id?: string
-  requester?: string
-}
-
-export const useRuns = (filters: RunFilters = {}) => {
-  const qs = new URLSearchParams(
-    Object.entries(filters).filter(([, v]) => v) as [string, string][],
-  ).toString()
-  return useQuery({
-    queryKey: ['runs', filters],
-    queryFn: () => api.get<Run[]>(`/runs${qs ? `?${qs}` : ''}`),
+// ---------------- Runs (rebuilt Run API, ADR-0005/0011) ----------------
+/** The Runs list = the submitted RunRequests (`GET /runs/requests`). Each row's
+ *  phase + verdict are derived from its `status` (see lib/format `phaseOf`). */
+export const useRuns = () =>
+  useQuery({
+    queryKey: ['runs'],
+    queryFn: () => api.get<RunRequestSummary[]>('/runs/requests'),
     refetchInterval: 5000,
   })
-}
 
-export const useRun = (runId?: string) =>
+/** A Run's aggregate verdict resource (`GET /runs/{req_id}`). Polls until terminal. */
+export const useRunResource = (runId?: string) =>
   useQuery({
     queryKey: ['run', runId],
-    queryFn: () => api.get<Run>(`/runs/${runId}`),
+    queryFn: () => api.get<VerdictResource>(`/runs/${runId}`),
     enabled: !!runId,
-    refetchInterval: (q) =>
-      ['RUNNING', 'QUEUED', 'PENDING'].includes((q.state.data as Run)?.status) ? 3000 : false,
+    refetchInterval: (q) => ((q.state.data as VerdictResource)?.phase === 'terminal' ? false : 3000),
+  })
+
+/** The fan-out CheckRuns for a request (`GET /runs?request_id=…`). */
+export const useRunCheckRuns = (requestId?: string) =>
+  useQuery({
+    queryKey: ['run-checkruns', requestId],
+    queryFn: () => api.get<CheckRunRow[]>(`/runs?request_id=${requestId}`),
+    enabled: !!requestId,
+    refetchInterval: 4000,
+  })
+
+/** A single CheckRun's stage outcomes + derived view (`GET /runs/{run_id}`). */
+export const useCheckRun = (runId?: string, enabled = true) =>
+  useQuery({
+    queryKey: ['checkrun', runId],
+    queryFn: () => api.get<CheckRunDetail>(`/runs/${runId}`),
+    enabled: !!runId && enabled,
   })
 
 export interface SubmitRunBody {
   suite_ids?: string[]
-  test_definition_ids?: string[]
+  test_ids?: string[]
+  check_ids?: string[]
   target_ids?: string[]
-  catalogs?: string[]
-  execution_mode: string
+  depth?: 'quick' | 'full'
   requested_by?: string
+  request_source?: string
 }
 
 export const useSubmitRun = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: SubmitRunBody) => api.post<{ id: string }>('/runs', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['runs'] }),
-  })
-}
-
-// ---------------- Schedules ----------------
-export const useSchedules = () =>
-  useQuery({ queryKey: ['schedules'], queryFn: () => api.get<Schedule[]>('/schedules') })
-
-export const useToggleSchedule = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      api.patch<Schedule>(`/schedules/${id}`, { enabled }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['schedules'] }),
-  })
-}
-
-export const useFireSchedule = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) => api.post(`/schedules/${id}/fire`),
+    mutationFn: (body: SubmitRunBody) => api.post<RunRequestOut>('/runs', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['runs'] }),
   })
 }
@@ -265,12 +222,9 @@ export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): s
   return `/api/v1/audit/export${q ? `${q}&` : '?'}format=${format}`
 }
 
-export const useAgents = () =>
-  useQuery({ queryKey: ['agents'], queryFn: () => api.get<RemoteAgent[]>('/agents') })
-
 export const useAdminSettings = () =>
   useQuery({ queryKey: ['admin'], queryFn: () => api.get<Record<string, unknown>>('/admin/settings') })
 
-// ---------------- Analytics ----------------
+// ---------------- Analytics (Dashboard + Analytics owned by spec #23) ----------------
 export const useAnalytics = <T,>(name: string, params = '') =>
   useQuery({ queryKey: ['analytics', name, params], queryFn: () => api.get<T>(`/analytics/${name}${params}`) })
