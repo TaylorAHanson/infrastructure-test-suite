@@ -126,7 +126,15 @@ def commit_provenance_thread(session: Session, *, check_id: str,
     """The last-green → first-bad thread for a (check, target) — read-only.
 
     *"When did this start failing?"* expressed as diff-vs-last-good (ADR-0009):
-    the most recent green run and the first non-green that followed it.
+    the most recent green run and the first non-green that followed it. The
+    boundary is **keyed** to the first-bad's commit ``sha`` when it is a real
+    deploy, else to its non-deploy ``event_ref`` (ADR-0015) — so an Overnight
+    finding with no commit still names *what changed* (see :func:`_boundary_ref`).
+
+    The thread stays honest **even when the last green predates the retention
+    window**: the sweeper preserves the most-recent green per ``(target, check)``
+    as an anchor (ADR-0015), so this scan still finds it and diffs the *right*
+    last-good, not the window edge.
     """
     stmt = select(CheckRun).where(CheckRun.check_id == check_id)
     if target_id:
@@ -146,8 +154,25 @@ def commit_provenance_thread(session: Session, *, check_id: str,
         "target_id": target_id,
         "last_green": _run_summary(last_green) if last_green else None,
         "first_bad": _run_summary(first_bad) if first_bad else None,
+        "boundary_ref": _boundary_ref(first_bad),
         "total_runs": len(runs),
     }
+
+
+def _boundary_ref(first_bad: Optional[CheckRun]) -> Optional[dict]:
+    """Key the last-green → first-bad boundary to a commit sha or an event ref.
+
+    A deploy-attributable first-bad is keyed by its commit ``sha``; absent a real
+    commit, an Overnight/non-deploy first-bad falls back to its ``event_ref``
+    ("metastore grant change · 21:14"). ``None`` when neither is present.
+    """
+    if first_bad is None:
+        return None
+    if first_bad.git_sha and first_bad.git_sha != "unknown":
+        return {"kind": "commit", "value": first_bad.git_sha}
+    if first_bad.event_ref:
+        return {"kind": "event", "value": first_bad.event_ref}
+    return None
 
 
 def failure_archive(session: Session, *, bucket: Optional[str] = None,
@@ -186,5 +211,6 @@ def _run_summary(r: CheckRun) -> dict:
         "bucket_at_stage": (f"{r.failure_bucket} @ {r.failure_stage}"
                             if r.failure_bucket and r.failure_stage else None),
         "git_sha": r.git_sha,
+        "event_ref": r.event_ref,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }

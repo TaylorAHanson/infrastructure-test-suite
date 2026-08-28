@@ -8,9 +8,10 @@ but every edit is **audited** as a config-plane mutation (ADR-0010 / ADR-0014).
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from sqlmodel import Session
 
+from app.api.deps import Actor, current_actor
 from app.db.session import get_session
 from app.schemas.schemas import WebhookConfigOut, WebhookConfigUpdate
 from app.services import webhook
@@ -28,11 +29,16 @@ def get_webhook_config(session: Session = Depends(get_session)) -> WebhookConfig
 def update_webhook_config(
     payload: WebhookConfigUpdate,
     session: Session = Depends(get_session),
-    actor: str = Query("api-user", description="Host App identity of the editor"),
+    actor: Actor = Depends(current_actor),
 ) -> WebhookConfigOut:
-    """Edit the sink config; the change is audited (``webhook.config.change``)."""
+    """Edit the sink config; the change is audited (``webhook.config.change``).
+
+    The editor is the resolved **host Databricks App identity** (ADR-0010): any
+    authenticated human may edit the sink with no ceremony, but the edit is
+    recorded against their identity."""
     config = webhook.update_config(
-        session, actor=actor, urls=payload.urls, enabled=payload.enabled,
+        session, actor=actor.handle, actor_kind=actor.kind,
+        urls=payload.urls, enabled=payload.enabled,
         fire_on_all_completions=payload.fire_on_all_completions,
     )
     return WebhookConfigOut.model_validate(config.model_dump())

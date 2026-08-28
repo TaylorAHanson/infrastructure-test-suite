@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     # not a tuned budget — cost stays a non-goal (ADR-0007).
     FINDINGS_RECENT_WINDOW_HOURS: int = 24
 
+    # ----- Flaky detection (ADR-0008, #34/#11) --------------------------
+    # A check whose recent DETERMINISTIC verdicts alternate between green and
+    # bad is flagged flaky — advisory only, never a gating regression. This
+    # bounds "recent": the scan considers the last N deterministic terminal
+    # verdicts per (target, check). One generous knob; cost is a non-goal.
+    FLAKY_WINDOW_RUNS: int = 10
+
     # ----- Run-completion webhook (ADR-0016) ----------------------------
     # The platform's only push: a single generic outbound POST on run
     # completion. The sink URL(s) + firing toggle live in a Lakebase config

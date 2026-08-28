@@ -64,6 +64,7 @@ def update_config(
     session: Session,
     *,
     actor: str,
+    actor_kind: str = "user",
     urls: Optional[list[str]] = None,
     enabled: Optional[bool] = None,
     fire_on_all_completions: Optional[bool] = None,
@@ -95,7 +96,8 @@ def update_config(
     after = {"urls": list(config.urls), "enabled": config.enabled,
              "fire_on_all_completions": config.fire_on_all_completions}
     record_audit(
-        session, actor=actor, action=AuditAction.WEBHOOK_CONFIG_CHANGE.value,
+        session, actor=actor, actor_kind=actor_kind,
+        action=AuditAction.WEBHOOK_CONFIG_CHANGE.value,
         entity_type="webhook_config", entity_id=config.id,
         summary=f"Webhook sink updated ({len(config.urls)} url(s), "
                 f"enabled={config.enabled}, all-completions={config.fire_on_all_completions}).",

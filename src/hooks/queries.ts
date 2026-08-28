@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import type {
   AssistantTurnResponse,
+  AssumableRole,
   AuditEvent,
   Check,
   CheckRunDetail,
@@ -10,6 +11,7 @@ import type {
   PageContext,
   RunRequestOut,
   RunRequestSummary,
+  SafetyClass,
   StudioTest,
   Suite,
   Target,
@@ -109,22 +111,46 @@ export const usePromoteExample = () => {
 export const useExamples = () =>
   useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 
-// ---------------- Targets (registration ceremony rebuilt in spec #24) ----------------
+// ---------------- Targets (rebuilt model + friction ceremony, ADR-0010; #37) ----
 export interface CreateTargetBody {
   name: string
-  target_type: string
-  catalog?: string | null
-  schema_name?: string | null
   workspace_name?: string | null
-  cloud?: string
-  region?: string | null
-  config?: Record<string, unknown>
+  host?: string | null
+  safety_class: SafetyClass
+  identity_handle?: string | null
+  assumable_roles?: AssumableRole[]
+}
+
+/** The friction-ceremony inputs required to *downgrade* a safety class (ADR-0010). */
+export interface SafetyCeremony {
+  typed_confirmation: string
+  reason: string
+}
+
+export interface UpdateTargetBody {
+  name?: string
+  workspace_name?: string | null
+  host?: string | null
+  safety_class?: SafetyClass
+  identity_handle?: string | null
+  assumable_roles?: AssumableRole[]
+  enabled?: boolean
+  ceremony?: SafetyCeremony
 }
 
 export const useCreateTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: CreateTargetBody) => api.post<Target>('/targets', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
+  })
+}
+
+export const useUpdateTarget = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: UpdateTargetBody }) =>
+      api.patch<Target>(`/targets/${id}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
   })
 }
