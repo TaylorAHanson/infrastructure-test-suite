@@ -34,3 +34,14 @@ def record_audit(
     if commit:
         session.commit()
     return event
+
+
+def version_pointer(entity_type: str, entity_id: str, version: int) -> dict:
+    """A pointer to a versioned entity's snapshot rather than a duplicated diff.
+
+    Test (and other versioned) create/edit records store this instead of the
+    full before→after body (ADR-0014 §3): the immutable snapshot already lives
+    in :class:`EntityVersion`, so the audit record only needs to name the
+    version it points at.
+    """
+    return {"entity_type": entity_type, "entity_id": entity_id, "version": version}

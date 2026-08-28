@@ -234,9 +234,36 @@ export const useFireSchedule = () => {
   })
 }
 
-// ---------------- Misc ----------------
-export const useAudit = () =>
-  useQuery({ queryKey: ['audit'], queryFn: () => api.get<AuditEvent[]>('/audit') })
+// ---------------- Audit (read-only, config-plane only; ADR-0014) ----------------
+export interface AuditFilters {
+  target?: string
+  actor?: string
+  event_type?: string
+}
+
+const auditQuery = (filters: AuditFilters): string => {
+  const p = new URLSearchParams()
+  if (filters.target) p.set('target', filters.target)
+  if (filters.actor) p.set('actor', filters.actor)
+  if (filters.event_type) p.set('event_type', filters.event_type)
+  const s = p.toString()
+  return s ? `?${s}` : ''
+}
+
+export const useAudit = (filters: AuditFilters = {}) =>
+  useQuery({
+    queryKey: ['audit', filters],
+    queryFn: () => api.get<AuditEvent[]>(`/audit${auditQuery(filters)}`),
+  })
+
+export const useAuditEventTypes = () =>
+  useQuery({ queryKey: ['audit-event-types'], queryFn: () => api.get<string[]>('/audit/event-types') })
+
+/** A same-filters download URL for the CSV/JSON export endpoint. */
+export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): string => {
+  const q = auditQuery(filters)
+  return `/api/v1/audit/export${q ? `${q}&` : '?'}format=${format}`
+}
 
 export const useAgents = () =>
   useQuery({ queryKey: ['agents'], queryFn: () => api.get<RemoteAgent[]>('/agents') })

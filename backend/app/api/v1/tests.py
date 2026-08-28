@@ -9,7 +9,7 @@ from app.db.session import get_session
 from app.models import Check, Test, TestCheck
 from app.schemas.schemas import TestCheckIn, TestCreate, TestUpdate
 from app.services import versioning, yaml_export
-from app.services.audit import record_audit
+from app.services.audit import record_audit, version_pointer
 
 router = APIRouter()
 
@@ -82,8 +82,11 @@ def create_test(payload: TestCreate, session: Session = Depends(get_session),
     session.refresh(test)
     out = _test_out(session, test)
     versioning.snapshot(session, "test", test.id, test.version, out, actor)
+    # Recorded as a version pointer, not a duplicated diff (ADR-0014 §3): the
+    # snapshot already lives in EntityVersion.
     record_audit(session, actor=actor, action="test.create", entity_type="test", entity_id=test.id,
-                 summary=f"Created test {test.name}", after=out)
+                 summary=f"Created test {test.name}",
+                 after=version_pointer("test", test.id, test.version))
     return out
 
 
@@ -94,6 +97,7 @@ def update_test(test_id: str, payload: TestUpdate, session: Session = Depends(ge
     if not test:
         raise HTTPException(404, "test not found")
     before = _test_out(session, test)
+    before_version = test.version
     data = payload.model_dump(exclude_unset=True)
     for key in ("name", "description", "tags", "run_as_role", "enabled"):
         if key in data and data[key] is not None:
@@ -108,7 +112,9 @@ def update_test(test_id: str, payload: TestUpdate, session: Session = Depends(ge
     out = _test_out(session, test)
     versioning.snapshot(session, "test", test.id, test.version, out, actor)
     record_audit(session, actor=actor, action="test.update", entity_type="test", entity_id=test.id,
-                 summary=f"Updated test {test.name}", before=before, after=out)
+                 summary=f"Updated test {test.name} (v{before_version} → v{test.version})",
+                 before=version_pointer("test", test.id, before_version),
+                 after=version_pointer("test", test.id, test.version))
     return out
 
 
@@ -142,7 +148,7 @@ def rollback_test(test_id: str, version: int, session: Session = Depends(get_ses
     snap = versioning.get_version(session, "test", test_id, version)
     if not snap:
         raise HTTPException(404, "version not found")
-    before = _test_out(session, test)
+    before_version = test.version
     data = snap.snapshot
     for key in ("name", "description", "tags", "run_as_role", "status", "origin",
                 "derivation", "enabled"):
@@ -163,5 +169,7 @@ def rollback_test(test_id: str, version: int, session: Session = Depends(get_ses
     out = _test_out(session, test)
     versioning.snapshot(session, "test", test.id, test.version, out, actor)
     record_audit(session, actor=actor, action="test.rollback", entity_type="test", entity_id=test.id,
-                 summary=f"Rolled test back to v{version}", before=before, after=out)
+                 summary=f"Rolled test back to v{version} (new v{test.version})",
+                 before=version_pointer("test", test.id, before_version),
+                 after=version_pointer("test", test.id, test.version))
     return out

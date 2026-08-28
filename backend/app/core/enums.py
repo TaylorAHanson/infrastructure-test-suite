@@ -203,3 +203,48 @@ class CleanupPolicy(str, Enum):
     ALWAYS = "ALWAYS"
     ON_SUCCESS = "ON_SUCCESS"
     NEVER = "NEVER"
+
+
+class AuditAction(str, Enum):
+    """The closed vocabulary of **config-plane** audit event types (ADR-0014).
+
+    The audit log is the standing forensic control on the configuration changes
+    that have no other gate (ADR-0010). Its scope is **config-plane mutations
+    only** — this enum *is* that scope, and the read/filter/export API surfaces
+    exactly these event types.
+
+    Run-plane events are deliberately **absent**: a run trigger (``run.trigger``)
+    and a run-time safety block (``safety.block``) are not audit records — the
+    retained-history model (#16) covers runs. Keeping them out of this set is
+    what makes the audit view a config-mutation log, not a run log.
+    """
+
+    # Target registry lifecycle (register / edit / deregister).
+    TARGET_REGISTER = "target.register"
+    TARGET_EDIT = "target.edit"
+    TARGET_DEREGISTER = "target.deregister"
+    # Safety-class change (downgrades flagged) + assumable-role registration.
+    TARGET_SAFETY_CLASS_CHANGE = "target.safety_class.change"
+    TARGET_ROLES_REGISTER = "target.roles.register"
+    TARGET_ROLES_CHANGE = "target.roles.change"
+    # Test / Check / Suite authoring (Test create/edit recorded as a version
+    # pointer, not a duplicated diff — the snapshot lives in EntityVersion).
+    TEST_CREATE = "test.create"
+    TEST_UPDATE = "test.update"
+    TEST_ROLLBACK = "test.rollback"
+    TEST_ACCEPT = "test.accept"
+    CHECK_CREATE = "check.create"
+    CHECK_UPDATE = "check.update"
+    CHECK_ROLLBACK = "check.rollback"
+    SUITE_CREATE = "suite.create"
+    SUITE_UPDATE = "suite.update"
+    # The human-only safety override, carrying its typed ceremony reason.
+    SAFETY_OVERRIDE = "safety.override"
+    # Worked-example promotion (authoring config, ADR-0006).
+    EXAMPLE_PROMOTE = "example.promote"
+
+
+#: The config-plane event types the audit log surfaces. Membership here — not a
+#: separate flag — is what decides whether an ``AuditEvent`` appears in the audit
+#: view, so run-plane events (``run.trigger``, ``safety.block``) never leak in.
+CONFIG_PLANE_ACTIONS: frozenset[str] = frozenset(a.value for a in AuditAction)
