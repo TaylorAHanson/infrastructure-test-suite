@@ -96,7 +96,14 @@ function TestDetail({ test }: { test: StudioTest }) {
   const [promoted, setPromoted] = useState(false)
 
   const derivation = test.derivation ?? {}
-  const chosen = (derivation.chosen_operation ?? null) as { service?: string; method?: string; verb?: string } | null
+  const chosen = (derivation.chosen_operation ?? null) as
+    { service?: string; method?: string; verb?: string; params?: Record<string, unknown> } | null
+  const source = (derivation.grounding_source ?? null) as { summary?: string } | null
+  const applied = (derivation.applied ?? {}) as {
+    counterfactual?: { assertion?: string; why?: string }
+    run_as_role?: { role?: string; why?: string }
+    suite?: { name?: string; why?: string }
+  }
 
   return (
     <div className="space-y-4">
@@ -151,15 +158,48 @@ function TestDetail({ test }: { test: StudioTest }) {
           <div className="mb-2 flex items-center gap-2 card-title">
             <Sparkles size="14" /> Derivation panel (auditable by a stranger)
           </div>
-          <dl className="grid grid-cols-[140px_1fr] gap-y-1 text-sm">
+          <dl className="grid grid-cols-[150px_1fr] gap-y-1 text-sm">
             {chosen && (
               <>
                 <dt className="text-muted">Chosen operation</dt>
                 <dd className="font-mono text-info">{chosen.service}.{chosen.method} ({chosen.verb})</dd>
               </>
             )}
+            {chosen?.params && Object.keys(chosen.params).length > 0 && (
+              <>
+                <dt className="text-muted">Param provenance</dt>
+                <dd className="font-mono text-[11px] text-gray-200">{JSON.stringify(chosen.params)}</dd>
+              </>
+            )}
+            {source?.summary && (
+              <>
+                <dt className="text-muted">Grounding entry</dt>
+                <dd className="text-gray-200">{source.summary}</dd>
+              </>
+            )}
             <dt className="text-muted">Coarse risk tier</dt>
             <dd className="text-gray-200">{String(derivation.coarse_risk_tier ?? '—')}</dd>
+            {applied.run_as_role?.role && (
+              <>
+                <dt className="text-muted">Run-as-role</dt>
+                <dd className="text-gray-200">{applied.run_as_role.role}
+                  <span className="text-muted"> — {applied.run_as_role.why}</span></dd>
+              </>
+            )}
+            {applied.counterfactual?.assertion && (
+              <>
+                <dt className="text-muted">Counterfactual</dt>
+                <dd className="text-gray-200">“{applied.counterfactual.assertion}”
+                  <span className="text-muted"> — {applied.counterfactual.why}</span></dd>
+              </>
+            )}
+            {applied.suite?.name && (
+              <>
+                <dt className="text-muted">Suite placement</dt>
+                <dd className="text-gray-200">{applied.suite.name}
+                  <span className="text-muted"> — {applied.suite.why}</span></dd>
+              </>
+            )}
             <dt className="text-muted">Model available</dt>
             <dd className="text-gray-200">{String(derivation.model_available ?? '—')}</dd>
             <dt className="text-muted">Intent</dt>

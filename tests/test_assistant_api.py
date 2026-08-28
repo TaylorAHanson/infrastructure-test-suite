@@ -132,6 +132,34 @@ def _commit_sql_draft(client) -> str:
     return r.json()["id"]
 
 
+def test_confirmed_suggestions_are_applied_on_commit(client):
+    # Suggest-then-human-confirms: when the human ticks the counterfactual +
+    # run-as-role + suite, committing applies exactly those (user stories 6/7).
+    suites = client.get("/api/v1/suites").json()
+    suite_id = suites[0]["id"]
+    r = client.post("/api/v1/assistant/draft", json={
+        "name": "policy w/ counterfactual",
+        "run_as_role": "analyst",
+        "suite_id": suite_id,
+        "checks": [
+            {"operation": {"service": "clusters", "method": "create"},
+             "assertion": "the operation succeeds", "handler_key": "databricks_sdk"},
+            {"operation": {"service": "clusters", "method": "create",
+                           "params": {"demo_outcome": "deny"}},
+             "assertion": "a non-compliant cluster is denied", "kind": "counterfactual",
+             "counterpart_index": 0, "handler_key": "databricks_sdk"}],
+        "derivation": {"applied": {"run_as_role": {"role": "analyst", "why": "registered"}}}})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["run_as_role"] == "analyst"
+    assert len(body["members"]) == 2
+    cf = [m for m in body["members"] if m["kind"] == "counterfactual"][0]
+    assert cf["counterpart_check_id"] is not None
+    # Filed into the confirmed suite.
+    suite = client.get(f"/api/v1/suites/{suite_id}").json()
+    assert body["id"] in suite["test_ids"]
+
+
 def test_committed_draft_is_a_draft(client):
     tid = _commit_sql_draft(client)
     body = client.get(f"/api/v1/tests/{tid}").json()

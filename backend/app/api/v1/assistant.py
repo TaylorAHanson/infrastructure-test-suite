@@ -47,7 +47,7 @@ def commit_draft(payload: DraftCommitIn,
         test = assistant.commit_draft(session, payload, actor=actor)
     except OperationBlocked as exc:
         raise HTTPException(422, str(exc))
-    return assistant._test_snapshot(session, test)
+    return assistant.test_snapshot(session, test)
 
 
 @router.post("/rca")

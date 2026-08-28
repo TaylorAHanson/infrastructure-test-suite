@@ -4,6 +4,7 @@ import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
 import { useAssistantTurn, useCommitDraft } from '../hooks/queries'
+import type { DraftCheckBody } from '../hooks/queries'
 import type { DraftProposal, RcaSuggestion } from '../types'
 
 // The single, app-wide Assistant surface (ADR-0012): a slide-out shelf reachable
@@ -20,6 +21,11 @@ export default function AssistantShelf() {
   const [rca, setRca] = useState<RcaSuggestion | null>(null)
   const [savedId, setSavedId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Which guided-authoring suggestions the human has confirmed (default off:
+  // nothing is applied without an explicit confirm — ADR-0006 §5, story 7).
+  const [applyCf, setApplyCf] = useState(false)
+  const [applyRole, setApplyRole] = useState(false)
+  const [applySuite, setApplySuite] = useState(false)
 
   async function ask() {
     if (!text.trim()) return
@@ -27,6 +33,9 @@ export default function AssistantShelf() {
     setDraft(null)
     setRca(null)
     setSavedId(null)
+    setApplyCf(false)
+    setApplyRole(false)
+    setApplySuite(false)
     try {
       const res = await turn.mutateAsync({ turn: text, page_context: pageContext })
       if (res.mode === 'authoring') setDraft(res.draft ?? null)
@@ -39,17 +48,44 @@ export default function AssistantShelf() {
   async function saveDraft() {
     if (!draft || !draft.checks.length) return
     setError(null)
+
+    const checks: DraftCheckBody[] = draft.checks.map((c) => ({
+      operation: c.operation,
+      handler_key: c.handler_key,
+      assertion: c.assertion,
+      kind: c.kind,
+    }))
+    // Apply only the suggestions the human confirmed (suggest-then-confirm).
+    const applied: Record<string, unknown> = {}
+    const cf = draft.suggested_counterfactual
+    if (applyCf && cf) {
+      checks.push({
+        operation: cf.operation,
+        handler_key: cf.handler_key,
+        assertion: cf.assertion,
+        kind: 'counterfactual',
+        counterpart_index: 0,
+      })
+      applied.counterfactual = { assertion: cf.assertion, why: cf.why }
+    }
+    const roleRef = draft.suggested_run_as_role?.role
+    const runAsRole =
+      applyRole && roleRef ? (roleRef.label || roleRef.group_id) : undefined
+    if (runAsRole) applied.run_as_role = { role: runAsRole, why: draft.suggested_run_as_role?.why }
+    const suiteId = applySuite ? draft.suggested_suite?.suite_id : undefined
+    if (suiteId) applied.suite = { suite_id: suiteId, name: draft.suggested_suite?.name,
+                                   why: draft.suggested_suite?.why }
+
     try {
       const created = await commit.mutateAsync({
         name: draft.name || 'Untitled Test',
         description: draft.description,
-        checks: draft.checks.map((c) => ({
-          operation: c.operation,
-          handler_key: c.handler_key,
-          assertion: c.assertion,
-          kind: c.kind,
-        })),
-        derivation: draft.derivation,
+        checks,
+        run_as_role: runAsRole,
+        suite_id: suiteId,
+        // Persist what was applied + why, so the derivation panel is auditable
+        // by a stranger (ADR-0006 §8, user story 11).
+        derivation: { ...draft.derivation, applied },
       })
       setSavedId(created.id)
     } catch (e) {
@@ -89,7 +125,16 @@ export default function AssistantShelf() {
             {error && <div className="mb-3 text-sm text-fail">{error}</div>}
             {turn.isPending && <div className="text-sm text-muted">Thinking…</div>}
 
-            {draft && <DraftView draft={draft} savedId={savedId} onSave={saveDraft} saving={commit.isPending} />}
+            {draft && (
+              <DraftView
+                draft={draft}
+                savedId={savedId}
+                onSave={saveDraft}
+                saving={commit.isPending}
+                toggles={{ applyCf, applyRole, applySuite }}
+                setToggles={{ setApplyCf, setApplyRole, setApplySuite }}
+              />
+            )}
             {rca && <RcaView rca={rca} />}
           </div>
 
@@ -119,16 +164,30 @@ function riskColor(tier: string): string {
   return tier === 'R0' ? 'text-pass' : tier === 'R3' ? 'text-fail' : 'text-warn'
 }
 
+interface Toggles {
+  applyCf: boolean
+  applyRole: boolean
+  applySuite: boolean
+}
+
 function DraftView({
   draft,
   savedId,
   onSave,
   saving,
+  toggles,
+  setToggles,
 }: {
   draft: DraftProposal
   savedId: string | null
   onSave: () => void
   saving: boolean
+  toggles: Toggles
+  setToggles: {
+    setApplyCf: (v: boolean) => void
+    setApplyRole: (v: boolean) => void
+    setApplySuite: (v: boolean) => void
+  }
 }) {
   if (draft.clarifying_question) {
     return (
@@ -177,19 +236,22 @@ function DraftView({
 
       {(draft.suggested_counterfactual || draft.suggested_suite || draft.suggested_run_as_role) && (
         <div className="card">
-          <div className="mb-2 card-title">Guided suggestions (confirm to apply)</div>
+          <div className="mb-2 card-title">Guided suggestions (tick to apply on save)</div>
           {draft.suggested_counterfactual && (
-            <Suggestion label="Counterfactual" why={draft.suggested_counterfactual.why}>
+            <Suggestion label="Counterfactual" why={draft.suggested_counterfactual.why}
+                        checked={toggles.applyCf} onChange={setToggles.setApplyCf}>
               “{draft.suggested_counterfactual.assertion}”
             </Suggestion>
           )}
           {draft.suggested_run_as_role && (
-            <Suggestion label="Run-as-role" why={draft.suggested_run_as_role.why}>
+            <Suggestion label="Run-as-role" why={draft.suggested_run_as_role.why}
+                        checked={toggles.applyRole} onChange={setToggles.setApplyRole}>
               {draft.suggested_run_as_role.role.label || draft.suggested_run_as_role.role.group_id}
             </Suggestion>
           )}
           {draft.suggested_suite && (
-            <Suggestion label="Suite placement" why={draft.suggested_suite.why}>
+            <Suggestion label="Suite placement" why={draft.suggested_suite.why}
+                        checked={toggles.applySuite} onChange={setToggles.setApplySuite}>
               {draft.suggested_suite.name}
             </Suggestion>
           )}
@@ -205,15 +267,35 @@ function DraftView({
   )
 }
 
-function Suggestion({ label, why, children }: { label: string; why: string; children: ReactNode }) {
+function Suggestion({
+  label,
+  why,
+  children,
+  checked,
+  onChange,
+}: {
+  label: string
+  why: string
+  children: ReactNode
+  checked: boolean
+  onChange: (v: boolean) => void
+}) {
   return (
-    <div className="mb-2 rounded-lg border border-edge bg-ink p-2">
-      <div className="flex items-center gap-2">
-        <span className="badge bg-panel text-accent">{label}</span>
-        <span className="text-sm text-gray-200">{children}</span>
+    <label className="mb-2 flex cursor-pointer gap-2 rounded-lg border border-edge bg-ink p-2">
+      <input
+        type="checkbox"
+        className="mt-1"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="badge bg-panel text-accent">{label}</span>
+          <span className="text-sm text-gray-200">{children}</span>
+        </div>
+        <div className="mt-1 text-[11px] text-muted">{why}</div>
       </div>
-      <div className="mt-1 text-[11px] text-muted">{why}</div>
-    </div>
+    </label>
   )
 }
 

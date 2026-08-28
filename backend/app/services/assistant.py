@@ -153,7 +153,7 @@ def commit_draft(session: Session, payload: DraftCommitIn, actor: str = "assista
     session.commit()
     session.refresh(test)
 
-    out = _test_snapshot(session, test)
+    out = test_snapshot(session, test)
     versioning.snapshot(session, "test", test.id, test.version, out, actor)
     record_audit(session, actor=actor, action="test.create", entity_type="test",
                  entity_id=test.id, summary=f"Assistant drafted test {test.name}", after=out)
@@ -171,14 +171,14 @@ def accept_test(session: Session, test_id: str, actor: str = "api-user") -> Test
         raise ValueError("test not found")
     if test.status == TestStatus.ACTIVE:
         return test
-    before = _test_snapshot(session, test)
+    before = test_snapshot(session, test)
     test.status = TestStatus.ACTIVE
     test.version += 1
     test.updated_at = utcnow()
     session.add(test)
     session.commit()
     session.refresh(test)
-    out = _test_snapshot(session, test)
+    out = test_snapshot(session, test)
     versioning.snapshot(session, "test", test.id, test.version, out, actor)
     record_audit(session, actor=actor, action="test.accept", entity_type="test",
                  entity_id=test.id, summary=f"Accepted draft {test.name} → Active",
@@ -241,7 +241,7 @@ def _append_to_suite(session: Session, suite_id: str, test_id: str) -> None:
     session.add(SuiteMember(suite_id=suite_id, test_id=test_id, sort_order=len(existing)))
 
 
-def _test_snapshot(session: Session, test: Test) -> dict:
+def test_snapshot(session: Session, test: Test) -> dict:
     rows = session.exec(
         select(TestCheck).where(TestCheck.test_id == test.id).order_by(TestCheck.sort_order)  # type: ignore[arg-type]
     ).all()
