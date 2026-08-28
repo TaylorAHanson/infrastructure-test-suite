@@ -41,7 +41,11 @@ from app.services.rca import LANE_OVERNIGHT, LANE_RECENT
 
 #: A failing current state that a triager should act on. The other terminal
 #: verdicts (PASS / SKIPPED / CANCELLED) are non-actionable → "Everything else".
-_ACTIONABLE = frozenset({RunStatus.FAIL, RunStatus.ERROR, RunStatus.BLOCKED_BY_SAFETY})
+#: This is *the* definition of a finding's actionability — the run-completion
+#: webhook (ADR-0016) reuses it verbatim so "≥ 1 finding" means exactly what the
+#: "What's Interesting" view surfaces, inventing no new regression logic.
+ACTIONABLE_VERDICTS = frozenset({RunStatus.FAIL, RunStatus.ERROR, RunStatus.BLOCKED_BY_SAFETY})
+_ACTIONABLE = ACTIONABLE_VERDICTS
 
 #: Lane order for the feed — Recent-deployments first, Overnight second
 #: (the two-lanes-on-one-screen reading order, ADR-0009 §2).

@@ -1,5 +1,10 @@
+import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
-import { useAdminSettings } from '../hooks/queries'
+import {
+  useAdminSettings,
+  useUpdateWebhookConfig,
+  useWebhookConfig,
+} from '../hooks/queries'
 
 // Remote agents were dropped as out of scope, so this page no longer calls the
 // removed /agents endpoint. It renders only what /admin/settings actually
@@ -28,6 +33,70 @@ const COUNT_LABEL: Record<string, string> = {
   suites: 'Suites',
   targets: 'Targets',
   check_runs: 'CheckRuns',
+}
+
+// The run-completion webhook sink (ADR-0016): the platform's only push. A
+// single generic outbound POST fires on a completed run with ≥ 1 finding
+// (silent on all-green; the toggle widens to every completion). Editable by any
+// authenticated human with no ceremony — but every edit is audited.
+function WebhookSink() {
+  const { data } = useWebhookConfig()
+  const update = useUpdateWebhookConfig()
+
+  const [urls, setUrls] = useState('')
+  const [enabled, setEnabled] = useState(false)
+  const [fireAll, setFireAll] = useState(false)
+
+  // Hydrate the form once the config loads (and after a save re-fetches it).
+  useEffect(() => {
+    if (!data) return
+    setUrls((data.urls ?? []).join('\n'))
+    setEnabled(data.enabled)
+    setFireAll(data.fire_on_all_completions)
+  }, [data])
+
+  const save = () => {
+    update.mutate({
+      urls: urls.split('\n').map((u) => u.trim()).filter(Boolean),
+      enabled,
+      fire_on_all_completions: fireAll,
+    })
+  }
+
+  return (
+    <div className="card lg:col-span-2">
+      <div className="card-title mb-2">Run-completion webhook</div>
+      <p className="mb-3 text-xs text-muted">
+        The platform's only push: a single generic outbound POST on run completion. Point it at your own
+        receiver (Slack / PagerDuty / email relay). Fires when a completed run produces ≥ 1 finding — silent
+        on all-green — unless you widen it to every completion. Best-effort delivery; edits are audited.
+      </p>
+      <label className="mb-1 block text-xs text-muted">Sink URL(s) — one per line</label>
+      <textarea
+        className="input mb-3 h-20 w-full font-mono text-xs"
+        placeholder="https://hooks.example.com/services/…"
+        value={urls}
+        onChange={(e) => setUrls(e.target.value)}
+      />
+      <div className="mb-3 flex flex-wrap gap-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          Enabled
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={fireAll} onChange={(e) => setFireAll(e.target.checked)} />
+          Fire on every completion (not just findings)
+        </label>
+      </div>
+      <div className="flex items-center gap-3">
+        <button className="btn btn-accent" onClick={save} disabled={update.isPending}>
+          {update.isPending ? 'Saving…' : 'Save sink config'}
+        </button>
+        {update.isSuccess && <span className="text-xs text-info">Saved.</span>}
+        {update.isError && <span className="text-xs text-warn">{String(update.error)}</span>}
+      </div>
+    </div>
+  )
 }
 
 export default function Admin() {
@@ -75,6 +144,8 @@ export default function Admin() {
             Blue = connectivity stage (failure here ≤ AUTHORIZE); amber = functional (OPERATE / VERIFY).
           </p>
         </div>
+
+        <WebhookSink />
 
         <div className="card lg:col-span-2">
           <div className="card-title mb-2">Failure taxonomy</div>

@@ -242,6 +242,8 @@ class AuditAction(str, Enum):
     SAFETY_OVERRIDE = "safety.override"
     # Worked-example promotion (authoring config, ADR-0006).
     EXAMPLE_PROMOTE = "example.promote"
+    # Run-completion webhook sink edit (the sink is itself config, ADR-0016 §2).
+    WEBHOOK_CONFIG_CHANGE = "webhook.config.change"
 
 
 #: The config-plane event types the audit log surfaces. Membership here — not a

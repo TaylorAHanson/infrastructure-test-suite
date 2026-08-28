@@ -105,6 +105,24 @@ class Settings(BaseSettings):
     # not a tuned budget — cost stays a non-goal (ADR-0007).
     FINDINGS_RECENT_WINDOW_HOURS: int = 24
 
+    # ----- Run-completion webhook (ADR-0016) ----------------------------
+    # The platform's only push: a single generic outbound POST on run
+    # completion. The sink URL(s) + firing toggle live in a Lakebase config
+    # record (:class:`app.models.WebhookConfig`), not here — these are only the
+    # delivery knobs. Best-effort: a bounded retry, failures logged, no durable
+    # queue (ADR-0016 §5).
+    #
+    # Base URL of this deployment (its public app URL), used to build the deep
+    # link into the "What's Interesting" view carried in the payload. Empty
+    # yields a relative link the receiver can resolve against its known host.
+    WEBHOOK_DEEP_LINK_BASE_URL: str = ""
+    WEBHOOK_MAX_RETRIES: int = 3
+    WEBHOOK_RETRY_BACKOFF_SECONDS: float = 0.5
+    WEBHOOK_TIMEOUT_SECONDS: float = 10.0
+    # Deliver on a background thread so the run engine never blocks on the POST.
+    # Tests flip this off for deterministic, inline delivery.
+    WEBHOOK_DELIVERY_ASYNC: bool = True
+
     # ----- Telemetry ----------------------------------------------------
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None
