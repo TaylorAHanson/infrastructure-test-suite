@@ -185,8 +185,11 @@ def test_safety_class_change_is_audited_as_downgrade(client):
     from app.models import AuditEvent
 
     prod = register_target(client, "to-downgrade", "prod-for-us").json()
-    # prod-for-us (R1 cap) → sandbox (R2 cap) widens the blast radius: a downgrade.
-    resp = client.patch(f"/api/v1/targets/{prod['id']}", json={"safety_class": "sandbox"})
+    # prod-for-us (R1 cap) → sandbox (R2 cap) widens the blast radius: a downgrade,
+    # which requires the friction ceremony (ADR-0010).
+    resp = client.patch(f"/api/v1/targets/{prod['id']}", json={
+        "safety_class": "sandbox",
+        "ceremony": {"typed_confirmation": "i understand", "reason": "audited downgrade"}})
     assert resp.status_code == 200 and resp.json()["safety_class"] == "sandbox"
 
     with session_scope() as s:
