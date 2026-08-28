@@ -91,6 +91,20 @@ class Settings(BaseSettings):
     # force-reclaimed even if still heartbeating, so a wedged run frees its lock.
     MAX_RUN_DURATION_SECONDS: int = 1800
 
+    # ----- Retained history (ADR-0015) ----------------------------------
+    # The single configurable retention knob: check-result history is pruned to
+    # this rolling window. Cost is a non-goal (ADR-0007) — one generous default,
+    # not a tuned budget. The most-recent green per (target, check) is preserved
+    # past the window regardless, so long-stable-check provenance stays honest.
+    RETENTION_WINDOW_DAYS: int = 90
+
+    # ----- Findings feed (ADR-0009, #33) --------------------------------
+    # The Recent-deployments lane is a rolling window of CI-triggered,
+    # commit-scoped runs; a failing series older than this (or not
+    # deploy-attributable) defaults to the Overnight lane. One generous knob,
+    # not a tuned budget — cost stays a non-goal (ADR-0007).
+    FINDINGS_RECENT_WINDOW_HOURS: int = 24
+
     # ----- Telemetry ----------------------------------------------------
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None

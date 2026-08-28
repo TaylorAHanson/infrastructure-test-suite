@@ -128,6 +128,7 @@ def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
         override=payload.override.model_dump() if payload.override else {},
         status=RunStatus.PENDING,
         git_sha=getattr(settings, "GIT_SHA", "unknown"),
+        event_ref=payload.event_ref,
         app_version=getattr(settings, "APP_VERSION", "0.0.0"),
     )
     session.add(request)
@@ -238,6 +239,7 @@ def expand_request(session: Session, request: RunRequest) -> list[CheckRun]:
                 risk_tier=sel.check.risk_tier,
                 workspace_name=(target.workspace_name if target else None),
                 git_sha=request.git_sha,
+                event_ref=request.event_ref,
                 app_version=request.app_version,
                 verdict=RunStatus.PENDING,
             )
