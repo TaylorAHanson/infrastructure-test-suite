@@ -123,6 +123,31 @@ class SafetyClass(str, Enum):
         """
         return self in (SafetyClass.SANDBOX, SafetyClass.PROD_FOR_US)
 
+    @property
+    def max_risk_tier(self) -> "RiskTier":
+        """The highest risk tier this class will run *without* an override.
+
+        The explicit, inspectable class→tier matrix (ADR-0004 §1, user story 16):
+        ``read-only`` → R0, ``prod-for-us`` → R1, ``sandbox`` → R2. **R3 is never
+        reachable** by any class — it is the blocklist's global floor (ADR-0017).
+        """
+        return MAX_TIER_BY_CLASS[self]
+
+
+# The class→max-risk-tier matrix (ADR-0004 §1). Kept as an explicit, inspectable
+# table so the cap is auditable (user story 16). R2 on ``prod-for-us`` is only
+# reachable via the human-only override; R3 is never in the table.
+MAX_TIER_BY_CLASS: dict["SafetyClass", "RiskTier"] = {
+    SafetyClass.READ_ONLY: RiskTier.R0,
+    SafetyClass.PROD_FOR_US: RiskTier.R1,
+    SafetyClass.SANDBOX: RiskTier.R2,
+}
+
+#: The single tier an override may elevate to, and only on ``prod-for-us``
+#: (ADR-0004 §5): R2. R3 stays forbidden even under override.
+OVERRIDE_ELEVATED_TIER: "RiskTier" = RiskTier.R2
+OVERRIDE_ELIGIBLE_CLASS: "SafetyClass" = SafetyClass.PROD_FOR_US
+
 
 class Depth(str, Enum):
     """The coarse how-far-up-the-spine dial on a Run (ADR-0007).

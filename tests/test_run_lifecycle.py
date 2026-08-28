@@ -55,7 +55,14 @@ def test_run_over_seeded_test_emits_stage_outcomes(client):
 def test_counterfactual_passes_when_operation_is_denied(client):
     tests = client.get("/api/v1/tests").json()
     policy = next(t for t in tests if t["name"] == "Cluster policy enforcement")
-    resp = client.post("/api/v1/runs?inline=true", json={"test_ids": [policy["id"]], "depth": "full"})
+    # The policy Checks are mutating (cluster create, R1); run them against a
+    # sandbox target so the safety gate permits the attempt and the *policy*
+    # denial (not the class cap) is what fails it closed. On a read-only target
+    # the same op is BLOCKED_BY_SAFETY (covered in test_safety_enforcement).
+    targets = client.get("/api/v1/targets").json()
+    sandbox = next(t for t in targets if t["safety_class"] == "sandbox")
+    resp = client.post("/api/v1/runs?inline=true",
+                       json={"test_ids": [policy["id"]], "target_ids": [sandbox["id"]], "depth": "full"})
     run_ids = resp.json()["run_ids"]
     details = [client.get(f"/api/v1/runs/{r}").json() for r in run_ids]
 

@@ -73,6 +73,12 @@ class HandlerContext:
     workspace_client_factory: Optional[Callable[[], Any]] = None
     demo_mode: bool = False
     logger: Any = None
+    #: The run's effective identity for this Check (ADR-0003/0018): the per-target
+    #: SP token, or a token minted with ``assume_group`` when a run-as-role is set.
+    #: None in demo mode / when the target has no identity handle. Handlers use it
+    #: to make the actual SDK call as ``(target, assumed-role?)`` (consumed in Spec 3).
+    token: Optional[str] = None
+    assumed_group: Optional[str] = None
 
     def param(self, key: str, default: Any = None) -> Any:
         return self.params.get(key, default)

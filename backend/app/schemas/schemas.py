@@ -97,6 +97,18 @@ class SuiteUpdate(BaseModel):
 
 
 # --------------------------- Targets ----------------------------
+class RoleProfileIn(BaseModel):
+    """An assumable role-profile registered with a Target (ADR-0018).
+
+    ``safety_class`` is the role's own blast-radius profile; registration
+    rejects a role whose class out-runs the Target's (user story 21).
+    """
+
+    group_id: str
+    label: str = ""
+    safety_class: SafetyClass = SafetyClass.READ_ONLY
+
+
 class TargetCreate(BaseModel):
     name: str
     workspace_name: Optional[str] = None
@@ -104,11 +116,38 @@ class TargetCreate(BaseModel):
     host: Optional[str] = None
     safety_class: SafetyClass = SafetyClass.READ_ONLY
     identity_handle: Optional[str] = None
-    assumable_roles: list[str] = Field(default_factory=list)
+    assumable_roles: list[RoleProfileIn] = Field(default_factory=list)
     tags: dict = Field(default_factory=dict)
 
 
+class TargetUpdate(BaseModel):
+    """Edit a Target. Changing ``safety_class`` is audited (downgrades flagged);
+    changing ``identity_handle`` re-runs the test-connection guard."""
+
+    name: Optional[str] = None
+    workspace_name: Optional[str] = None
+    workspace_id: Optional[str] = None
+    host: Optional[str] = None
+    safety_class: Optional[SafetyClass] = None
+    identity_handle: Optional[str] = None
+    assumable_roles: Optional[list[RoleProfileIn]] = None
+    tags: Optional[dict] = None
+    enabled: Optional[bool] = None
+
+
 # --------------------------- Runs ----------------------------
+class SafetyOverrideIn(BaseModel):
+    """A human, GUI-only authorization to elevate one operation (ADR-0004 §5).
+
+    ``target_name`` is the value the operator typed to confirm; the gate checks
+    it against the target and rejects the override for any machine identity.
+    """
+
+    target_name: str
+    reason: str = ""
+    confirmed: bool = True
+
+
 class RunSubmit(BaseModel):
     """Submit a run request. Empty selection lists mean "all"."""
 
@@ -120,6 +159,8 @@ class RunSubmit(BaseModel):
     requested_by: str = "ui-user"
     request_source: RequestSource = RequestSource.API
     idempotency_key: Optional[str] = None
+    #: An optional per-run safety override (honored only for a human GUI caller).
+    override: Optional[SafetyOverrideIn] = None
 
 
 class RunRequestOut(BaseModel):

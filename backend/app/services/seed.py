@@ -25,7 +25,10 @@ CHECK_SPECS: list[tuple[str, dict]] = [
     ("sql_healthcheck", dict(
         display_name="SQL warehouse healthcheck",
         description="Run a trivial statement on a SQL warehouse and confirm it returns a row.",
-        operation=OperationIn(service="statement_execution", method="execute_statement",
+        # A read-only SELECT: declare verb=GET so the coarse heuristic doesn't
+        # read "execute_statement" as a mutation (ADR-0017 — the author resolves
+        # the verb the heuristic can't infer from an SDK method name).
+        operation=OperationIn(service="statement_execution", method="execute_statement", verb="GET",
                               params={"statement": "SELECT 1 AS healthcheck", "demo_row_count": 1}),
         handler_key="sql_warehouse",
         assertion="the query returns at least one row")),
@@ -64,7 +67,7 @@ CHECK_SPECS: list[tuple[str, dict]] = [
     ("warehouse_healthy_ish", dict(
         display_name="Warehouse came up healthy-ish",
         description="A subjective health read that can only run advisory (agentic).",
-        operation=OperationIn(service="statement_execution", method="execute_statement",
+        operation=OperationIn(service="statement_execution", method="execute_statement", verb="GET",
                               params={"statement": "SELECT 1", "demo_row_count": 1}),
         handler_key="sql_warehouse",
         assertion="the warehouse came up healthy-ish")),

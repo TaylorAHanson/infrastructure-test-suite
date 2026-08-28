@@ -75,6 +75,20 @@ def get_engine() -> Engine:
                 echo=False,
                 connect_args={"check_same_thread": False},
             )
+
+            @event.listens_for(_engine, "connect")
+            def _sqlite_pragmas(dbapi_connection, connection_record):  # noqa: ANN001
+                # The run engine executes CheckRuns concurrently (ThreadPoolExecutor)
+                # and each thread commits its own writes. Vanilla SQLite raises
+                # "database is locked" the instant two writers overlap; WAL +
+                # a busy timeout let concurrent writers wait their turn instead.
+                cursor = dbapi_connection.cursor()
+                try:
+                    cursor.execute("PRAGMA journal_mode=WAL;")
+                    cursor.execute("PRAGMA busy_timeout=5000;")
+                    cursor.execute("PRAGMA synchronous=NORMAL;")
+                finally:
+                    cursor.close()
         else:
             schema = get_db_schema()
             _engine = create_engine(
