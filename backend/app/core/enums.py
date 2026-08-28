@@ -162,6 +162,20 @@ OVERRIDE_ELEVATED_TIER: "RiskTier" = RiskTier.R2
 OVERRIDE_ELIGIBLE_CLASS: "SafetyClass" = SafetyClass.PROD_FOR_US
 
 
+class Phase(str, Enum):
+    """The coarse lifecycle phase of a Run for the async poll contract (ADR-0005).
+
+    ``queued`` — waiting on a busy target's lease (non-terminal, invisible to the
+    fail-closed CI mapping, ADR-0011 §3); ``running`` — dispatched, not yet
+    terminal; ``terminal`` — a final Verdict is available and the caller stops
+    polling. The Verdict itself stays a :class:`RunStatus`.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    TERMINAL = "terminal"
+
+
 class Depth(str, Enum):
     """The coarse how-far-up-the-spine dial on a Run (ADR-0007).
 

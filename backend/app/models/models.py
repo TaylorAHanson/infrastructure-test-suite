@@ -252,7 +252,6 @@ class RunRequest(SQLModel, table=True):
     __tablename__ = "run_requests"
 
     id: str = Field(default_factory=lambda: new_id("req"), primary_key=True)
-    idempotency_key: Optional[str] = Field(default=None, index=True, unique=True)
     requested_by: str = Field(default="system")
     request_source: RequestSource = Field(default=RequestSource.API)
 
@@ -347,6 +346,34 @@ class StageOutcome(SQLModel, table=True):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Target run-lock: a per-target lease (ADR-0011)
+# ---------------------------------------------------------------------------
+class TargetLease(SQLModel, table=True):
+    """A per-target run lease — the target-level serialization lock (ADR-0011).
+
+    One row per target means at most one active Run holds a mutating target at a
+    time (``read-only`` targets never lock, so they never get a row). The holder
+    renews ``heartbeat_at`` / ``expires_at`` while alive; a lease is reclaimable
+    once it lapses past ``expires_at`` (crash) **or** past ``deadline_at`` (a
+    wedged run that exceeds the server-side max run duration). The lock lives in
+    the authoritative store (ADR-0001) — no external lock service — so it is
+    correct even when runs execute across replicas.
+    """
+
+    __tablename__ = "target_leases"
+
+    target_id: str = Field(primary_key=True)
+    #: The RunRequest id currently holding the lease.
+    holder: str = Field(index=True)
+    acquired_at: datetime = Field(default_factory=utcnow)
+    heartbeat_at: datetime = Field(default_factory=utcnow)
+    #: Reclaimable once ``now >= expires_at`` (heartbeat lapsed → crash).
+    expires_at: datetime = Field(default_factory=utcnow, index=True)
+    #: Hard cap: reclaimable once ``now >= deadline_at`` even if heartbeating.
+    deadline_at: datetime = Field(default_factory=utcnow)
 
 
 # ---------------------------------------------------------------------------

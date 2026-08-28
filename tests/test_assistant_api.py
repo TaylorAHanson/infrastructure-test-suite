@@ -167,19 +167,27 @@ def test_committed_draft_is_a_draft(client):
     assert body["origin"] == "assistant"
 
 
+def _run_fanout(client, test_id: str) -> list[str]:
+    """Submit a run for one Test and return its fan-out CheckRun ids.
+
+    The Run API is async (ADR-0005): POST returns a run_id, the engine dispatches
+    via a background task (which the TestClient drives to completion), and the
+    fan-out CheckRuns appear on the verdict resource.
+    """
+    run_id = client.post("/api/v1/runs", json={
+        "test_ids": [test_id], "requested_by": "test"}).json()["run_id"]
+    return client.get(f"/api/v1/runs/{run_id}").json()["run_ids"]
+
+
 def test_draft_never_runs_until_accepted(client):
     tid = _commit_sql_draft(client)
-    # Running the draft explicitly produces no CheckRuns (a Draft never runs).
-    r1 = client.post("/api/v1/runs?inline=true", json={
-        "test_ids": [tid], "requested_by": "test"})
-    assert r1.json()["run_ids"] == []
+    # Running the draft produces no CheckRuns (a Draft never runs, user story 9).
+    assert _run_fanout(client, tid) == []
 
-    # Accept → Active, then it runs (one CheckRun per enabled target).
+    # Accept → Active, then it runs (at least one fan-out CheckRun).
     acc = client.post(f"/api/v1/tests/{tid}/accept")
     assert acc.status_code == 200 and acc.json()["status"] == "active"
-    r2 = client.post("/api/v1/runs?inline=true", json={
-        "test_ids": [tid], "requested_by": "test"})
-    assert len(r2.json()["run_ids"]) >= 1
+    assert len(_run_fanout(client, tid)) >= 1
 
 
 def test_accept_and_edit_create_new_versions(client):

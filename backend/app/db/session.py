@@ -17,7 +17,7 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.core.config import settings
+from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def get_db_schema() -> str:
     to the default. We never fall back to ``public`` (PG 15+ revokes CREATE on
     it for non-owner roles, which the app needs).
     """
-    schema = (getattr(settings, "DB_SCHEMA", "") or _DEFAULT_DB_SCHEMA).strip()
+    schema = (getattr(get_settings(), "DB_SCHEMA", "") or _DEFAULT_DB_SCHEMA).strip()
     if not _SCHEMA_IDENT_RE.match(schema):
         logger.warning("Invalid DB_SCHEMA %r; falling back to '%s'.", schema, _DEFAULT_DB_SCHEMA)
         return _DEFAULT_DB_SCHEMA
@@ -68,6 +68,10 @@ def get_engine() -> Engine:
         if _engine is not None:
             return _engine
 
+        # Read the *live* settings (not the import-time module global): tests
+        # rebuild the engine per case after repointing DATABASE_URL, and a stale
+        # binding would silently share one SQLite file across tests.
+        settings = get_settings()
         url = settings.sqlalchemy_url()
         if url.startswith("sqlite"):
             _engine = create_engine(

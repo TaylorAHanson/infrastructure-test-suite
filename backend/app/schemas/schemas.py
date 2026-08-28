@@ -149,7 +149,13 @@ class SafetyOverrideIn(BaseModel):
 
 
 class RunSubmit(BaseModel):
-    """Submit a run request. Empty selection lists mean "all"."""
+    """Submit a run request. Empty selection lists mean "all".
+
+    There is **no idempotency key** (ADR-0005 §7 / ADR-0011): a retried submit is
+    just another independent run. ``depth`` defaults to ``quick``; ``full`` is an
+    explicit opt-in (ADR-0007 §3) — CI never accidentally triggers an expensive
+    run.
+    """
 
     suite_ids: list[str] = Field(default_factory=list)
     test_ids: list[str] = Field(default_factory=list)
@@ -158,14 +164,22 @@ class RunSubmit(BaseModel):
     depth: Depth = Depth.QUICK
     requested_by: str = "ui-user"
     request_source: RequestSource = RequestSource.API
-    idempotency_key: Optional[str] = None
     #: An optional per-run safety override (honored only for a human GUI caller).
     override: Optional[SafetyOverrideIn] = None
 
 
 class RunRequestOut(BaseModel):
+    """The ``POST /runs`` acknowledgement (ADR-0005 §2).
+
+    ``run_id`` is the id the caller polls with ``GET /runs/{run_id}`` — it is the
+    RunRequest id (``id`` is kept as an alias). The fan-out CheckRun ids appear on
+    the verdict resource once the run has expanded.
+    """
+
     id: str
+    run_id: str
     status: str
+    phase: str = "running"
     depth: Depth
     requested_by: str
     created_at: datetime

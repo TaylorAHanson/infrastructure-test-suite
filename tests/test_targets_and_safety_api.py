@@ -40,12 +40,15 @@ def make_test(client, check_id, name, run_as_role=None):
 
 def run_verdict(client, test_id, target_id, *, request_source="API",
                 override=None, depth="full"):
+    # Async contract (ADR-0005): POST returns a run_id; the run is dispatched by
+    # the engine (the TestClient completes the background task before returning),
+    # then we read the verdict off the run's CheckRun via the verdict resource.
     body = {"test_ids": [test_id], "target_ids": [target_id], "depth": depth,
             "request_source": request_source}
     if override is not None:
         body["override"] = override
-    resp = client.post("/api/v1/runs?inline=true", json=body)
-    run_ids = resp.json()["run_ids"]
+    run_id = client.post("/api/v1/runs", json=body).json()["run_id"]
+    run_ids = client.get(f"/api/v1/runs/{run_id}").json()["run_ids"]
     assert run_ids, "expected at least one CheckRun"
     return client.get(f"/api/v1/runs/{run_ids[0]}").json()["verdict"]
 
