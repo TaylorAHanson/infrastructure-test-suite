@@ -9,6 +9,7 @@ from app.models.models import (  # noqa: F401
     Suite,
     SuiteMember,
     Target,
+    TargetLease,
     Test,
     TestCheck,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "Suite",
     "SuiteMember",
     "Target",
+    "TargetLease",
     "EntityVersion",
     "RunRequest",
     "CheckRun",
