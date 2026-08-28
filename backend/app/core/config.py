@@ -75,6 +75,22 @@ class Settings(BaseSettings):
     POLLER_MAX_CONCURRENT: int = 10
     POLLER_LOCK_TIMEOUT_MINUTES: int = 15
 
+    # ----- Run engine (ADR-0005/0007/0011) ------------------------------
+    # The single configurable concurrency dial (ADR-0007 §5): the max number of
+    # CheckRuns a run may fan out to in parallel. Bounds thundering-herd against
+    # ~100 targets. A latency/scope control, never a cost control (ADR-0007 §6).
+    MAX_RUN_CONCURRENCY: int = 10
+    # Per-target lease (ADR-0011). The holder renews the lease by heartbeat while
+    # alive; a lease whose heartbeat lapses past the TTL is reclaimable, so a
+    # crashed holder can't deadlock a target. Heartbeat interval must be well
+    # under the TTL.
+    LEASE_TTL_SECONDS: int = 90
+    LEASE_HEARTBEAT_SECONDS: int = 20
+    # Server-side max run duration (ADR-0011 §5) — distinct from the caller-owned
+    # poll timeout (ADR-0005 §2). A run holding a lease past this deadline is
+    # force-reclaimed even if still heartbeating, so a wedged run frees its lock.
+    MAX_RUN_DURATION_SECONDS: int = 1800
+
     # ----- Telemetry ----------------------------------------------------
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None

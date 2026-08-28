@@ -18,12 +18,22 @@ connectable/functional are **derived** (never stored) — see the API layer.
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from typing import Optional
 
 from sqlmodel import Session, select
 
-from app.core.enums import Evaluator, Expectation, RiskTier, RunStatus
+from app.core.enums import (
+    Evaluator,
+    Expectation,
+    Phase,
+    RiskTier,
+    RunStatus,
+    SafetyClass,
+    TERMINAL_STATUSES,
+)
 from app.core.ids import utcnow
 from app.core.operations import Operation
 from app.executors import HandlerContext, get_handler
@@ -39,6 +49,7 @@ from app.models import (
 )
 from app.services.assertion_compiler import evaluate_predicate
 from app.services.audit import record_audit
+from app.services import locking
 from app.services.roles import find_role, role_within_class
 from app.services.safety import SafetyOverride, evaluate_operation_safety
 from app.schemas.schemas import RunSubmit
@@ -73,18 +84,39 @@ def _workspace_client_factory():
 # --------------------------------------------------------------------------
 # Submission
 # --------------------------------------------------------------------------
-def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
-    """Create a PENDING run request (idempotent on ``idempotency_key``)."""
-    if payload.idempotency_key:
-        existing = session.exec(
-            select(RunRequest).where(RunRequest.idempotency_key == payload.idempotency_key)
-        ).first()
-        if existing:
-            return existing
+class UnknownTargetError(ValueError):
+    """A submit named a target that isn't registered (ADR-0005 §3: a hard error)."""
 
+
+def _reject_unknown_targets(session: Session, target_ids: list[str]) -> None:
+    """An unknown/unregistered target is a **hard error, never a silent pass**.
+
+    ADR-0005 §3: the caller owns "what changed → which target", and a target it
+    names that we don't have is a mistake we must surface loudly — not drop
+    silently (which would run against fewer targets, or none, and could still
+    roll up to PASS).
+    """
+    if not target_ids:
+        return
+    known = set(session.exec(
+        select(Target.id).where(Target.id.in_(target_ids))  # type: ignore[attr-defined]
+    ).all())
+    unknown = [tid for tid in target_ids if tid not in known]
+    if unknown:
+        raise UnknownTargetError(f"unknown/unregistered target(s): {', '.join(unknown)}")
+
+
+def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
+    """Create a PENDING run request.
+
+    There is **no idempotency key** (ADR-0005 §7, as refined by ADR-0011): a
+    retried ``POST`` is simply another independent run, and the caller tracks the
+    ``run_id`` it holds. A named-but-unregistered target is refused up front
+    (:func:`_reject_unknown_targets`, ADR-0005 §3).
+    """
+    _reject_unknown_targets(session, payload.target_ids)
     settings = _settings()
     request = RunRequest(
-        idempotency_key=payload.idempotency_key,
         requested_by=payload.requested_by,
         request_source=payload.request_source,
         suite_ids=payload.suite_ids,
@@ -459,10 +491,17 @@ def _aggregate(run: CheckRun, check: Check, stage_results: list) -> None:
 
 
 # --------------------------------------------------------------------------
-# Request processing
+# Request processing — expand once, dispatch under per-target locks, finalize
 # --------------------------------------------------------------------------
 def process_request(request_id: str, worker_id: str = "inline") -> int:
-    """Expand and execute a request. Returns the number of CheckRuns executed."""
+    """Expand (once) and dispatch a request; returns CheckRuns executed this pass.
+
+    Safe to call repeatedly: a request left in ``QUEUED`` (waiting on a target
+    lease) is re-dispatched on a later call (the poller drains the queue), and
+    only its still-pending CheckRuns are executed. Concurrency across the
+    fan-out is bounded by the ``MAX_RUN_CONCURRENCY`` setting (ADR-0007 §5), and
+    same-target serialization is enforced by a per-target lease (ADR-0011).
+    """
     from app.db.session import session_scope
 
     with session_scope() as session:
@@ -474,24 +513,204 @@ def process_request(request_id: str, worker_id: str = "inline") -> int:
         request.locked_at = utcnow()
         session.add(request)
         session.commit()
-        runs = expand_request(session, request)
-        run_ids = [r.run_id for r in runs]
+        # Expand only once — a re-dispatch of a queued request must not duplicate
+        # its CheckRuns.
+        already = session.exec(
+            select(CheckRun).where(CheckRun.request_id == request_id)
+        ).first()
+        if already is None:
+            expand_request(session, request)
 
-    max_workers = max(1, getattr(_settings(), "POLLER_MAX_CONCURRENT", 4))
-    if run_ids:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            list(pool.map(execute_check_run, run_ids))
+    executed = _dispatch_pending(request_id)
+    _finalize(request_id)
+    return executed
+
+
+def _dispatch_pending(request_id: str) -> int:
+    """Run the request's still-pending CheckRuns, grouped by target.
+
+    ``read-only`` (non-locking) targets run immediately and concurrently. A
+    mutating target's CheckRuns run only if this request can acquire that
+    target's lease; otherwise they stay pending and the request will re-dispatch
+    once the lease frees (ADR-0011). Returns the count executed this pass.
+    """
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        pending = session.exec(
+            select(CheckRun).where(
+                CheckRun.request_id == request_id,
+                CheckRun.verdict.in_([RunStatus.PENDING, RunStatus.QUEUED]),  # type: ignore[attr-defined]
+            )
+        ).all()
+        groups: dict[Optional[str], list[str]] = {}
+        for r in pending:
+            groups.setdefault(r.target_id, []).append(r.run_id)
+        target_class: dict[Optional[str], Optional[SafetyClass]] = {}
+        for tid in groups:
+            target = session.get(Target, tid) if tid else None
+            target_class[tid] = target.safety_class if target else None
+
+    runnable: list[str] = []
+    locked_targets: list[str] = []
+    queued: list[str] = []
+    for tid, run_ids in groups.items():
+        if tid is not None and locking.needs_lock(target_class[tid]):
+            with session_scope() as session:
+                acquired = locking.acquire(session, tid, holder=request_id)
+            if acquired:
+                locked_targets.append(tid)
+                runnable.extend(run_ids)
+            else:
+                queued.extend(run_ids)  # target busy — this run queues
+        else:
+            runnable.extend(run_ids)  # read-only / unbound: never locks
+
+    if queued:
+        _mark_queued(queued)
+
+    if not runnable:
+        return 0
+
+    stop = threading.Event()
+    heart = None
+    if locked_targets:
+        heart = threading.Thread(
+            target=_heartbeat_loop, args=(locked_targets, request_id, stop), daemon=True)
+        heart.start()
+    try:
+        _execute_batch(runnable)
+    finally:
+        stop.set()
+        if heart is not None:
+            heart.join(timeout=2)
+        for tid in locked_targets:
+            with session_scope() as session:
+                locking.release(session, tid, holder=request_id)
+    return len(runnable)
+
+
+def _execute_batch(run_ids: list[str]) -> None:
+    """Execute CheckRuns concurrently, bounded by the configured concurrency."""
+    if not run_ids:
+        return
+    max_workers = max(1, getattr(_settings(), "MAX_RUN_CONCURRENCY", 10))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        list(pool.map(execute_check_run, run_ids))
+
+
+def _mark_queued(run_ids: list[str]) -> None:
+    """Record CheckRuns as QUEUED (a non-terminal phase, never a Verdict)."""
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        for rid in run_ids:
+            run = session.get(CheckRun, rid)
+            if run is not None and run.verdict in (RunStatus.PENDING, RunStatus.QUEUED):
+                run.verdict = RunStatus.QUEUED
+                session.add(run)
+        session.commit()
+
+
+def _heartbeat_loop(target_ids: list[str], holder: str, stop: threading.Event) -> None:
+    """Renew held leases while the run executes so a live long run keeps its lock."""
+    from app.db.session import session_scope
+
+    interval = max(1, getattr(_settings(), "LEASE_HEARTBEAT_SECONDS", 20))
+    while not stop.wait(interval):
+        try:
+            with session_scope() as session:
+                for tid in target_ids:
+                    locking.heartbeat(session, tid, holder=holder)
+        except Exception as exc:  # noqa: BLE001 - heartbeat is best-effort
+            logger.warning("Lease heartbeat failed for %s: %s", target_ids, exc)
+
+
+def _finalize(request_id: str) -> None:
+    """Roll the request up to a verdict, or back to QUEUED if work still waits."""
+    from app.db.session import session_scope
 
     with session_scope() as session:
         request = session.get(RunRequest, request_id)
-        if request:
-            check_runs = session.exec(
-                select(CheckRun).where(CheckRun.request_id == request_id)
+        if request is None:
+            return
+        check_runs = session.exec(
+            select(CheckRun).where(CheckRun.request_id == request_id)
+        ).all()
+        waiting = any(
+            r.verdict in (RunStatus.PENDING, RunStatus.QUEUED, RunStatus.RUNNING)
+            for r in check_runs
+        )
+        # A request with CheckRuns still waiting on a target lease is not terminal
+        # — it holds at QUEUED until the lease frees (invisible to the CI
+        # contract, which just keeps polling — ADR-0011 §3).
+        request.status = RunStatus.QUEUED if waiting else request_verdict(check_runs)
+        session.add(request)
+        session.commit()
+
+
+def drain_queued(worker_id: str = "drain", limit: int = 100) -> int:
+    """Re-dispatch QUEUED requests (oldest first) so freed leases are picked up.
+
+    Called by the poller after :func:`app.services.locking.sweep`. FIFO by
+    ``created_at`` gives the per-target queue its ordering (ADR-0011 §2).
+    """
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        request_ids = [
+            r.id
+            for r in session.exec(
+                select(RunRequest)
+                .where(RunRequest.status == RunStatus.QUEUED)
+                .order_by(RunRequest.created_at)  # type: ignore[arg-type]
+                .limit(limit)
             ).all()
-            request.status = request_verdict(check_runs)
-            session.add(request)
-            session.commit()
-    return len(run_ids)
+        ]
+    for request_id in request_ids:
+        process_request(request_id, worker_id=worker_id)
+    return len(request_ids)
+
+
+def reap_wedged_runs() -> int:
+    """Terminate runs that overran the server-side max duration (ADR-0011 §5).
+
+    A CheckRun that started executing longer ago than ``MAX_RUN_DURATION_SECONDS``
+    and is still non-terminal is treated as **wedged**: it is recorded ``ERROR``
+    ("max run duration exceeded") and its request re-finalized, so a wedged run
+    reaches a terminal (fail-closed) verdict instead of holding on forever. In-app
+    threads can't be force-killed, so this terminates the run at the
+    platform-contract level; its lease is separately reclaimed by
+    :func:`app.services.locking.sweep` (both keyed on the same deadline), and the
+    wedged worker's own eventual ``release`` is a no-op once another run holds the
+    target. Runs merely ``queued`` (never started) are not wedged and are left be.
+    """
+    from app.db.session import session_scope
+
+    cutoff = utcnow() - timedelta(seconds=getattr(_settings(), "MAX_RUN_DURATION_SECONDS", 1800))
+    reaped_requests: set[str] = set()
+    with session_scope() as session:
+        stale = session.exec(
+            select(CheckRun).where(
+                CheckRun.verdict.in_([RunStatus.PENDING, RunStatus.RUNNING]),  # type: ignore[attr-defined]
+                CheckRun.started_at.is_not(None),  # type: ignore[union-attr]
+                CheckRun.started_at < cutoff,  # type: ignore[operator]
+            )
+        ).all()
+        for run in stale:
+            run.verdict = RunStatus.ERROR
+            run.failure_bucket = "MAX_DURATION_EXCEEDED"
+            run.failure_stage = run.failure_stage or "OPERATE"
+            run.message = "Run exceeded the server-side max duration and was terminated."
+            run.finished_at = utcnow()
+            run.duration_ms = _elapsed_ms(run)
+            session.add(run)
+            if run.request_id:
+                reaped_requests.add(run.request_id)
+        session.commit()
+    for request_id in reaped_requests:
+        _finalize(request_id)
+    return len(reaped_requests)
 
 
 # --------------------------------------------------------------------------
@@ -517,9 +736,74 @@ def request_verdict(check_runs: list[CheckRun]) -> RunStatus:
     return RunStatus.RUNNING
 
 
+def request_phase(request: RunRequest) -> Phase:
+    """The coarse lifecycle phase for the async poll contract (ADR-0005/0011).
+
+    Read straight off the request status: ``queued`` while waiting on a busy
+    target's lease (non-terminal, invisible to the CI fail-closed mapping),
+    ``terminal`` once a final verdict is available, else ``running``. The caller
+    owns its own timeout.
+    """
+    if request.status == RunStatus.QUEUED:
+        return Phase.QUEUED
+    if request.status in TERMINAL_STATUSES:
+        return Phase.TERMINAL
+    return Phase.RUNNING
+
+
 def test_rollup(check_runs: list[CheckRun]) -> dict:
     """Per-Test roll-up: {test_id: verdict} over its gating CheckRuns."""
     by_test: dict[Optional[str], list[CheckRun]] = {}
     for r in check_runs:
         by_test.setdefault(r.test_id, []).append(r)
     return {test_id or "(ad-hoc)": request_verdict(runs).value for test_id, runs in by_test.items()}
+
+
+def failure_summary(check_runs: list[CheckRun]) -> dict:
+    """Failure-taxonomy summary for the verdict resource (ADR-0005 §5).
+
+    ``gating`` counts failure buckets among deterministic (gating) runs — what
+    blocks the pipeline; ``advisory`` counts them among agentic runs — signal
+    that never gates (ADR-0008). Buckets are string ids, not a closed enum.
+    """
+    gating: dict[str, int] = {}
+    advisory: dict[str, int] = {}
+    for r in check_runs:
+        if not r.failure_bucket:
+            continue
+        target = gating if r.gating else advisory
+        target[r.failure_bucket] = target.get(r.failure_bucket, 0) + 1
+    return {"gating": gating, "advisory": advisory}
+
+
+def request_resource(session: Session, request: RunRequest) -> dict:
+    """The one shared verdict resource for a Run (ADR-0005 §5).
+
+    Overall ``verdict`` (fail-closed, gating-only), ``phase`` for the async poll
+    contract, per-Test roll-up, failure-taxonomy summary, the fan-out CheckRun
+    ids, and the derived connectable/functional aggregate. This is what a CI
+    caller polls to gate the pipeline and what the GUI/dashboard render.
+    """
+    from app.core.stages import is_connectivity_stage
+
+    runs = session.exec(select(CheckRun).where(CheckRun.request_id == request.id)).all()
+    gating_runs = [r for r in runs if r.gating]
+    # A cheap connectable/functional aggregate from where gating runs failed: the
+    # connectivity path is broken if any gating run failed at/before AUTHORIZE;
+    # the functional path is broken if any failed at OPERATE/VERIFY. (Per-CheckRun
+    # detail exposes the exact derived view from stage outcomes.)
+    conn_broken = any(r.failure_stage and is_connectivity_stage(r.failure_stage) for r in gating_runs)
+    func_broken = any(r.failure_stage and not is_connectivity_stage(r.failure_stage) for r in gating_runs)
+    connectable = None if not gating_runs else not conn_broken
+    functional = None if not gating_runs else not func_broken
+    return {
+        **request.model_dump(mode="json"),
+        "run_id": request.id,
+        "run_ids": [r.run_id for r in runs],
+        "phase": request_phase(request).value,
+        "verdict": request_verdict(runs).value,
+        "test_rollup": test_rollup(runs),
+        "failure_summary": failure_summary(runs),
+        "connectable": connectable,
+        "functional": functional,
+    }

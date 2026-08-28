@@ -105,9 +105,10 @@ resources:
         - level: CAN_USE
           group_name: "account users"
 
-  # Authoritative scheduled-execution engine. Each fire runs the bundled suite
-  # runner, which materialises a run_request and executes the selected probes,
-  # writing results to the same Lakebase store the app reads.
+  # Nightly regression trigger. It is NOT a scheduled-only engine — it is just
+  # another authenticated caller of the shared Run API the CI Action and GUI use
+  # (ADR-0005), starting a run and polling it fail-closed. Nightly opts into
+  # depth=full (CI defaults to quick); one engine behind all three triggers.
   jobs:
     suite_runner:
       name: "${var.app_name}-suite-runner-${var.environment}"
@@ -120,7 +121,7 @@ resources:
           environment_key: default
           spark_python_task:
             python_file: "databricks/jobs/run_suite.py"
-            parameters: ["--execution_mode", "SMOKE"]
+            parameters: ["--app-url", "${var.validation_app_url}", "--depth", "full"]
       environments:
         - environment_key: default
           spec:
@@ -224,6 +225,9 @@ variables:
   schedule_pause_status:
     description: "PAUSED or UNPAUSED for the suite-runner schedule"
     default: "UNPAUSED"
+  validation_app_url:
+    description: "Base URL of the deployed validation app; the nightly job calls its shared Run API (ADR-0005)."
+    default: ""
 
 targets:
 

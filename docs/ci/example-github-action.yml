@@ -1,0 +1,81 @@
+# Example GitHub Action — gate an infra deploy on the validation Run API.
+#
+# This is an EXAMPLE SNIPPET, not a maintained first-party Action (ADR-0005 §8):
+# the plain-HTTP Run API is the product. Copy it into your own repo's
+# `.github/workflows/` and adapt. Any CI system that can make an authenticated
+# HTTP call can gate the same way — GitHub is exemplified, not required.
+#
+# Contract (ADR-0005):
+#   * POST /api/v1/runs        -> 202 + { "run_id": ... }        (start)
+#   * GET  /api/v1/runs/{id}   -> { "phase": ..., "verdict": ... } (poll)
+#   * The CALLER owns the timeout; the server never holds the connection open.
+#   * Fail-closed gate: only verdict == "PASS" exits 0. fail / BLOCKED_BY_SAFETY
+#     / error / (caller-side) timeout all block the pipeline. A BLOCKED_BY_SAFETY
+#     in CI means a MISCONFIGURED SUITE (it tried an op above the target's cap)
+#     and must fail loudly.
+#   * Depth defaults to "quick"; ask for "full" explicitly if you want it.
+#   * The caller resolves "what changed -> which target(s)" itself and passes
+#     explicit target(s); the app does not resolve targets from your stack.
+
+name: validate-deploy
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # GitHub OIDC -> Databricks federated token (no long-lived secret)
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      APP_URL: ${{ vars.VALIDATION_APP_URL }}      # e.g. https://<app-host>
+      # The CI identity is a DISTINCT, trigger+read-only identity (ADR-0005 §6):
+      # it can start runs and read verdicts, never change safety class or override.
+      SUITE_ID: ${{ vars.VALIDATION_SUITE_ID }}    # the deterministic-only CI Gate suite
+      TARGET_IDS: ${{ vars.VALIDATION_TARGET_IDS }} # resolved from your deploy context
+      TIMEOUT_SECONDS: "900"
+    steps:
+      - name: Acquire a Databricks token via GitHub OIDC
+        id: auth
+        run: |
+          # Preferred: exchange the GitHub OIDC token for a short-lived Databricks
+          # federated token (no shared secret to leak). Fallback: a service-
+          # principal client-credentials secret in repo secrets. Left as a stub —
+          # wire it to your workspace's federation policy.
+          echo "token=${{ secrets.DATABRICKS_TOKEN }}" >> "$GITHUB_OUTPUT"
+
+      - name: Start validation run
+        id: start
+        run: |
+          set -euo pipefail
+          RESP=$(curl -sf -X POST "$APP_URL/api/v1/runs" \
+            -H "Authorization: Bearer ${{ steps.auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"suite_ids\": [\"$SUITE_ID\"], \"target_ids\": [\"$TARGET_IDS\"], \"depth\": \"quick\", \"request_source\": \"CI\"}")
+          RUN_ID=$(echo "$RESP" | python -c 'import sys,json;print(json.load(sys.stdin)["run_id"])')
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Started run $RUN_ID"
+
+      - name: Poll until terminal, then gate fail-closed
+        run: |
+          set -euo pipefail
+          RUN_ID="${{ steps.start.outputs.run_id }}"
+          DEADLINE=$(( $(date +%s) + TIMEOUT_SECONDS ))
+          while :; do
+            BODY=$(curl -sf "$APP_URL/api/v1/runs/$RUN_ID" \
+              -H "Authorization: Bearer ${{ steps.auth.outputs.token }}")
+            PHASE=$(echo "$BODY" | python -c 'import sys,json;print(json.load(sys.stdin)["phase"])')
+            if [ "$PHASE" = "terminal" ]; then
+              VERDICT=$(echo "$BODY" | python -c 'import sys,json;print(json.load(sys.stdin)["verdict"])')
+              echo "Run $RUN_ID terminal: $VERDICT"
+              # queued is just "not terminal yet" — the lock is invisible here.
+              [ "$VERDICT" = "PASS" ] && exit 0 || exit 1
+            fi
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "Run $RUN_ID timed out in phase '$PHASE' — fail-closed"; exit 1
+            fi
+            sleep 5
+          done
