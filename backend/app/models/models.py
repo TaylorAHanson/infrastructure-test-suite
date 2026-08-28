@@ -404,3 +404,37 @@ class AuditEvent(SQLModel, table=True):
     before: dict = _json_col()
     after: dict = _json_col()
     request_source: str = "API"
+
+
+# ---------------------------------------------------------------------------
+# Run-completion webhook sink config (ADR-0016)
+# ---------------------------------------------------------------------------
+#: The fixed primary key of the single global webhook-config row. The webhook
+#: sink is one deployment-wide setting (ADR-0016 §2), so there is exactly one
+#: row, addressed by this constant — never a per-target/per-tenant record.
+WEBHOOK_CONFIG_ID = "webhook"
+
+
+class WebhookConfig(SQLModel, table=True):
+    """The run-completion webhook sink — a single global Lakebase config record.
+
+    The platform's **only push** (ADR-0016): one generic outbound POST to a
+    configured sink, **not** a baked-in Slack/email integration. This row is the
+    sink config — editable by any authenticated human (ADR-0010) and **audited**
+    as a config-plane mutation (ADR-0014), since it is itself a config change.
+
+    * ``urls`` — the sink(s) the completion POST is delivered to. Empty (or
+      ``enabled=False``) means the webhook is off; the default install ships off.
+    * ``fire_on_all_completions`` — the **toggle** (ADR-0016 §3). Off (default):
+      fire only when a completed run produces **≥ 1 finding**, silent on
+      all-green. On: widen to **every** run completion (a heartbeat).
+    """
+
+    __tablename__ = "webhook_config"
+
+    id: str = Field(default=WEBHOOK_CONFIG_ID, primary_key=True)
+    enabled: bool = Field(default=False)
+    urls: list[str] = _json_list()
+    fire_on_all_completions: bool = Field(default=False)
+    updated_by: str = Field(default="system")
+    updated_at: datetime = Field(default_factory=utcnow)

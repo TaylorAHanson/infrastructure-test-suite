@@ -677,6 +677,7 @@ def _finalize(request_id: str) -> None:
         request = session.get(RunRequest, request_id)
         if request is None:
             return
+        was_terminal = request.status in TERMINAL_STATUSES
         check_runs = session.exec(
             select(CheckRun).where(CheckRun.request_id == request_id)
         ).all()
@@ -690,6 +691,21 @@ def _finalize(request_id: str) -> None:
         request.status = RunStatus.QUEUED if waiting else request_verdict(check_runs)
         session.add(request)
         session.commit()
+        # Did this call complete the run? A request reaches a terminal verdict
+        # exactly once (a queued re-dispatch stays non-terminal until the lease
+        # frees), so firing on that transition fires the completion webhook once.
+        just_completed = not was_terminal and request.status in TERMINAL_STATUSES
+
+    if just_completed:
+        # The platform's only push (ADR-0016). Best-effort and non-fatal: the
+        # emitter swallows its own errors, but guard here too so a broken webhook
+        # can never break run finalization.
+        try:
+            from app.services.webhook import emit_run_completion
+
+            emit_run_completion(request_id)
+        except Exception as exc:  # noqa: BLE001 - the nudge must never break a run
+            logger.warning("Run-completion webhook skipped (non-fatal): %s", exc)
 
 
 def drain_queued(worker_id: str = "drain", limit: int = 100) -> int:

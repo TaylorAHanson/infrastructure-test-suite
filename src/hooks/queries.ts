@@ -251,6 +251,32 @@ export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): s
 export const useAdminSettings = () =>
   useQuery({ queryKey: ['admin'], queryFn: () => api.get<Record<string, unknown>>('/admin/settings') })
 
+// ---------------- Run-completion webhook sink (ADR-0016) ----------------
+export interface WebhookConfig {
+  id: string
+  enabled: boolean
+  urls: string[]
+  fire_on_all_completions: boolean
+  updated_by: string
+  updated_at: string
+}
+export interface WebhookConfigUpdate {
+  urls?: string[]
+  enabled?: boolean
+  fire_on_all_completions?: boolean
+}
+
+export const useWebhookConfig = () =>
+  useQuery({ queryKey: ['webhook-config'], queryFn: () => api.get<WebhookConfig>('/webhook/config') })
+
+export const useUpdateWebhookConfig = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: WebhookConfigUpdate) => api.put<WebhookConfig>('/webhook/config', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhook-config'] }),
+  })
+}
+
 // ---------------- Analytics (Dashboard + Analytics owned by spec #23) ----------------
 export const useAnalytics = <T,>(name: string, params = '') =>
   useQuery({ queryKey: ['analytics', name, params], queryFn: () => api.get<T>(`/analytics/${name}${params}`) })

@@ -335,3 +335,28 @@ class FindingsFeedOut(BaseModel):
     #: The rolling window (hours) that bounds the Recent-deployments lane.
     window_hours: int
     lanes: list[LaneOut]
+
+
+# --------------------------- Run-completion webhook --------------------------
+class WebhookConfigOut(BaseModel):
+    """The run-completion webhook sink config (ADR-0016)."""
+
+    id: str
+    enabled: bool
+    urls: list[str] = Field(default_factory=list)
+    #: The toggle: off = fire only on ≥ 1 finding; on = fire on every completion.
+    fire_on_all_completions: bool = False
+    updated_by: str = "system"
+    updated_at: datetime
+
+
+class WebhookConfigUpdate(BaseModel):
+    """Edit the sink config; only the fields provided are changed.
+
+    Editable by any authenticated human with no ceremony but **audited**
+    (ADR-0010 / ADR-0014) — the presentation-only sink can't defeat a gate.
+    """
+
+    urls: Optional[list[str]] = None
+    enabled: Optional[bool] = None
+    fire_on_all_completions: Optional[bool] = None
