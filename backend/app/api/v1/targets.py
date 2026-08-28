@@ -166,3 +166,26 @@ def update_target(target_id: str, payload: TargetUpdate, session: Session = Depe
     record_audit(session, actor=actor, action="target.edit", entity_type="target", entity_id=target.id,
                  summary=f"Edited target {out['name']}", before=before, after=out)
     return out
+
+
+@router.delete("/{target_id}")
+def deregister_target(target_id: str, session: Session = Depends(get_session),
+                      actor: str = Query("api-user")) -> dict:
+    """Deregister a target: a deregistered workspace is untouchable again
+    (user story 1). A **soft** deregister (``enabled=False``) — the row and its
+    run history survive, and the deregistration itself is an audited config-plane
+    mutation (ADR-0014). Idempotent: deregistering an already-off target is a no-op
+    write but still records the intent."""
+    target = session.get(Target, target_id)
+    if not target:
+        raise HTTPException(404, "target not found")
+    before = target.model_dump(mode="json")
+    target.enabled = False
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+    out = target.model_dump(mode="json")
+    record_audit(session, actor=actor, action="target.deregister", entity_type="target",
+                 entity_id=target.id, summary=f"Deregistered target {out['name']}",
+                 before=before, after=out)
+    return out
