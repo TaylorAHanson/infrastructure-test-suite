@@ -164,6 +164,10 @@ class RunSubmit(BaseModel):
     depth: Depth = Depth.QUICK
     requested_by: str = "ui-user"
     request_source: RequestSource = RequestSource.API
+    #: A non-deploy event reference (e.g. "metastore grant change · 21:14") to pin
+    #: on the run header for an Overnight run with no commit (ADR-0015). None for
+    #: an ordinary CI-triggered run, which carries the commit sha instead.
+    event_ref: Optional[str] = None
     #: An optional per-run safety override (honored only for a human GUI caller).
     override: Optional[SafetyOverrideIn] = None
 

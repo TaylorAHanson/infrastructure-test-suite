@@ -272,6 +272,11 @@ class RunRequest(SQLModel, table=True):
     locked_at: Optional[datetime] = None
 
     git_sha: str = "unknown"
+    #: A non-deploy event reference (e.g. "metastore grant change · 21:14")
+    #: recorded alongside the commit sha (ADR-0015), so an Overnight finding —
+    #: fleet drift not attributable to a deploy — still has a provenance spine
+    #: when there is no commit. Free text; None for an ordinary CI-triggered run.
+    event_ref: Optional[str] = Field(default=None)
     app_version: str = "0.0.0"
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
@@ -313,6 +318,10 @@ class CheckRun(SQLModel, table=True):
     # Context (denormalized for provenance queries).
     workspace_name: Optional[str] = None
     git_sha: str = "unknown"
+    #: The header's non-deploy event ref, denormalized onto the atomic record so
+    #: the provenance/flaky consumers query check history without a join to the
+    #: run header (ADR-0015), the same way ``git_sha`` is carried here.
+    event_ref: Optional[str] = Field(default=None)
     app_version: str = "0.0.0"
 
     evidence: dict = _json_col()
