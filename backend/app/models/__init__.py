@@ -1,6 +1,7 @@
 """SQLModel table definitions (re-exported for convenience)."""
 from app.models.models import (  # noqa: F401
     AuditEvent,
+    Branding,
     Check,
     CheckRun,
     EntityVersion,
@@ -29,4 +30,5 @@ __all__ = [
     "CheckRun",
     "StageOutcome",
     "AuditEvent",
+    "Branding",
 ]

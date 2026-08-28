@@ -143,6 +143,13 @@ def _seed_examples(session: Session) -> int:
 
 def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> None:
     """Seed Check/Test/Suite exemplars (idempotent)."""
+    # Branding is seeded independently of the catalog so an un-branded install
+    # always has the finished default record (ADR-0013 §5), even once the catalog
+    # already exists. Idempotent by the fixed singleton id.
+    from app.services.branding import get_or_seed as seed_branding
+
+    seed_branding(session)
+
     if session.exec(select(Check)).first():
         logger.info("Seed skipped: checks already present.")
         return

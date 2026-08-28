@@ -13,8 +13,9 @@ import {
   Sparkles,
 } from 'lucide-react'
 
-import { useAdminSettings } from '../hooks/queries'
+import { useAdminSettings, useBranding } from '../hooks/queries'
 import { AssistantProvider } from '../lib/assistantContext'
+import { useApplyBranding } from '../lib/branding'
 import AssistantShelf from './AssistantShelf'
 
 const NAV = [
@@ -32,18 +33,34 @@ const NAV = [
 
 export default function Layout() {
   const { data: admin } = useAdminSettings()
+  const { data: branding } = useBranding()
+  // Instant-apply: title, favicon, and theme follow the branding record + poll.
+  useApplyBranding(branding)
   const flags = (admin?.feature_flags ?? {}) as Record<string, boolean>
   const demo = flags.demo_mode
+  const appName = branding?.app_name ?? 'Validation Platform'
+  const footer = branding?.footer_text
 
   return (
     <div className="flex h-full">
       <aside className="flex w-64 shrink-0 flex-col border-r border-edge bg-ink p-4">
         <div className="mb-6 flex items-center gap-2 px-2">
-          <ShieldAlert className="text-accent" size="22" />
-          <div>
-            <div className="text-sm font-semibold text-white">Regression Validation</div>
-            <div className="text-[11px] text-muted">Databricks connectivity platform</div>
-          </div>
+          {branding?.has_logo ? (
+            <img
+              src={`/api/v1/branding/logo?v=${branding.updated_at}`}
+              alt={appName}
+              className="h-6 w-auto max-w-[160px] object-contain"
+            />
+          ) : (
+            <>
+              {/* Text wordmark when no logo is set (ADR-0013 §5). */}
+              <ShieldAlert className="text-accent" size="22" />
+              <div>
+                <div className="text-sm font-semibold text-white">{appName}</div>
+                <div className="text-[11px] text-muted">Databricks connectivity platform</div>
+              </div>
+            </>
+          )}
         </div>
         <nav className="flex flex-1 flex-col gap-1">
           {NAV.map(({ to, label, icon: Icon, end }) => (
@@ -67,6 +84,7 @@ export default function Layout() {
             <span>Mode</span>
             <span className={demo ? 'text-warn' : 'text-pass'}>{demo ? 'Demo / mock' : 'Live'}</span>
           </div>
+          {footer && <div className="mt-2 border-t border-edge pt-2 text-muted">{footer}</div>}
         </div>
       </aside>
       <main className="flex-1 overflow-auto">

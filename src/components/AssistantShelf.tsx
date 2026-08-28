@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
-import { useAssistantTurn, useCommitDraft } from '../hooks/queries'
+import { useAssistantTurn, useBranding, useCommitDraft } from '../hooks/queries'
 import type { DraftCheckBody } from '../hooks/queries'
 import type { DraftProposal, RcaSuggestion } from '../types'
 
@@ -15,6 +15,9 @@ export default function AssistantShelf() {
   const { pageContext } = useAssistantContext()
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
+  // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
+  const { data: branding } = useBranding()
+  const assistantName = branding?.assistant_name || 'Assistant'
 
   const [text, setText] = useState('')
   const [draft, setDraft] = useState<DraftProposal | null>(null)
@@ -101,7 +104,7 @@ export default function AssistantShelf() {
           onClick={() => setOpen(true)}
         >
           <Sparkles size="16" />
-          Assistant
+          {assistantName}
         </button>
       )}
 
@@ -109,7 +112,7 @@ export default function AssistantShelf() {
         <aside className="fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-edge bg-ink shadow-2xl">
           <div className="flex items-center gap-2 border-b border-edge p-4">
             <Sparkles size="18" className="text-accent" />
-            <span className="text-sm font-semibold text-white">Assistant</span>
+            <span className="text-sm font-semibold text-white">{assistantName}</span>
             <span className="badge bg-panel text-muted">{pageContext.page || 'app'}</span>
             <button className="ml-auto text-muted hover:text-white" onClick={() => setOpen(false)}>
               <X size="18" />

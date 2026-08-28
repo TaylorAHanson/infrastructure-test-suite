@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import Depth, Expectation, RequestSource, SafetyClass
 
@@ -298,6 +298,52 @@ class FindingOut(BaseModel):
     message: str = ""
     finished_at: Optional[datetime] = None
     created_at: datetime
+
+
+# --------------------------- Branding (ADR-0013, #38) --------------------
+class BrandingUpdate(BaseModel):
+    """A branding edit against the **closed** presentation schema (ADR-0013 §1).
+
+    ``extra="forbid"`` *is* the closed-schema wall at the HTTP boundary: an
+    unknown field is rejected with a 422, so branding can never grow a runtime
+    "add a setting." Every field is optional — an edit is a partial patch of the
+    single global record. ``logo``/``favicon`` are ``data:`` URLs (``data:image/
+    png;base64,…`` / SVG); an explicit ``null`` clears the blob.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    app_name: Optional[str] = None
+    assistant_name: Optional[str] = None
+    footer_text: Optional[str] = None
+    theme: Optional[dict] = None
+    logo: Optional[str] = None
+    favicon: Optional[str] = None
+    #: Sentinels so a caller can distinguish "leave the blob" from "clear it":
+    #: set these true to clear the respective blob (``logo``/``favicon`` = null
+    #: is ambiguous with "not provided" under exclude_unset semantics).
+    clear_logo: bool = False
+    clear_favicon: bool = False
+
+
+class BrandingOut(BaseModel):
+    """The public branding record the shell reads on load + via poll (ADR-0013 §4).
+
+    Presentation fields inline; blobs are **not** inlined (they are served from
+    their own routes) — only ``has_logo``/``has_favicon`` flags travel here, so
+    the poll payload stays small.
+    """
+
+    app_name: str
+    assistant_name: str
+    footer_text: str
+    theme: dict
+    has_logo: bool = False
+    logo_content_type: Optional[str] = None
+    has_favicon: bool = False
+    favicon_content_type: Optional[str] = None
+    updated_at: datetime
+    updated_by: str = "system"
 
 
 class LaneOut(BaseModel):

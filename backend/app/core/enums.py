@@ -240,6 +240,8 @@ class AuditAction(str, Enum):
     SUITE_UPDATE = "suite.update"
     # The human-only safety override, carrying its typed ceremony reason.
     SAFETY_OVERRIDE = "safety.override"
+    # Branding edit (presentation-only, no ceremony, but audited — ADR-0013 §6).
+    BRANDING_EDIT = "branding.edit"
     # Worked-example promotion (authoring config, ADR-0006).
     EXAMPLE_PROMOTE = "example.promote"
 

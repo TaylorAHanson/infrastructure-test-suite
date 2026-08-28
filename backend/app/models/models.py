@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import JSON, Column, Index, Text
+from sqlalchemy import JSON, Column, Index, LargeBinary, Text
 from sqlmodel import Field, SQLModel
 
 from app.core.enums import (
@@ -404,3 +404,41 @@ class AuditEvent(SQLModel, table=True):
     before: dict = _json_col()
     after: dict = _json_col()
     request_source: str = "API"
+
+
+# ---------------------------------------------------------------------------
+# Branding: one global presentation record (ADR-0013)
+# ---------------------------------------------------------------------------
+class Branding(SQLModel, table=True):
+    """The single global runtime white-label record — a **fixed, closed,
+    presentation-only** schema (ADR-0013).
+
+    There is exactly one row per deployment (``id == "global"``). Every column
+    is presentation: nothing here changes what the platform *does*, only how it
+    looks and reads. Adding a field is a code migration, never a runtime "add a
+    setting" — which is the wall that keeps branding presentation-only. Logo and
+    favicon are ``≤ 1 MB`` PNG/SVG **blobs** stored inline (ADR-0013 §3), so the
+    install stays self-contained with no object store.
+    """
+
+    __tablename__ = "branding"
+
+    id: str = Field(default="global", primary_key=True)
+    app_name: str = Field(default="Validation Platform")
+    #: The Assistant's display name (the first brandable field, ADR-0012).
+    assistant_name: str = Field(default="Assistant")
+    footer_text: str = Field(default="")
+    #: ``{"accent": "#rrggbb", "tokens": {name: {"light", "dark"}}}`` — a closed
+    #: named-token palette applied as CSS variables, light/dark-aware. Validated
+    #: against the closed grammar in :mod:`app.core.branding`; never free-form CSS.
+    theme: dict = _json_col()
+
+    #: Logo/favicon blobs + their MIME types (None = fall back to the wordmark /
+    #: the bundled default favicon). Served as raw bytes from dedicated routes.
+    logo: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    logo_content_type: Optional[str] = Field(default=None)
+    favicon: Optional[bytes] = Field(default=None, sa_column=Column(LargeBinary))
+    favicon_content_type: Optional[str] = Field(default=None)
+
+    updated_at: datetime = Field(default_factory=utcnow)
+    updated_by: str = Field(default="system")
