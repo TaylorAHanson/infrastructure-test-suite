@@ -167,8 +167,10 @@ class Target(SQLModel, table=True):
     safety_class: SafetyClass = Field(default=SafetyClass.READ_ONLY, index=True)
     #: Reference to the target's OAuth M2M SP as a secret-scope ``scope/key``.
     identity_handle: Optional[str] = Field(default=None)
-    #: Registered role-profiles this target may assume, capped by safety class.
-    assumable_roles: list[str] = _json_list()
+    #: Registered role-profiles this target may assume, each a dict
+    #: ``{group_id, label, safety_class}`` capped by the target's safety class
+    #: at registration (ADR-0018; see :mod:`app.services.roles`).
+    assumable_roles: list[dict] = _json_list()
     tags: dict = _json_col()
     enabled: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=utcnow)
@@ -211,6 +213,11 @@ class RunRequest(SQLModel, table=True):
     check_ids: list[str] = _json_list()
     target_ids: list[str] = _json_list()
     depth: Depth = Field(default=Depth.QUICK)
+
+    #: An optional per-run safety override (ADR-0004 §5), stored as captured:
+    #: ``{target_name, reason, confirmed}``. Honored by the gate only for a human
+    #: GUI caller; never for CI/automation.
+    override: dict = _json_col()
 
     status: RunStatus = Field(default=RunStatus.PENDING, index=True)
     locked_by: Optional[str] = None

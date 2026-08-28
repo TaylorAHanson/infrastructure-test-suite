@@ -23,10 +23,10 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from app.core.enums import Evaluator, Expectation, RunStatus
+from app.core.enums import Evaluator, Expectation, RiskTier, RunStatus
 from app.core.ids import utcnow
 from app.core.operations import Operation
-from app.executors import HandlerContext, OperationBlocked, get_handler, validate_operation
+from app.executors import HandlerContext, get_handler
 from app.models import (
     Check,
     CheckRun,
@@ -38,6 +38,9 @@ from app.models import (
     TestCheck,
 )
 from app.services.assertion_compiler import evaluate_predicate
+from app.services.audit import record_audit
+from app.services.roles import find_role, role_within_class
+from app.services.safety import SafetyOverride, evaluate_operation_safety
 from app.schemas.schemas import RunSubmit
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,7 @@ def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
         check_ids=payload.check_ids,
         target_ids=payload.target_ids,
         depth=payload.depth,
+        override=payload.override.model_dump() if payload.override else {},
         status=RunStatus.PENDING,
         git_sha=getattr(settings, "GIT_SHA", "unknown"),
         app_version=getattr(settings, "APP_VERSION", "0.0.0"),
@@ -207,6 +211,129 @@ def expand_request(session: Session, request: RunRequest) -> list[CheckRun]:
 
 
 # --------------------------------------------------------------------------
+# Safety gate (ADR-0017/0004) — enforced pre-dispatch in the run engine
+# --------------------------------------------------------------------------
+def _block(session: Session, run: CheckRun, *, message: str, reason: str,
+           actor: str, actor_kind: str = "user") -> bool:
+    """Record a CheckRun as BLOCKED_BY_SAFETY and audit the block. Returns False."""
+    run.verdict = RunStatus.BLOCKED_BY_SAFETY
+    run.failure_bucket = "BLOCKED_BY_SAFETY"
+    run.failure_stage = "AUTHORIZE"
+    run.message = message
+    now = utcnow()
+    run.started_at = run.started_at or now
+    run.finished_at = now
+    run.duration_ms = _elapsed_ms(run)
+    session.add(run)
+    # Audit the block on the *same* transaction as the run write — one commit,
+    # so the concurrent run engine doesn't multiply write contention.
+    record_audit(
+        session, actor=actor, actor_kind=actor_kind, action="safety.block",
+        entity_type="check_run", entity_id=run.run_id, summary=reason,
+        request_source=run.request_source.value, commit=False,
+        after={"check_id": run.check_id, "target_id": run.target_id,
+               "run_as_role": run.run_as_role, "risk_tier": run.risk_tier},
+    )
+    session.commit()
+    return False
+
+
+def _apply_safety_gate(session: Session, run: CheckRun, check: Check,
+                       target: Optional[Target], operation: Operation,
+                       request: Optional[RunRequest]) -> bool:
+    """Run the identity-bounded gate for one CheckRun. Returns True to proceed.
+
+    On any refusal it records BLOCKED_BY_SAFETY (via :func:`_block`) and returns
+    False so the caller stops before dispatching the operation.
+    """
+    actor = run.requested_by or "system"
+
+    # (a) Resolve the run-as-role against the target's registered roles. An
+    # unregistered role — or one that out-runs the target's class — is refused
+    # before dispatch (user story 22 / ADR-0018), keeping the primary identity
+    # bound intact.
+    if run.run_as_role:
+        if target is None:
+            return _block(session, run, actor=actor,
+                          message="run-as-role requires a registered target.",
+                          reason="run-as-role with no target")
+        role = find_role(target.assumable_roles, run.run_as_role)
+        if role is None:
+            return _block(session, run, actor=actor,
+                          message=f"run-as-role '{run.run_as_role}' is not registered on target '{target.name}'.",
+                          reason=f"unregistered run-as-role '{run.run_as_role}'")
+        if not role_within_class(role, target.safety_class):
+            return _block(session, run, actor=actor,
+                          message=f"run-as-role '{run.run_as_role}' out-runs target class '{target.safety_class.value}'.",
+                          reason=f"over-privileged run-as-role '{run.run_as_role}'")
+
+    # (b)+(c) Blocklist floor and coarse-tier-vs-class cap, with the human-only
+    # override as the sole escape.
+    confirmed = None
+    if check.confirmed_risk_tier:
+        try:
+            confirmed = RiskTier(check.confirmed_risk_tier)
+        except ValueError:
+            confirmed = None
+
+    override = SafetyOverride.from_payload(request.override if request else None)
+    decision = evaluate_operation_safety(
+        operation,
+        target.safety_class if target else None,
+        confirmed_tier=confirmed,
+        override=override,
+        request_source=run.request_source,
+        target_name=target.name if target else None,
+    )
+    # Store the tier the gate actually weighed (the effective tier), so the run
+    # record reflects what was enforced, not just the check's coarse guess.
+    run.risk_tier = decision.effective_tier.value
+
+    if not decision.allowed:
+        return _block(session, run, actor=actor, message=decision.reason,
+                      reason=decision.reason)
+
+    if decision.overridden:
+        # A consumed override is a safety-relevant decision — audit it (ADR-0004 §7).
+        # commit=False: the run's own commit at the end of execution flushes it.
+        record_audit(
+            session, actor=actor, action="safety.override", entity_type="check_run",
+            entity_id=run.run_id, summary=decision.reason, commit=False,
+            request_source=run.request_source.value, after=decision.evidence,
+        )
+    return True
+
+
+def _resolve_identity_token(target: Optional[Target], run_as_role: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a Run's identity to ``(target, run-as-role?)`` and mint its token.
+
+    Returns ``(access_token, assumed_group)``. Best-effort and non-fatal: in demo
+    mode (no workspace binding) or when the target has no identity handle it
+    returns ``(None, None)`` — the platform stays exercisable without a workspace.
+    When a role is set, the token is minted with ``assume_group`` so the role's
+    grants replace the SP's (ADR-0018); otherwise it's the plain SP token
+    (ADR-0003). The client caches per ``(identity_handle, assumed_group)`` and
+    never persists (ADR-0003 §4).
+    """
+    if target is None or not target.identity_handle:
+        return None, None
+    assumed_group = None
+    if run_as_role:
+        role = find_role(target.assumable_roles, run_as_role)
+        assumed_group = role.group_id if role else None
+    try:
+        from app.clients.databricks import acquire_target_token, databricks_available
+
+        if not databricks_available():
+            return None, assumed_group  # demo / no binding — resolution only
+        token = acquire_target_token(target.identity_handle, target.host, assumed_group)
+        return token.access_token, assumed_group
+    except Exception as exc:  # noqa: BLE001 - identity resolution is best-effort here
+        logger.info("Per-target token unavailable (demo/degraded): %s", exc)
+        return None, assumed_group
+
+
+# --------------------------------------------------------------------------
 # Execution
 # --------------------------------------------------------------------------
 def execute_check_run(run_id: str) -> None:
@@ -227,26 +354,29 @@ def execute_check_run(run_id: str) -> None:
             session.commit()
             return
 
-        run.started_at = utcnow()
         operation = Operation.from_dict(check.operation)
+        # Read the request (for the override) BEFORE mutating the run — doing all
+        # reads up front means the worker doesn't autoflush a pending write and
+        # grab the SQLite write-lock early, holding it across the whole handler
+        # run (which serializes every concurrent worker past the busy timeout).
+        request = session.get(RunRequest, run.request_id) if run.request_id else None
 
-        # (b) Blocklist — the R3-never floor. A blocklisted op never runs.
-        try:
-            validate_operation(operation)
-        except OperationBlocked as exc:
-            run.verdict = RunStatus.BLOCKED_BY_SAFETY
-            run.failure_bucket = "BLOCKED_BY_SAFETY"
-            run.failure_stage = "AUTHORIZE"
-            run.message = str(exc)
-            run.finished_at = utcnow()
-            run.duration_ms = _elapsed_ms(run)
-            session.add(run)
-            session.commit()
+        # Identity-bounded safety gate (ADR-0017/0004), pre-dispatch. Resolve the
+        # run-as-role first (an unregistered/over-privileged role is refused
+        # before dispatch), then run the gate. A blocked op never reaches the
+        # handler and is recorded loudly as BLOCKED_BY_SAFETY.
+        if not _apply_safety_gate(session, run, check, target, operation, request):
             return
 
+        run.started_at = utcnow()
         params = dict(operation.params)
         if target and target.tags:
             params.setdefault("_target_tags", target.tags)
+
+        # Resolve identity to (target, run-as-role?) and mint its token — the SP
+        # by default, or one that assumes the role's group (ADR-0018). Best-effort:
+        # None in demo mode; consumed by handlers to make the real call (Spec 3).
+        token, assumed_group = _resolve_identity_token(target, run.run_as_role)
 
         ctx = HandlerContext(
             run_id=run.run_id,
@@ -258,6 +388,8 @@ def execute_check_run(run_id: str) -> None:
             workspace_client_factory=_workspace_client_factory(),
             demo_mode=_demo_mode(),
             logger=logger,
+            token=token,
+            assumed_group=assumed_group,
         )
 
         handler = get_handler(check.handler_key)
