@@ -21,6 +21,7 @@ export default {
         warn: 'rgb(var(--brand-warn) / <alpha-value>)',
         skip: 'rgb(var(--brand-skip) / <alpha-value>)',
         info: 'rgb(var(--brand-info) / <alpha-value>)',
+        flaky: 'rgb(var(--brand-flaky) / <alpha-value>)', // advisory / non-deterministic (ADR-0008)
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

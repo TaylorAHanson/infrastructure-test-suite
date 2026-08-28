@@ -188,6 +188,86 @@ export interface CheckRunDetail extends CheckRunRow {
   functional: boolean | null
 }
 
+// ---------------- Findings feed — "What's Interesting" (ADR-0009; #33/#34/#35) ---
+/** A lane in the two-lane triage feed (mirrors app.services.rca LANE_*). */
+export type FindingLane = 'recent-deployments' | 'overnight'
+
+/** A run node in a provenance thread — the last-green or the first-bad. */
+export interface ProvenanceRun {
+  run_id: string
+  check_id: string
+  target_id?: string | null
+  verdict: Verdict
+  failure_bucket?: string | null
+  failure_stage?: string | null
+  /** `bucket @ stage` (ADR-0001) — null when the run passed. */
+  bucket_at_stage?: string | null
+  git_sha: string
+  event_ref?: string | null
+  created_at?: string | null
+}
+
+/** How the last-green → first-bad boundary is keyed: a commit sha (a deploy) or
+ *  a non-deploy event ref ("metastore grant change · 21:14"). */
+export interface BoundaryRef {
+  kind: 'commit' | 'event'
+  value: string
+}
+
+/** The last-green → first-bad troubleshooting spine for a `(check, target)`
+ *  series (#34). Honest across the retention edge (the sweeper's preserved
+ *  anchor keeps the last green even when it predates the window). */
+export interface ProvenanceThread {
+  check_id: string
+  target_id?: string | null
+  last_green?: ProvenanceRun | null
+  first_bad?: ProvenanceRun | null
+  boundary_ref?: BoundaryRef | null
+  total_runs: number
+}
+
+/** One finding — the current failing state of a `(target, check)` series. Not a
+ *  raw run: a check failing five runs running is one finding (ADR-0009). */
+export interface Finding {
+  check_id: string
+  check_name: string
+  target_id?: string | null
+  workspace_name?: string | null
+  run_id: string
+  verdict: Verdict
+  failure_bucket?: string | null
+  failure_stage?: string | null
+  /** The `bucket @ stage` label (ADR-0001). */
+  bucket_at_stage?: string | null
+  lane: FindingLane
+  /** True = gating (deterministic); false = advisory/agentic (ADR-0008). */
+  gating: boolean
+  evaluator: Evaluator
+  request_source: string
+  git_sha: string
+  message: string
+  provenance?: ProvenanceThread | null
+  /** Advisory only — recent deterministic verdicts alternate. Never gates. */
+  flaky: boolean
+  finished_at?: string | null
+  created_at: string
+}
+
+/** One lane of the feed: ranked findings + the collapsed non-actionable count
+ *  (nominal/recovered series, ADR-0009 §6). */
+export interface FindingsLane {
+  lane: FindingLane
+  findings: Finding[]
+  everything_else: number
+}
+
+/** The two-lane findings feed (`GET /findings`). */
+export interface FindingsFeed {
+  generated_at: string
+  window_hours: number
+  lanes: FindingsLane[]
+}
+
 // ---------------- Audit (config-plane mutations, ADR-0014) ----------------
 export interface AuditEvent {
   id: string

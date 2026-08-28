@@ -24,6 +24,9 @@
   --brand-warn: 210 153 34;
   --brand-skip: 110 118 129;
   --brand-info: 88 166 255;
+  /* Advisory / non-deterministic lane (ADR-0008). A fixed semantic colour, not
+   * part of the re-themeable branding token set. */
+  --brand-flaky: 163 113 247;
 }
 
 @media (prefers-color-scheme: light) {
@@ -38,6 +41,7 @@
     --brand-warn: 154 103 0;
     --brand-skip: 87 96 106;
     --brand-info: 9 105 218;
+    --brand-flaky: 130 80 223;
   }
 }
 
