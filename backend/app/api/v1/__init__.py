@@ -13,6 +13,7 @@ from app.api.v1 import (
     suites,
     targets,
     tests,
+    webhook,
 )
 
 router = APIRouter()
@@ -27,3 +28,4 @@ router.include_router(assistant.router, prefix="/assistant", tags=["assistant"])
 router.include_router(admin.router, prefix="/admin", tags=["admin"])
 router.include_router(audit.router, prefix="/audit", tags=["audit"])
 router.include_router(branding.router, prefix="/branding", tags=["branding"])
+router.include_router(webhook.router, prefix="/webhook", tags=["webhook"])

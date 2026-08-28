@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.api.deps import Actor, current_actor
 from app.clients.databricks import probe_identity
 from app.core.enums import SafetyClass
 from app.db.session import get_session
@@ -27,6 +28,7 @@ from app.models import Target
 from app.schemas.schemas import TargetCreate, TargetUpdate
 from app.services.audit import record_audit
 from app.services.roles import RoleRegistrationError, validate_roles_for_class
+from app.services.safety import ceremony_rejection
 
 router = APIRouter()
 
@@ -79,7 +81,7 @@ def get_target(target_id: str, session: Session = Depends(get_session)) -> Targe
 
 @router.post("", status_code=201)
 def create_target(payload: TargetCreate, session: Session = Depends(get_session),
-                  actor: str = Query("api-user")) -> dict:
+                  actor: Actor = Depends(current_actor)) -> dict:
     data = payload.model_dump()
     roles = _validate_roles(data["assumable_roles"], payload.safety_class)
     _run_test_connection(payload.identity_handle, payload.host)
@@ -89,11 +91,13 @@ def create_target(payload: TargetCreate, session: Session = Depends(get_session)
     session.commit()
     session.refresh(target)
     out = target.model_dump(mode="json")
-    record_audit(session, actor=actor, action="target.register", entity_type="target", entity_id=target.id,
+    record_audit(session, actor=actor.handle, actor_kind=actor.kind, action="target.register",
+                 entity_type="target", entity_id=target.id,
                  summary=f"Registered target {out['name']} (class={out['safety_class']})", after=out)
     if roles:
-        record_audit(session, actor=actor, action="target.roles.register", entity_type="target",
-                     entity_id=target.id, summary=f"Registered {len(roles)} assumable role(s)",
+        record_audit(session, actor=actor.handle, actor_kind=actor.kind, action="target.roles.register",
+                     entity_type="target", entity_id=target.id,
+                     summary=f"Registered {len(roles)} assumable role(s)",
                      after={"assumable_roles": roles})
     return out
 
@@ -117,16 +121,35 @@ def test_connection_adhoc(payload: TargetCreate) -> dict:
 
 @router.patch("/{target_id}")
 def update_target(target_id: str, payload: TargetUpdate, session: Session = Depends(get_session),
-                  actor: str = Query("api-user")) -> dict:
+                  actor: Actor = Depends(current_actor)) -> dict:
     target = session.get(Target, target_id)
     if not target:
         raise HTTPException(404, "target not found")
     data = payload.model_dump(exclude_unset=True)
+    # ``ceremony`` is a gate input, not a Target column — pull it out before the
+    # setattr loop below ever touches the model.
+    ceremony = data.pop("ceremony", None)
     before = target.model_dump(mode="json")
 
     new_class = data.get("safety_class", target.safety_class)
     if isinstance(new_class, str):
         new_class = SafetyClass(new_class)
+
+    class_changed = "safety_class" in data and new_class != target.safety_class
+    downgrade = class_changed and new_class.max_risk_tier.order > target.safety_class.max_risk_tier.order
+
+    # Friction ceremony (ADR-0010): a downgrade widens the blast radius and is a
+    # safety-gate-defeating edit, so it is refused unless the human typed the
+    # confirmation and gave a reason. This is friction, not permission — any
+    # authenticated human may perform it, but never by a slip.
+    ceremony_reason = ""
+    if downgrade:
+        rejection = ceremony_rejection(
+            (ceremony or {}).get("typed_confirmation", ""),
+            (ceremony or {}).get("reason", ""))
+        if rejection:
+            raise HTTPException(422, f"safety-class downgrade requires the friction ceremony: {rejection}")
+        ceremony_reason = ceremony["reason"].strip()
 
     # Re-validate roles against the (possibly new) class whenever either changes.
     roles_changed = "assumable_roles" in data or "safety_class" in data
@@ -139,9 +162,6 @@ def update_target(target_id: str, payload: TargetUpdate, session: Session = Depe
         _run_test_connection(data.get("identity_handle", target.identity_handle),
                              data.get("host", target.host))
 
-    class_changed = "safety_class" in data and new_class != target.safety_class
-    downgrade = class_changed and new_class.max_risk_tier.order > target.safety_class.max_risk_tier.order
-
     for key, value in data.items():
         setattr(target, key, value)
     session.add(target)
@@ -151,26 +171,31 @@ def update_target(target_id: str, payload: TargetUpdate, session: Session = Depe
 
     if class_changed:
         # Safety-class change is the standing forensic control (ADR-0014);
-        # a downgrade (wider blast radius) is flagged explicitly.
-        record_audit(session, actor=actor, action="target.safety_class.change", entity_type="target",
+        # a downgrade (wider blast radius) is flagged and carries its ceremony reason.
+        after = {"safety_class": out["safety_class"]}
+        if downgrade:
+            after["ceremony_reason"] = ceremony_reason
+        record_audit(session, actor=actor.handle, actor_kind=actor.kind,
+                     action="target.safety_class.change", entity_type="target",
                      entity_id=target.id,
                      summary=f"Safety class {before['safety_class']} → {out['safety_class']}"
                              + (" (DOWNGRADE — wider blast radius)" if downgrade else ""),
                      before={"safety_class": before["safety_class"], "downgrade": downgrade},
-                     after={"safety_class": out["safety_class"]})
+                     after=after)
     if "assumable_roles" in data:
-        record_audit(session, actor=actor, action="target.roles.change", entity_type="target",
-                     entity_id=target.id, summary="Assumable roles updated",
+        record_audit(session, actor=actor.handle, actor_kind=actor.kind, action="target.roles.change",
+                     entity_type="target", entity_id=target.id, summary="Assumable roles updated",
                      before={"assumable_roles": before["assumable_roles"]},
                      after={"assumable_roles": out["assumable_roles"]})
-    record_audit(session, actor=actor, action="target.edit", entity_type="target", entity_id=target.id,
+    record_audit(session, actor=actor.handle, actor_kind=actor.kind, action="target.edit",
+                 entity_type="target", entity_id=target.id,
                  summary=f"Edited target {out['name']}", before=before, after=out)
     return out
 
 
 @router.delete("/{target_id}")
 def deregister_target(target_id: str, session: Session = Depends(get_session),
-                      actor: str = Query("api-user")) -> dict:
+                      actor: Actor = Depends(current_actor)) -> dict:
     """Deregister a target: a deregistered workspace is untouchable again
     (user story 1). A **soft** deregister (``enabled=False``) — the row and its
     run history survive, and the deregistration itself is an audited config-plane
@@ -185,7 +210,7 @@ def deregister_target(target_id: str, session: Session = Depends(get_session),
     session.commit()
     session.refresh(target)
     out = target.model_dump(mode="json")
-    record_audit(session, actor=actor, action="target.deregister", entity_type="target",
-                 entity_id=target.id, summary=f"Deregistered target {out['name']}",
+    record_audit(session, actor=actor.handle, actor_kind=actor.kind, action="target.deregister",
+                 entity_type="target", entity_id=target.id, summary=f"Deregistered target {out['name']}",
                  before=before, after=out)
     return out

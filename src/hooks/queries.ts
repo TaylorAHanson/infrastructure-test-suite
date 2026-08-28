@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import type {
   AssistantTurnResponse,
+  AssumableRole,
   AuditEvent,
   Branding,
   Check,
@@ -11,6 +12,7 @@ import type {
   PageContext,
   RunRequestOut,
   RunRequestSummary,
+  SafetyClass,
   StudioTest,
   Suite,
   Target,
@@ -110,22 +112,46 @@ export const usePromoteExample = () => {
 export const useExamples = () =>
   useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 
-// ---------------- Targets (registration ceremony rebuilt in spec #24) ----------------
+// ---------------- Targets (rebuilt model + friction ceremony, ADR-0010; #37) ----
 export interface CreateTargetBody {
   name: string
-  target_type: string
-  catalog?: string | null
-  schema_name?: string | null
   workspace_name?: string | null
-  cloud?: string
-  region?: string | null
-  config?: Record<string, unknown>
+  host?: string | null
+  safety_class: SafetyClass
+  identity_handle?: string | null
+  assumable_roles?: AssumableRole[]
+}
+
+/** The friction-ceremony inputs required to *downgrade* a safety class (ADR-0010). */
+export interface SafetyCeremony {
+  typed_confirmation: string
+  reason: string
+}
+
+export interface UpdateTargetBody {
+  name?: string
+  workspace_name?: string | null
+  host?: string | null
+  safety_class?: SafetyClass
+  identity_handle?: string | null
+  assumable_roles?: AssumableRole[]
+  enabled?: boolean
+  ceremony?: SafetyCeremony
 }
 
 export const useCreateTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: CreateTargetBody) => api.post<Target>('/targets', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
+  })
+}
+
+export const useUpdateTarget = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: UpdateTargetBody }) =>
+      api.patch<Target>(`/targets/${id}`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
   })
 }
@@ -257,6 +283,32 @@ export const useUpdateBranding = () => {
       qc.invalidateQueries({ queryKey: ['branding'] })
       qc.invalidateQueries({ queryKey: ['audit'] })
     },
+  })
+}
+
+// ---------------- Run-completion webhook sink (ADR-0016) ----------------
+export interface WebhookConfig {
+  id: string
+  enabled: boolean
+  urls: string[]
+  fire_on_all_completions: boolean
+  updated_by: string
+  updated_at: string
+}
+export interface WebhookConfigUpdate {
+  urls?: string[]
+  enabled?: boolean
+  fire_on_all_completions?: boolean
+}
+
+export const useWebhookConfig = () =>
+  useQuery({ queryKey: ['webhook-config'], queryFn: () => api.get<WebhookConfig>('/webhook/config') })
+
+export const useUpdateWebhookConfig = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: WebhookConfigUpdate) => api.put<WebhookConfig>('/webhook/config', body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhook-config'] }),
   })
 }
 

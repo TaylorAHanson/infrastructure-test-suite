@@ -1,7 +1,7 @@
 """branding: one global presentation record (ADR-0013, #38)
 
 Revision ID: wf38branding
-Revises: wf32retention
+Revises: wf39webhook
 Create Date: 2026-08-28
 
 Adds the single global ``branding`` table — the runtime white-label
@@ -18,7 +18,7 @@ import sqlmodel
 from alembic import op
 
 revision: str = "wf38branding"
-down_revision: Union[str, None] = "wf32retention"
+down_revision: Union[str, None] = "wf39webhook"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

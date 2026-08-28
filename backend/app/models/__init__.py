@@ -13,6 +13,8 @@ from app.models.models import (  # noqa: F401
     TargetLease,
     Test,
     TestCheck,
+    WebhookConfig,
+    WEBHOOK_CONFIG_ID,
     WorkedExample,
 )
 
@@ -31,4 +33,6 @@ __all__ = [
     "StageOutcome",
     "AuditEvent",
     "Branding",
+    "WebhookConfig",
+    "WEBHOOK_CONFIG_ID",
 ]

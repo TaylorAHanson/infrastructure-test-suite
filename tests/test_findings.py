@@ -20,7 +20,7 @@ from app.core.enums import Evaluator, RequestSource, RunStatus
 from app.core.ids import utcnow
 from app.db.session import session_scope
 from app.models import Check, CheckRun, Target
-from app.services import findings
+from app.services import findings, retention
 from app.services.rca import LANE_OVERNIGHT, LANE_RECENT
 
 
@@ -45,11 +45,11 @@ def _series(session, check_name: str, specs: list[dict]) -> tuple[Check, Target]
 
 def _run(session, check, target, verdict, *, source=RequestSource.NIGHTLY,
          git_sha="unknown", bucket=None, stage=None, minutes_ago=0,
-         evaluator=Evaluator.DETERMINISTIC, gating=True) -> CheckRun:
+         event_ref=None, evaluator=Evaluator.DETERMINISTIC, gating=True) -> CheckRun:
     ts = utcnow() - timedelta(minutes=minutes_ago)
     run = CheckRun(
         check_id=check.id, target_id=target.id, verdict=verdict,
-        request_source=source, git_sha=git_sha,
+        request_source=source, git_sha=git_sha, event_ref=event_ref,
         failure_bucket=bucket, failure_stage=stage,
         evaluator=evaluator, gating=gating,
         started_at=ts, finished_at=ts, created_at=ts,
@@ -220,3 +220,96 @@ def test_service_ignores_non_terminal_runs(session):
 
     feed = findings.build_feed(session)
     assert all(l["findings"] == [] and l["everything_else"] == 0 for l in feed["lanes"])
+
+
+# --------------------------------------------------------------------------
+# #34 — commit-provenance thread + flaky advisory (ADR-0009 / ADR-0008)
+# --------------------------------------------------------------------------
+def test_finding_carries_last_green_to_first_bad_keyed_to_commit(session):
+    # A CI regression's finding threads last-green → first-bad, keyed to the
+    # first-bad commit sha.
+    _series(session, "ci regression", [
+        {"verdict": RunStatus.PASS, "source": RequestSource.CI, "git_sha": "green1"},
+        {"verdict": RunStatus.FAIL, "source": RequestSource.CI, "git_sha": "bad2",
+         "bucket": "OPERATION_FAILED", "stage": "OPERATE"},
+    ])
+
+    finding = _lane(findings.build_feed(session), LANE_RECENT)["findings"][0]
+    thread = finding["provenance"]
+    assert thread["last_green"]["git_sha"] == "green1"
+    assert thread["first_bad"]["git_sha"] == "bad2"
+    assert thread["boundary_ref"] == {"kind": "commit", "value": "bad2"}
+
+
+def test_finding_thread_keyed_to_event_ref_when_no_commit(session):
+    # An Overnight, non-deploy regression has no commit — its boundary keys to the
+    # non-deploy event ref instead (ADR-0015).
+    _series(session, "metastore drift", [
+        {"verdict": RunStatus.PASS},
+        {"verdict": RunStatus.FAIL, "bucket": "PERMISSION_DENIED", "stage": "AUTHORIZE",
+         "event_ref": "metastore grant change · 21:14"},
+    ])
+
+    finding = _lane(findings.build_feed(session), LANE_OVERNIGHT)["findings"][0]
+    assert finding["provenance"]["boundary_ref"] == {
+        "kind": "event", "value": "metastore grant change · 21:14"}
+
+
+def test_finding_thread_has_no_boundary_ref_without_commit_or_event(session):
+    # First-bad with neither a real commit sha nor an event ref: the thread still
+    # exists (last-green → first-bad) but has no boundary key to diff against.
+    _series(session, "unkeyed drift", [
+        {"verdict": RunStatus.PASS},
+        {"verdict": RunStatus.FAIL, "bucket": "OPERATION_FAILED", "stage": "OPERATE"},
+    ])
+
+    finding = _lane(findings.build_feed(session), LANE_OVERNIGHT)["findings"][0]
+    assert finding["provenance"]["first_bad"] is not None
+    assert finding["provenance"]["boundary_ref"] is None
+
+
+def test_thread_last_green_honest_when_it_predates_retention_window(session):
+    # The last green is 120 days old — far outside the 90-day window — with a
+    # recent fail. After the sweep prunes the window, the preserved green anchor
+    # keeps the thread honest: it still diffs the RIGHT last-good, not the edge.
+    check, target = _series(session, "long stable then broke", [
+        {"verdict": RunStatus.PASS, "git_sha": "anchor-green",
+         "minutes_ago": 60 * 24 * 120},
+        {"verdict": RunStatus.FAIL, "git_sha": "recent-bad",
+         "bucket": "OPERATION_FAILED", "stage": "OPERATE", "minutes_ago": 30},
+    ])
+
+    pruned = retention.sweep(session)
+    assert pruned == 0  # the old green is the preserved anchor, not pruned
+
+    finding = _lane(findings.build_feed(session), LANE_OVERNIGHT)["findings"][0]
+    thread = finding["provenance"]
+    assert thread["last_green"]["git_sha"] == "anchor-green"
+    assert thread["first_bad"]["git_sha"] == "recent-bad"
+
+
+def test_flaky_finding_is_flagged_but_stays_advisory(session):
+    # An alternating (green/bad) check whose current state is bad is a finding,
+    # flagged flaky — but flaky is advisory: it never flips gating.
+    _series(session, "flaky check", [
+        {"verdict": RunStatus.PASS},
+        {"verdict": RunStatus.FAIL, "bucket": "OPERATION_FAILED", "stage": "OPERATE"},
+        {"verdict": RunStatus.PASS},
+        {"verdict": RunStatus.FAIL, "bucket": "OPERATION_FAILED", "stage": "OPERATE"},
+    ])
+
+    finding = _lane(findings.build_feed(session), LANE_OVERNIGHT)["findings"][0]
+    assert finding["flaky"] is True
+    # Advisory: the deterministic verdict still gates on its own terms; flaky did
+    # not turn it into (nor demote it from) a gating regression.
+    assert finding["gating"] is True
+
+
+def test_clean_regression_finding_is_not_flaky(session):
+    _series(session, "clean regression", [
+        {"verdict": RunStatus.PASS},
+        {"verdict": RunStatus.FAIL, "bucket": "OPERATION_FAILED", "stage": "OPERATE"},
+    ])
+
+    finding = _lane(findings.build_feed(session), LANE_OVERNIGHT)["findings"][0]
+    assert finding["flaky"] is False

@@ -76,8 +76,11 @@ def test_blocked_run_does_not_appear_in_audit_view(client):
 # ------------------------------- downgrade flag ------------------------------
 def test_downgrade_is_flagged_in_audit(client):
     tgt = register_target(client, "to-downgrade", "prod-for-us").json()
-    # prod-for-us (R1 cap) → sandbox (R2 cap) widens the blast radius: a downgrade.
-    client.patch(f"/api/v1/targets/{tgt['id']}", json={"safety_class": "sandbox"})
+    # prod-for-us (R1 cap) → sandbox (R2 cap) widens the blast radius: a downgrade
+    # (guarded by the friction ceremony, ADR-0010).
+    client.patch(f"/api/v1/targets/{tgt['id']}", json={
+        "safety_class": "sandbox",
+        "ceremony": {"typed_confirmation": "i understand", "reason": "widen for drill"}})
 
     events = audit(client, event_type="target.safety_class.change")
     assert len(events) == 1
@@ -148,7 +151,9 @@ def test_filter_by_target_actor_and_event_type(client):
 def test_export_csv_is_filtered_and_forensically_complete(client):
     tgt = register_target(client, "ws-exp", "prod-for-us", actor="carol").json()
     # A downgrade so before/after carry the flag the export must preserve.
-    client.patch(f"/api/v1/targets/{tgt['id']}?actor=carol", json={"safety_class": "sandbox"})
+    client.patch(f"/api/v1/targets/{tgt['id']}?actor=carol", json={
+        "safety_class": "sandbox",
+        "ceremony": {"typed_confirmation": "i understand", "reason": "export drill"}})
 
     resp = client.get("/api/v1/audit/export", params={"format": "csv", "actor": "carol"})
     assert resp.status_code == 200

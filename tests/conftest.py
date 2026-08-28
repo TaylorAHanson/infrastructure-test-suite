@@ -13,6 +13,10 @@ sys.path.insert(0, str(BACKEND))
 
 os.environ["TESTING"] = "1"
 os.environ["SEED_ON_STARTUP"] = "0"
+# Run-completion webhook delivery inline (not on a background thread) and with no
+# retry backoff, so webhook tests observe the POST deterministically and fast.
+os.environ["WEBHOOK_DELIVERY_ASYNC"] = "0"
+os.environ["WEBHOOK_RETRY_BACKOFF_SECONDS"] = "0"
 
 
 @pytest.fixture()
