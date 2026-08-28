@@ -16,17 +16,44 @@ trap cleanup SIGINT SIGTERM
 
 echo -e "${BLUE}== Regression Validation Platform - dev ==${NC}"
 
-# Ports are offset by +10 from the Vite/uvicorn defaults to avoid clashing with
-# other local projects (backend 8010, frontend 5183). Keep in sync with
-# vite.config.ts (server.port + /api proxy target).
-BACKEND_PORT=8010
-FRONTEND_PORT=5183
+# Ports are offset by +10 from the Vite/uvicorn defaults (backend 8010, frontend
+# 5183) to avoid clashing with other local projects. Keep the bases in sync with
+# vite.config.ts fallbacks.
+#
+# By default we AUTO-SELECT the first free port pair, scanning 8010/5183,
+# 8020/5193, ... so multiple git worktrees can each run ./dev.sh with no config
+# and without killing each other's servers. Set RV_PORT_OFFSET to pin the offset
+# explicitly instead (e.g. `RV_PORT_OFFSET=20 ./dev.sh` -> backend 8030).
+port_free() { ! lsof -ti:"$1" >/dev/null 2>&1; }
 
-# Free the ports we use.
-for port in $BACKEND_PORT $FRONTEND_PORT; do
-  pid=$(lsof -ti:$port 2>/dev/null)
-  [ -n "$pid" ] && { echo -e "${YELLOW}Freeing port $port (pid $pid)${NC}"; kill -9 "$pid" 2>/dev/null; }
-done
+if [ -n "${RV_PORT_OFFSET}" ]; then
+  OFFSET="$RV_PORT_OFFSET"
+else
+  OFFSET=""
+  for off in 0 10 20 30 40 50 60 70 80 90; do
+    if port_free $((8010 + off)) && port_free $((5183 + off)); then
+      OFFSET="$off"; break
+    fi
+  done
+  if [ -z "$OFFSET" ]; then
+    echo -e "${RED}No free 8010/5183 port pair found (scanned offsets 0..90).${NC}"
+    exit 1
+  fi
+  [ "$OFFSET" != "0" ] && echo -e "${YELLOW}Ports 8010/5183 busy; using offset ${OFFSET}.${NC}"
+fi
+BACKEND_PORT=$((8010 + OFFSET))
+FRONTEND_PORT=$((5183 + OFFSET))
+export BACKEND_PORT   # read by vite.config.ts to point the /api proxy back here
+
+# When the offset was pinned explicitly, reclaim those ports if a stale server
+# is holding them. (In auto-select mode the ports are already free, so we never
+# kill anything — that's what keeps parallel worktrees from murdering each other.)
+if [ -n "${RV_PORT_OFFSET}" ]; then
+  for port in $BACKEND_PORT $FRONTEND_PORT; do
+    pid=$(lsof -ti:$port 2>/dev/null)
+    [ -n "$pid" ] && { echo -e "${YELLOW}Freeing port $port (pid $pid)${NC}"; kill -9 "$pid" 2>/dev/null; }
+  done
+fi
 
 # Python venv.
 if [ ! -d "backend/venv" ]; then
