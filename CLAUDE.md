@@ -13,3 +13,7 @@ Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `
 ### Domain docs
 
 Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+## Code review
+
+`/review` (Isaac Review) is **not needed** in this repo — the owner is not in engineering. Don't prompt to run it before pushing or opening PRs, and don't nudge toward it when another review tool is used.
