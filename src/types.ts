@@ -403,3 +403,31 @@ export interface TestVersion {
   created_at: string
   snapshot: Record<string, unknown>
 }
+
+// ---------------- Branding (runtime white-label, ADR-0013 / #38) ----------------
+/** One themeable design token, resolved in both schemes (hex colours). */
+export interface BrandToken {
+  light: string
+  dark: string
+}
+
+/** The closed named-token theme: a headline accent + the closed token palette. */
+export interface BrandTheme {
+  accent: string
+  tokens: Record<string, BrandToken>
+}
+
+/** The global branding record the shell reads on load + via poll. Blobs are
+ *  served from `/branding/logo` + `/branding/favicon`; only flags travel here. */
+export interface Branding {
+  app_name: string
+  assistant_name: string
+  footer_text: string
+  theme: BrandTheme
+  has_logo: boolean
+  logo_content_type?: string | null
+  has_favicon: boolean
+  favicon_content_type?: string | null
+  updated_at: string
+  updated_by: string
+}

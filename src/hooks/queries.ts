@@ -5,6 +5,7 @@ import type {
   AssistantTurnResponse,
   AssumableRole,
   AuditEvent,
+  Branding,
   Check,
   CheckRunDetail,
   CheckRunRow,
@@ -251,6 +252,40 @@ export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): s
 
 export const useAdminSettings = () =>
   useQuery({ queryKey: ['admin'], queryFn: () => api.get<Record<string, unknown>>('/admin/settings') })
+
+// ---------------- Branding (runtime white-label; ADR-0013 / #38) ----------------
+/** The global branding record. The shell reads it on load and this **poll**
+ *  refreshes it, so a branding edit applies within the poll interval — the
+ *  instant-apply contract (ADR-0013 §4), no redeploy or push infra. */
+export const useBranding = () =>
+  useQuery({
+    queryKey: ['branding'],
+    queryFn: () => api.get<Branding>('/branding'),
+    refetchInterval: 30_000,
+  })
+
+export interface BrandingUpdateBody {
+  app_name?: string
+  assistant_name?: string
+  footer_text?: string
+  theme?: Branding['theme']
+  logo?: string | null
+  favicon?: string | null
+  clear_logo?: boolean
+  clear_favicon?: boolean
+}
+
+export const useUpdateBranding = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: BrandingUpdateBody) => api.patch<Branding>('/branding', body),
+    onSuccess: (data) => {
+      qc.setQueryData(['branding'], data)
+      qc.invalidateQueries({ queryKey: ['branding'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+  })
+}
 
 // ---------------- Run-completion webhook sink (ADR-0016) ----------------
 export interface WebhookConfig {

@@ -2,8 +2,47 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Branding theme tokens (ADR-0013). The palette is a **closed named-token set**
+ * exposed as CSS custom properties in "r g b" channel form, so Tailwind's colour
+ * utilities (incl. the `/opacity` modifiers) resolve against them and the shell
+ * can repaint the whole app at runtime by overriding these vars — no rebuild.
+ * The values below are the seeded defaults; the shell overrides them from the
+ * branding record. Both schemes are defined so the theme is light/dark-aware.
+ */
 :root {
   color-scheme: dark;
+
+  --brand-accent: 255 107 61;
+  --brand-ink: 11 18 32;
+  --brand-ink_soft: 27 36 53;
+  --brand-panel: 17 26 43;
+  --brand-edge: 34 48 74;
+  --brand-muted: 138 151 173;
+  --brand-pass: 63 185 80;
+  --brand-fail: 248 81 73;
+  --brand-warn: 210 153 34;
+  --brand-skip: 110 118 129;
+  --brand-info: 88 166 255;
+  /* Advisory / non-deterministic lane (ADR-0008). A fixed semantic colour, not
+   * part of the re-themeable branding token set. */
+  --brand-flaky: 163 113 247;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --brand-ink: 255 255 255;
+    --brand-ink_soft: 241 245 249;
+    --brand-panel: 248 250 252;
+    --brand-edge: 208 215 226;
+    --brand-muted: 100 116 139;
+    --brand-pass: 26 127 55;
+    --brand-fail: 207 34 46;
+    --brand-warn: 154 103 0;
+    --brand-skip: 87 96 106;
+    --brand-info: 9 105 218;
+    --brand-flaky: 130 80 223;
+  }
 }
 
 html,
@@ -14,7 +53,7 @@ body,
 
 body {
   margin: 0;
-  background: #0b1220;
+  background: rgb(var(--brand-ink));
   color: #e6edf3;
   font-family: Inter, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
