@@ -1,296 +1,155 @@
-"""Seed data: the full screenshot test catalog + suites, targets, schedules,
-and synthetic historical runs so the dashboard renders immediately.
+"""Seed data: Check/Test/Suite exemplars so the app is useful on first boot.
 
-Idempotent: if definitions already exist, seeding is skipped. The catalog is
-declared as data (``CATALOG``) - this is the metadata-driven extension point.
+Idempotent: if any Check exists, seeding is skipped. The exemplars are a
+worked-example library (ADR-0006) covering the shapes the model must express:
+a deterministic connectivity Check, a functional (row-count) Check, an
+open-SDK mutating Check with a **counterfactual** pair, and an **agentic**
+(non-compilable → advisory) Check.
 """
 from __future__ import annotations
 
 import logging
-import random
-from datetime import timedelta
 
 from sqlmodel import Session, select
 
-from app.core.enums import (
-    AuthMode,
-    CleanupPolicy,
-    ConnectivityOutcome,
-    ExecutionMode,
-    ExecutorKind,
-    ProbeOutcome,
-    RequestSource,
-    RootCauseBucket,
-    RunStatus,
-    StepKind,
-    TestCategory,
-)
-from app.core.ids import utcnow
-from app.models import (
-    Schedule,
-    SuiteMember,
-    TestDefinition,
-    TestRun,
-    TestRunStep,
-    TestSuite,
-    TestTarget,
-)
+from app.core.enums import SafetyClass
+from app.models import Check, Suite, SuiteMember, Target, Test, TestCheck
+from app.schemas.schemas import CheckCreate, OperationIn
+from app.services.authoring import build_check_fields
 
 logger = logging.getLogger(__name__)
 
-ALL_MODES = [ExecutionMode.PREFLIGHT, ExecutionMode.SMOKE, ExecutionMode.FULL]
-PREFLIGHT_SMOKE = [ExecutionMode.PREFLIGHT, ExecutionMode.SMOKE]
 
-# (display_name, category, executor_kind, executor_key, tags, target_type,
-#  modes, destructive, enterprise_only, params)
-CATALOG: list[dict] = [
-    # ---------------- Producer / inbound ----------------
-    dict(name="Fivetran -> sales_dev.temp", category=TestCategory.PRODUCER, kind=ExecutorKind.DATABRICKS_JOB,
-         key="fivetran_landing", tags=["producer", "fivetran", "ingest"], target_type="catalog",
-         modes=ALL_MODES, destructive=True, params={"catalog": "sales_dev", "schema": "temp"}),
-    dict(name="IICS -> sales_dev.temp", category=TestCategory.PRODUCER, kind=ExecutorKind.DATABRICKS_JOB,
-         key="iics_landing", tags=["producer", "iics", "ingest"], target_type="catalog",
-         modes=ALL_MODES, destructive=True, params={"catalog": "sales_dev", "schema": "temp"}),
-    dict(name="DBX Auto Loader smoke", category=TestCategory.PRODUCER, kind=ExecutorKind.DATABRICKS_JOB,
-         key="autoloader_smoke", tags=["producer", "autoloader"], target_type="catalog",
-         modes=[ExecutionMode.SMOKE, ExecutionMode.FULL], destructive=True, params={"catalog": "sales_dev"}),
-    dict(name="Oracle Federation (on-prem)", category=TestCategory.PRODUCER, kind=ExecutorKind.SQL_WAREHOUSE,
-         key="oracle_federation", tags=["producer", "federation", "onprem", "oracle"], target_type="connection",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={"query": "SELECT 1"}),
-    dict(name="Other inbound connectivity", category=TestCategory.PRODUCER, kind=ExecutorKind.REMOTE_AGENT,
-         key="remote_agent", cap="inbound_generic", tags=["producer", "inbound"], target_type="external_system",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={"vantage_point": "producer-network"}),
-
-    # ---------------- Processing / in-workspace ----------------
-    dict(name="All-purpose compute", category=TestCategory.PROCESSING, kind=ExecutorKind.DATABRICKS_JOB,
-         key="all_purpose_compute", tags=["compute", "all-purpose"], target_type="workspace",
-         modes=[ExecutionMode.SMOKE], destructive=False, params={}),
-    dict(name="Job compute", category=TestCategory.PROCESSING, kind=ExecutorKind.DATABRICKS_JOB,
-         key="job_compute", tags=["compute", "job"], target_type="workspace",
-         modes=[ExecutionMode.SMOKE], destructive=False, params={}),
-    dict(name="Serverless compute", category=TestCategory.PROCESSING, kind=ExecutorKind.DATABRICKS_JOB,
-         key="serverless_compute", tags=["compute", "serverless"], target_type="workspace",
-         modes=[ExecutionMode.SMOKE], destructive=False, params={}),
-    dict(name="SQL Warehouse Pro", category=TestCategory.PROCESSING, kind=ExecutorKind.SQL_WAREHOUSE,
-         key="sql_warehouse_smoke", tags=["sql", "warehouse", "pro"], target_type="warehouse",
-         modes=ALL_MODES, destructive=False, params={"query": "SELECT 1 AS healthcheck"}),
-    dict(name="SQL Warehouse Serverless", category=TestCategory.PROCESSING, kind=ExecutorKind.SQL_WAREHOUSE,
-         key="sql_warehouse_smoke", tags=["sql", "warehouse", "serverless"], target_type="warehouse",
-         modes=ALL_MODES, destructive=False, params={"query": "SELECT 1 AS healthcheck"}),
-    dict(name="Model Serving endpoint", category=TestCategory.PROCESSING, kind=ExecutorKind.MODEL_SERVING,
-         key="model_serving_invoke", tags=["ml", "serving"], target_type="endpoint",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={}),
-    dict(name="Databricks Apps (sibling health)", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
-         key="databricks_app_health", tags=["apps", "oauth"], target_type="app",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={}),
-    dict(name="Lakebase transaction", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
-         key="lakebase_smoke", tags=["lakebase", "postgres"], target_type="database",
-         modes=ALL_MODES, destructive=False, params={}),
-    dict(name="GitHub access", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
-         key="github_access", tags=["git", "github"], target_type="external_system",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={}),
-    dict(name="Unity Catalog access", category=TestCategory.PROCESSING, kind=ExecutorKind.SQL_WAREHOUSE,
-         key="unity_catalog_query", tags=["uc", "catalog"], target_type="catalog",
-         modes=ALL_MODES, destructive=False, params={"statement": "SHOW CATALOGS"}),
-    dict(name="Genie", category=TestCategory.PROCESSING, kind=ExecutorKind.APP_INLINE,
-         key="genie_query", tags=["genie", "ai/bi"], target_type="genie_space",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={}),
-    dict(name="Agent (Enterprise only)", category=TestCategory.PROCESSING, kind=ExecutorKind.MODEL_SERVING,
-         key="agent_enterprise", tags=["agent", "enterprise"], target_type="endpoint",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, enterprise_only=True, params={}),
-
-    # ---------------- Consumer / outbound ----------------
-    dict(name="Power BI connectivity", category=TestCategory.CONSUMER, kind=ExecutorKind.REMOTE_AGENT,
-         key="remote_agent", cap="powerbi_connectivity", tags=["consumer", "bi", "powerbi"], target_type="external_system",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={"vantage_point": "bi-network"}),
-    dict(name="Tableau connectivity", category=TestCategory.CONSUMER, kind=ExecutorKind.REMOTE_AGENT,
-         key="remote_agent", cap="tableau_connectivity", tags=["consumer", "bi", "tableau"], target_type="external_system",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={"vantage_point": "bi-network"}),
-    dict(name="Salesforce outbound", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
-         key="salesforce_outbound", tags=["consumer", "salesforce", "http"], target_type="external_system",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={"connection_name": "salesforce_conn"}),
-    dict(name="TM1 outbound", category=TestCategory.CONSUMER, kind=ExecutorKind.REMOTE_AGENT,
-         key="remote_agent", cap="tm1_outbound", tags=["consumer", "tm1"], target_type="external_system",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={"vantage_point": "finance-network"}),
-    dict(name="Oracle outbound", category=TestCategory.CONSUMER, kind=ExecutorKind.REMOTE_AGENT,
-         key="remote_agent", cap="oracle_outbound", tags=["consumer", "oracle"], target_type="external_system",
-         modes=[ExecutionMode.PREFLIGHT], destructive=False, params={"vantage_point": "onprem-oracle"}),
-    dict(name="N8N connectivity", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
-         key="n8n_connectivity", tags=["consumer", "n8n", "http"], target_type="external_system",
-         modes=PREFLIGHT_SMOKE, destructive=False, params={"connection_name": "n8n_conn"}),
-    dict(name="Outbound HTTP egress", category=TestCategory.CONSUMER, kind=ExecutorKind.APP_INLINE,
-         key="outbound_http", tags=["consumer", "outbound", "http", "egress"], target_type="external_system",
-         modes=ALL_MODES, destructive=False, params={"url": "https://example.com", "method": "GET", "expected_status": 200}),
+# (key, CheckCreate kwargs). ``key`` is a local handle used to wire Tests below.
+CHECK_SPECS: list[tuple[str, dict]] = [
+    ("sql_healthcheck", dict(
+        display_name="SQL warehouse healthcheck",
+        description="Run a trivial statement on a SQL warehouse and confirm it returns a row.",
+        operation=OperationIn(service="statement_execution", method="execute_statement",
+                              params={"statement": "SELECT 1 AS healthcheck", "demo_row_count": 1}),
+        handler_key="sql_warehouse",
+        assertion="the query returns at least one row")),
+    ("uc_listing", dict(
+        display_name="Unity Catalog listing",
+        description="List catalogs via the SQL warehouse to prove UC access.",
+        operation=OperationIn(service="catalogs", method="list",
+                              params={"statement": "SHOW CATALOGS", "demo_row_count": 3}),
+        handler_key="sql_warehouse",
+        assertion="the query returns at least one row")),
+    ("egress_example", dict(
+        display_name="Outbound egress to example.com",
+        description="Prove the app egress path can reach an external HTTPS endpoint.",
+        operation=OperationIn(service="http", method="get",
+                              params={"url": "https://example.com", "demo_status_code": 200}),
+        handler_key="outbound_http",
+        assertion="HTTP status is 200")),
+    ("cluster_create_allowed", dict(
+        display_name="Cluster create is allowed",
+        description="A compliant cluster create succeeds under the workspace policy.",
+        operation=OperationIn(service="clusters", method="create", params={}),
+        handler_key="databricks_sdk",
+        assertion="the operation succeeds")),
+    ("cluster_create_denied", dict(
+        display_name="Non-compliant cluster create is denied",
+        description="A non-compliant cluster create must be denied (fails closed).",
+        operation=OperationIn(service="clusters", method="create", params={"demo_outcome": "deny"}),
+        handler_key="databricks_sdk",
+        assertion="a non-compliant cluster is denied by policy")),
+    ("lakebase_txn", dict(
+        display_name="Lakebase transaction",
+        description="Validate the app's own operational store with a minimal transaction.",
+        operation=OperationIn(service="lakebase", method="query", params={}),
+        handler_key="lakebase",
+        assertion="the transaction succeeds")),
+    ("warehouse_healthy_ish", dict(
+        display_name="Warehouse came up healthy-ish",
+        description="A subjective health read that can only run advisory (agentic).",
+        operation=OperationIn(service="statement_execution", method="execute_statement",
+                              params={"statement": "SELECT 1", "demo_row_count": 1}),
+        handler_key="sql_warehouse",
+        assertion="the warehouse came up healthy-ish")),
 ]
 
 
-def _make_definition(spec: dict) -> TestDefinition:
-    return TestDefinition(
-        display_name=spec["name"],
-        description=f"{spec['category'].value} probe: {spec['name']}.",
-        category=spec["category"],
-        tags=spec["tags"],
-        target_type=spec["target_type"],
-        required_capabilities=[spec.get("cap", spec["key"])],
-        supported_execution_modes=spec["modes"],
-        executor_kind=spec["kind"],
-        executor_key=spec["key"],
-        auth_mode=AuthMode.APP,
-        enterprise_only=spec.get("enterprise_only", False),
-        destructive=spec.get("destructive", False),
-        cleanup_policy=CleanupPolicy.ALWAYS if spec.get("destructive") else CleanupPolicy.NEVER,
-        default_parameters=spec.get("params", {}),
-        parameter_schema={"type": "object", "properties": {}},
-        evidence_schema={"type": "object"},
-        timeout_seconds=180 if spec["kind"] == ExecutorKind.DATABRICKS_JOB else 60,
-    )
+def _make_check(spec: dict) -> Check:
+    return Check(**build_check_fields(CheckCreate(**spec)))
 
 
-def seed_all(
-    session: Session,
-    with_sample_runs: bool = True,
-    with_demo_targets: bool = True,
-) -> None:
-    """Seed the test catalog (idempotent).
-
-    Always seeds the real test *definitions*, *suites*, and *schedules* - these
-    are generic, environment-agnostic config the app needs to be useful.
-
-    ``with_demo_targets``/``with_sample_runs`` add demo-only data (placeholder
-    catalogs/workspaces and synthetic historical runs) for screenshots and local
-    development. In a real workspace both are off, so probes run workspace-global
-    against the app's own environment and the dashboards start empty.
-    """
-    existing = session.exec(select(TestDefinition)).first()
-    if existing:
-        logger.info("Seed skipped: definitions already present.")
+def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> None:
+    """Seed Check/Test/Suite exemplars (idempotent)."""
+    if session.exec(select(Check)).first():
+        logger.info("Seed skipped: checks already present.")
         return
 
-    logger.info("Seeding test catalog (%d definitions)...", len(CATALOG))
-    definitions: list[TestDefinition] = []
-    for spec in CATALOG:
-        d = _make_definition(spec)
-        session.add(d)
-        definitions.append(d)
+    logger.info("Seeding Check/Test/Suite exemplars...")
+    checks: dict[str, Check] = {}
+    for key, spec in CHECK_SPECS:
+        check = _make_check(spec)
+        session.add(check)
+        checks[key] = check
     session.commit()
-    for d in definitions:
-        session.refresh(d)
+    for check in checks.values():
+        session.refresh(check)
 
-    # Suites by category + a full regression suite.
-    by_cat: dict[TestCategory, list[TestDefinition]] = {}
-    for d in definitions:
-        by_cat.setdefault(d.category, []).append(d)
+    # Tests: target-agnostic bundles, one carrying a counterfactual pair.
+    def make_test(name: str, description: str, members: list[tuple[str, str]],
+                  tags: list[str]) -> Test:
+        test = Test(name=name, description=description, tags=tags)
+        session.add(test)
+        session.commit()
+        session.refresh(test)
+        for i, (check_key, kind) in enumerate(members):
+            counterpart = checks["cluster_create_allowed"].id if kind == "counterfactual" else None
+            session.add(TestCheck(test_id=test.id, check_id=checks[check_key].id, sort_order=i,
+                                  kind=kind, counterpart_check_id=counterpart))
+        session.commit()
+        return test
 
-    suite_specs = [
-        ("Producer Regression", "Inbound/producer connectivity + landing-zone writes", by_cat.get(TestCategory.PRODUCER, [])),
-        ("Processing Regression", "In-workspace compute and services", by_cat.get(TestCategory.PROCESSING, [])),
-        ("Consumer Regression", "Outbound/consumer connectivity", by_cat.get(TestCategory.CONSUMER, [])),
-        ("Full Regression", "All probes across every category", definitions),
-    ]
-    for name, desc, members in suite_specs:
-        suite = TestSuite(name=name, description=desc, tags=["seeded"])
+    tests = {
+        "sql": make_test("SQL Warehouse validation", "Warehouse reachable + returns rows.",
+                         [("sql_healthcheck", "assertion")], ["sql", "connectivity"]),
+        "uc": make_test("Unity Catalog access", "UC access via the SQL warehouse.",
+                        [("uc_listing", "assertion")], ["uc", "governance"]),
+        "egress": make_test("Egress connectivity", "Outbound HTTPS egress works.",
+                            [("egress_example", "assertion")], ["consumer", "egress"]),
+        "policy": make_test("Cluster policy enforcement", "Compliant allowed; non-compliant denied.",
+                            [("cluster_create_allowed", "assertion"),
+                             ("cluster_create_denied", "counterfactual")], ["policy", "safety"]),
+        "self": make_test("Platform self-check", "The app's own store + a health read.",
+                          [("lakebase_txn", "assertion"),
+                           ("warehouse_healthy_ish", "assertion")], ["platform"]),
+    }
+
+    # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
+    def make_suite(name: str, description: str, test_keys: list[str],
+                   deterministic_only: bool = False, tags=None) -> Suite:
+        suite = Suite(name=name, description=description, tags=tags or ["seeded"],
+                      deterministic_only=deterministic_only)
         session.add(suite)
         session.commit()
         session.refresh(suite)
-        for i, d in enumerate(members):
-            session.add(SuiteMember(suite_id=suite.id, test_definition_id=d.id, sort_order=i))
-    session.commit()
+        for i, tk in enumerate(test_keys):
+            session.add(SuiteMember(suite_id=suite.id, test_id=tests[tk].id, sort_order=i))
+        session.commit()
+        return suite
 
-    # Demo targets: placeholder catalogs/workspaces for screenshots + local dev.
-    # Off in a real workspace, where probes run workspace-global against the
-    # app's own environment (the expand step uses a null target).
-    targets: list[TestTarget] = []
+    make_suite("Connectivity Suite", "Reachability across producer/consumer paths.",
+               ["egress", "sql", "uc"])
+    make_suite("Full Regression", "Every seeded Test.", list(tests.keys()))
+    make_suite("CI Gate", "Deterministic-only gate for the CI trigger.",
+               ["sql", "policy"], deterministic_only=True, tags=["seeded", "ci"])
+
     if with_demo_targets:
-        targets = [
-            TestTarget(name="sales_dev (temp schema)", target_type="catalog", catalog="sales_dev",
-                       schema_name="temp", workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
-                       config={"catalog": "sales_dev", "schema": "temp"}),
-            TestTarget(name="analytics_prod", target_type="catalog", catalog="analytics_prod",
-                       workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1",
-                       config={"catalog": "analytics_prod"}),
-            TestTarget(name="primary workspace", target_type="workspace",
-                       workspace_name="aws-prod-workspace", cloud="aws", region="us-east-1", config={}),
-        ]
-        for t in targets:
+        for t in [
+            Target(name="aws-prod (read-only)", workspace_name="aws-prod-workspace",
+                   safety_class=SafetyClass.READ_ONLY, tags={"environment": "prod"}),
+            Target(name="sandbox-1", workspace_name="sandbox-workspace",
+                   safety_class=SafetyClass.SANDBOX, tags={"environment": "sandbox"}),
+            Target(name="prod-for-us-1", workspace_name="platform-workspace",
+                   safety_class=SafetyClass.PROD_FOR_US, tags={"environment": "internal"}),
+        ]:
             session.add(t)
         session.commit()
 
-    # A nightly full-regression schedule (materialised as a Databricks Job in prod).
-    full_suite = session.exec(select(TestSuite).where(TestSuite.name == "Full Regression")).first()
-    if full_suite:
-        session.add(Schedule(
-            name="Nightly Full Regression", cron="0 0 7 * * ?", timezone="UTC",
-            suite_ids=[full_suite.id], execution_mode=ExecutionMode.SMOKE, created_by="seed",
-        ))
-    session.add(Schedule(
-        name="Hourly Connectivity Preflight", cron="0 0 * * * ?", timezone="UTC",
-        execution_mode=ExecutionMode.PREFLIGHT, created_by="seed",
-    ))
-    session.commit()
-
-    if with_sample_runs and targets:
-        _seed_sample_runs(session, definitions, targets)
-
-
-def _seed_sample_runs(session: Session, definitions: list[TestDefinition], targets: list[TestTarget]) -> None:
-    """Synthesize historical runs across ~14 days for dashboard rendering."""
-    logger.info("Seeding synthetic historical runs...")
-    rng = random.Random(42)
-    now = utcnow()
-    fail_buckets = [
-        RootCauseBucket.DNS_RESOLUTION_FAILURE,
-        RootCauseBucket.NETWORK_POLICY_DENY,
-        RootCauseBucket.OAUTH_SCOPE_MISSING,
-        RootCauseBucket.PRIVATELINK_ENDPOINT_NOT_ESTABLISHED,
-        RootCauseBucket.DATA_VALIDATION_FAILURE,
-        RootCauseBucket.TLS_HANDSHAKE_FAILURE,
-    ]
-
-    for day in range(14):
-        day_runs = rng.randint(6, 12)
-        for _ in range(day_runs):
-            d = rng.choice(definitions)
-            t = rng.choice(targets)
-            finished = now - timedelta(days=day, hours=rng.randint(0, 23), minutes=rng.randint(0, 59))
-            started = finished - timedelta(seconds=rng.randint(2, 40))
-            roll = rng.random()
-            if roll < 0.72:
-                outcome, status, conn, bucket = ProbeOutcome.PASS, RunStatus.PASSED, ConnectivityOutcome.CONNECTABLE, None
-            elif roll < 0.9:
-                bucket = rng.choice(fail_buckets)
-                connish = bucket in (RootCauseBucket.DNS_RESOLUTION_FAILURE, RootCauseBucket.NETWORK_POLICY_DENY,
-                                     RootCauseBucket.PRIVATELINK_ENDPOINT_NOT_ESTABLISHED, RootCauseBucket.TLS_HANDSHAKE_FAILURE)
-                outcome, status = ProbeOutcome.FAIL, RunStatus.FAILED
-                conn = ConnectivityOutcome.NOT_CONNECTABLE if connish else ConnectivityOutcome.CONNECTABLE
-            else:
-                outcome, status, conn, bucket = ProbeOutcome.SKIP, RunStatus.PARTIAL, ConnectivityOutcome.UNKNOWN, None
-
-            run = TestRun(
-                test_definition_id=d.id, target_id=t.id, requested_by="seed",
-                request_source=RequestSource.SCHEDULE, execution_mode=ExecutionMode.SMOKE,
-                workspace_name=t.workspace_name, cloud="aws", region=t.region, catalog=t.catalog,
-                git_sha="seed000", app_version="0.1.0",
-                status=status, probe_outcome=outcome, connectivity_outcome=conn,
-                started_at=started, finished_at=finished,
-                duration_ms=int((finished - started).total_seconds() * 1000),
-                summary_counts={outcome.value: 1},
-                connectivity_summary={conn.value: 1},
-                failure_buckets=[bucket.value] if bucket else [],
-                root_cause_bucket=bucket,
-                recommendation="See PrivateLink/NCC troubleshooting guide." if bucket else None,
-            )
-            session.add(run)
-            session.commit()
-            session.refresh(run)
-            # A couple of representative steps per run.
-            session.add(TestRunStep(run_id=run.run_id, step_kind=StepKind.AUTH, sort_order=0,
-                                    outcome=ProbeOutcome.PASS, connectivity=ConnectivityOutcome.CONNECTABLE,
-                                    message="Authenticated.", started_at=started, finished_at=finished))
-            session.add(TestRunStep(
-                run_id=run.run_id, step_kind=StepKind.FUNCTIONAL, sort_order=1,
-                outcome=outcome, connectivity=conn,
-                message="OK" if outcome == ProbeOutcome.PASS else (bucket.value if bucket else "skipped"),
-                root_cause_bucket=bucket, started_at=started, finished_at=finished,
-            ))
-            session.commit()
-    logger.info("Synthetic runs seeded.")
+    logger.info("Seed complete: %d checks, %d tests, %d suites.",
+                len(checks), len(tests), 3)

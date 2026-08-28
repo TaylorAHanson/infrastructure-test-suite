@@ -1,8 +1,21 @@
-"""Core domain enums for the regression validation platform.
+"""Closed enums that remain closed on purpose.
 
-These are the canonical vocabulary the whole platform speaks. Every probe
-result, run, and step is described in terms of these enums so the UI, the
-analytics views, and the remote-agent protocol all agree on meaning.
+Under the rebuilt model (ADR-0001, amended by ADR-0017) most of the old
+"vocabulary" enums are gone: the stage spine and the failure taxonomy are now
+**data**, not closed Python enums (see :mod:`app.core.stages` and
+:mod:`app.core.taxonomy`), so a new stage or failure bucket is a configuration
+entry rather than a code migration.
+
+What stays an enum here is the genuinely small, closed vocabulary:
+
+* :class:`ProbeOutcome` — the per-stage outcome primitive (pass/fail/skip/error).
+* :class:`RunStatus`   — a Run's lifecycle + terminal verdict.
+* :class:`Evaluator`   — how a Check's assertion is judged (ADR-0008).
+* :class:`Expectation` — whether a Check expects success or a denial (counterfactual).
+* :class:`RiskTier`    — the coarse destructiveness tier (ADR-0004/0017).
+* :class:`SafetyClass` — a Target's max-risk cap (ADR-0003/0004).
+* :class:`Depth`       — the coarse quick/full run dial (ADR-0007).
+* :class:`RequestSource` / :class:`CleanupPolicy` — small operational vocab.
 """
 from __future__ import annotations
 
@@ -10,73 +23,116 @@ from enum import Enum
 
 
 class ProbeOutcome(str, Enum):
-    """Functional outcome of a probe ("does it work?")."""
+    """Outcome of a single stage on the canonical spine."""
 
     PASS = "PASS"
     FAIL = "FAIL"
-    ERROR = "ERROR"
     SKIP = "SKIP"
-    PARTIAL = "PARTIAL"
+    ERROR = "ERROR"
 
-
-class ConnectivityOutcome(str, Enum):
-    """Connectivity outcome of a probe ("is it connectable?").
-
-    Connectable = auth + DNS + routing + handshake + permission precheck.
-    Deliberately separate from :class:`ProbeOutcome` so we can answer the two
-    questions independently (a target can be CONNECTABLE but still FAIL
-    functionally, or NOT_CONNECTABLE which usually short-circuits function).
-    """
-
-    CONNECTABLE = "CONNECTABLE"
-    NOT_CONNECTABLE = "NOT_CONNECTABLE"
-    UNKNOWN = "UNKNOWN"
-
-
-class ExecutionMode(str, Enum):
-    """How aggressively a probe exercises its target."""
-
-    PREFLIGHT = "PREFLIGHT"  # connectable-only: auth + dns + route + permission precheck
-    SMOKE = "SMOKE"          # minimal synthetic read/write/query/invoke
-    FULL = "FULL"            # full end-to-end validation incl. cleanup
-
-
-class ExecutorKind(str, Enum):
-    """Where/how a probe is executed."""
-
-    DATABRICKS_JOB = "DATABRICKS_JOB"
-    APP_INLINE = "APP_INLINE"
-    SQL_WAREHOUSE = "SQL_WAREHOUSE"
-    MODEL_SERVING = "MODEL_SERVING"
-    REMOTE_AGENT = "REMOTE_AGENT"
-
-
-class TestCategory(str, Enum):
-    """High-level grouping aligned to data flow direction."""
-
-    PRODUCER = "PRODUCER"      # inbound: writes data INTO the lakehouse
-    PROCESSING = "PROCESSING"  # in-workspace compute / services
-    CONSUMER = "CONSUMER"      # outbound: reads data OUT of the lakehouse
-
-
-class AuthMode(str, Enum):
-    """Identity used by a probe when talking to Databricks/targets."""
-
-    APP = "APP"    # app authorization (service principal) - default for shared ops
-    USER = "USER"  # user authorization (OBO) - only where per-user governance is needed
+    @property
+    def failed(self) -> bool:
+        return self in (ProbeOutcome.FAIL, ProbeOutcome.ERROR)
 
 
 class RunStatus(str, Enum):
-    """Lifecycle status of a test run."""
+    """Lifecycle + terminal verdict of a Run (ADR-0005).
+
+    ``running`` covers the non-terminal phases; the terminal verdict is one of
+    ``PASS`` / ``FAIL`` / ``ERROR`` / ``BLOCKED_BY_SAFETY``. Gating is
+    fail-closed: only ``PASS`` passes a pipeline.
+    """
 
     PENDING = "PENDING"
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
-    PASSED = "PASSED"
-    FAILED = "FAILED"
-    PARTIAL = "PARTIAL"
+    PASS = "PASS"
+    FAIL = "FAIL"
     ERROR = "ERROR"
+    BLOCKED_BY_SAFETY = "BLOCKED_BY_SAFETY"
+    SKIPPED = "SKIPPED"
     CANCELLED = "CANCELLED"
+
+
+TERMINAL_STATUSES = frozenset(
+    {
+        RunStatus.PASS,
+        RunStatus.FAIL,
+        RunStatus.ERROR,
+        RunStatus.BLOCKED_BY_SAFETY,
+        RunStatus.SKIPPED,
+        RunStatus.CANCELLED,
+    }
+)
+
+
+class Evaluator(str, Enum):
+    """How a Check's assertion is judged (ADR-0008).
+
+    ``deterministic`` — a structured predicate over evidence; same evidence,
+    same verdict; the CI default and the only kind that may gate.
+    ``agentic`` — a pinned LLM judge; always advisory, never a fail-closed gate.
+    """
+
+    DETERMINISTIC = "deterministic"
+    AGENTIC = "agentic"
+
+
+class Expectation(str, Enum):
+    """What a Check asserts about its operation's outcome.
+
+    ``PASS`` — the operation should succeed (the ordinary assertion).
+    ``DENY`` — the operation should be **denied / fail closed** at an expected
+    stage (a counterfactual: pass = it was correctly blocked).
+    """
+
+    PASS = "PASS"
+    DENY = "DENY"
+
+
+class RiskTier(str, Enum):
+    """Coarse destructiveness of an operation (ADR-0004, as amended by ADR-0017).
+
+    Derived from the operation's verb/category, not hand-authored per op. R3 is
+    the global never-floor enforced by the blocklist.
+    """
+
+    R0 = "R0"  # read
+    R1 = "R1"  # safe mutation (create)
+    R2 = "R2"  # destructive mutation (delete)
+    R3 = "R3"  # catastrophic (globally forbidden)
+
+    @property
+    def order(self) -> int:
+        return {"R0": 0, "R1": 1, "R2": 2, "R3": 3}[self.value]
+
+
+class SafetyClass(str, Enum):
+    """A Target's authoritative cap on the max risk tier it will run (ADR-0003)."""
+
+    READ_ONLY = "read-only"
+    SANDBOX = "sandbox"
+    PROD_FOR_US = "prod-for-us"
+
+    @property
+    def is_mutating(self) -> bool:
+        """Whether operations against this target can mutate state.
+
+        Mutating targets (`sandbox`/`prod-for-us`) are exactly where a
+        one-confirm operation-specific risk tier is captured (ADR-0017 §3).
+        """
+        return self in (SafetyClass.SANDBOX, SafetyClass.PROD_FOR_US)
+
+
+class Depth(str, Enum):
+    """The coarse how-far-up-the-spine dial on a Run (ADR-0007).
+
+    ``QUICK`` runs the connectivity end of the spine (through AUTHORIZE);
+    ``FULL`` runs through OPERATE/VERIFY. Defaults to QUICK; FULL is opt-in.
+    """
+
+    QUICK = "quick"
+    FULL = "full"
 
 
 class RequestSource(str, Enum):
@@ -85,70 +141,13 @@ class RequestSource(str, Enum):
     UI_MANUAL = "UI_MANUAL"
     SCHEDULE = "SCHEDULE"
     API = "API"
-    REMOTE_AGENT = "REMOTE_AGENT"
     CI = "CI"
+    NIGHTLY = "NIGHTLY"
 
 
 class CleanupPolicy(str, Enum):
-    """How temporary artifacts created by a probe are handled."""
+    """How temporary artifacts a handler creates are cleaned up."""
 
-    ALWAYS = "ALWAYS"            # always clean up in a finally block
-    ON_SUCCESS = "ON_SUCCESS"    # keep artifacts on failure for forensics
-    NEVER = "NEVER"              # probe creates nothing to clean up
-    BEST_EFFORT = "BEST_EFFORT"  # try, but never fail the run on cleanup error
-
-
-class StepKind(str, Enum):
-    """The six-question probe contract, expressed as ordered step kinds."""
-
-    PRECHECK = "PRECHECK"      # config/credential/permission precheck
-    DNS = "DNS"                # can I resolve the target?
-    AUTH = "AUTH"              # can I authenticate?
-    NETWORK = "NETWORK"        # can I establish the network path / handshake?
-    FUNCTIONAL = "FUNCTIONAL"  # can I perform the minimum useful operation + verify?
-    CLEANUP = "CLEANUP"        # can I clean up temporary artifacts?
-
-
-class RootCauseBucket(str, Enum):
-    """Normalized root-cause taxonomy.
-
-    Every failing step is classified into exactly one bucket so analytics can
-    group failures meaningfully (especially PrivateLink/NCC failure modes).
-    """
-
-    DNS_RESOLUTION_FAILURE = "DNS_RESOLUTION_FAILURE"
-    PRIVATE_DNS_MISCONFIGURATION = "PRIVATE_DNS_MISCONFIGURATION"
-    NCC_NOT_ATTACHED = "NCC_NOT_ATTACHED"
-    NETWORK_POLICY_DENY = "NETWORK_POLICY_DENY"
-    PRIVATELINK_ENDPOINT_NOT_ESTABLISHED = "PRIVATELINK_ENDPOINT_NOT_ESTABLISHED"
-    TLS_HANDSHAKE_FAILURE = "TLS_HANDSHAKE_FAILURE"
-    OAUTH_SCOPE_MISSING = "OAUTH_SCOPE_MISSING"
-    APP_RESOURCE_MISSING = "APP_RESOURCE_MISSING"
-    SECRET_MISSING = "SECRET_MISSING"
-    PERMISSION_DENIED = "PERMISSION_DENIED"
-    TARGET_NOT_FOUND = "TARGET_NOT_FOUND"
-    SERVICE_UNSUPPORTED_IN_REGION = "SERVICE_UNSUPPORTED_IN_REGION"
-    FEATURE_NOT_ENABLED = "FEATURE_NOT_ENABLED"
-    BUILD_EGRESS_BLOCKED = "BUILD_EGRESS_BLOCKED"
-    APP_DEPLOYMENT_FAILURE = "APP_DEPLOYMENT_FAILURE"
-    UPSTREAM_TIMEOUT = "UPSTREAM_TIMEOUT"
-    DATA_VALIDATION_FAILURE = "DATA_VALIDATION_FAILURE"
-    CLEANUP_FAILURE = "CLEANUP_FAILURE"
-    EXTERNAL_AGENT_UNAVAILABLE = "EXTERNAL_AGENT_UNAVAILABLE"
-    UNKNOWN = "UNKNOWN"
-
-
-# Buckets that indicate a connectivity (vs functional) failure. Used by
-# analytics to split "not connectable" from "connectable but broken".
-CONNECTIVITY_ROOT_CAUSES = frozenset(
-    {
-        RootCauseBucket.DNS_RESOLUTION_FAILURE,
-        RootCauseBucket.PRIVATE_DNS_MISCONFIGURATION,
-        RootCauseBucket.NCC_NOT_ATTACHED,
-        RootCauseBucket.NETWORK_POLICY_DENY,
-        RootCauseBucket.PRIVATELINK_ENDPOINT_NOT_ESTABLISHED,
-        RootCauseBucket.TLS_HANDSHAKE_FAILURE,
-        RootCauseBucket.UPSTREAM_TIMEOUT,
-        RootCauseBucket.EXTERNAL_AGENT_UNAVAILABLE,
-    }
-)
+    ALWAYS = "ALWAYS"
+    ON_SUCCESS = "ON_SUCCESS"
+    NEVER = "NEVER"

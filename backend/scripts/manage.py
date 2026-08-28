@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Management CLI for the regression validation platform.
+"""Management CLI for the validation platform.
 
 Works against whatever database the app is configured to use (SQLite locally,
 Lakebase Postgres when PG* / DATABASE_URL are set). Run from anywhere:
@@ -7,13 +7,12 @@ Lakebase Postgres when PG* / DATABASE_URL are set). Run from anywhere:
     python backend/scripts/manage.py <command>
 
 Commands:
-    purge-runs   Delete run history only (runs, steps, requests, artifacts).
-                 Keeps the test catalog, suites, targets, schedules.
-    purge-seed   Delete everything that seeding creates (catalog + suites +
-                 members + targets + schedules + runs). Full clean slate.
+    purge-runs   Delete run history only (check_runs, stage_outcomes, requests).
+                 Keeps the Check/Test/Suite catalog + targets.
+    purge-seed   Delete everything (catalog + tests + suites + targets + runs).
     purge-all    Alias for purge-seed (delete ALL operational rows).
-    seed         Seed the catalog WITHOUT synthetic sample runs.
-    seed-demo    Seed the catalog WITH synthetic sample runs (dashboard demo).
+    seed         Seed the Check/Test/Suite catalog (no demo targets).
+    seed-demo    Seed the catalog WITH demo targets.
     info         Print row counts per table + the active DB URL.
 """
 from __future__ import annotations
@@ -27,29 +26,30 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 
+def _models():
+    from app.models import (
+        AuditEvent, Check, CheckRun, EntityVersion, RunRequest,
+        StageOutcome, Suite, SuiteMember, Target, Test, TestCheck,
+    )
+
+    return {
+        "checks": Check, "tests": Test, "test_checks": TestCheck,
+        "suites": Suite, "suite_members": SuiteMember, "targets": Target,
+        "entity_versions": EntityVersion, "run_requests": RunRequest,
+        "check_runs": CheckRun, "stage_outcomes": StageOutcome, "audit_events": AuditEvent,
+    }
+
+
 def _counts(session) -> dict[str, int]:
     from sqlalchemy import func, select
 
-    from app.models import (
-        Artifact, AuditEvent, RemoteAgent, RunRequest, Schedule,
-        SuiteMember, TestDefinition, TestRun, TestRunStep, TestSuite, TestTarget,
-    )
-
-    models = {
-        "test_definitions": TestDefinition, "test_suites": TestSuite,
-        "suite_members": SuiteMember, "test_targets": TestTarget,
-        "run_requests": RunRequest, "test_runs": TestRun,
-        "test_run_steps": TestRunStep, "schedules": Schedule,
-        "audit_events": AuditEvent, "remote_agents": RemoteAgent, "artifacts": Artifact,
-    }
     out = {}
-    for name, model in models.items():
+    for name, model in _models().items():
         out[name] = session.execute(select(func.count()).select_from(model)).scalar() or 0
     return out
 
 
 def _delete(session, models) -> None:
-    """Delete all rows from the given models, in FK-safe order."""
     from sqlalchemy import delete
 
     for model in models:
@@ -58,31 +58,30 @@ def _delete(session, models) -> None:
 
 
 def cmd_purge_runs(session) -> None:
-    from app.models import Artifact, RunRequest, TestRun, TestRunStep
+    from app.models import CheckRun, RunRequest, StageOutcome
 
-    # Children first to satisfy FKs on Postgres.
-    _delete(session, [Artifact, TestRunStep, TestRun, RunRequest])
-    print("Deleted run history (runs, steps, requests, artifacts). Catalog kept.")
+    _delete(session, [StageOutcome, CheckRun, RunRequest])
+    print("Deleted run history (stage_outcomes, check_runs, requests). Catalog kept.")
 
 
 def cmd_purge_seed(session) -> None:
     from app.models import (
-        Artifact, AuditEvent, RemoteAgent, RunRequest, Schedule,
-        SuiteMember, TestDefinition, TestRun, TestRunStep, TestSuite, TestTarget,
+        AuditEvent, Check, CheckRun, EntityVersion, RunRequest,
+        StageOutcome, Suite, SuiteMember, Target, Test, TestCheck,
     )
 
     _delete(session, [
-        Artifact, TestRunStep, TestRun, RunRequest, SuiteMember,
-        AuditEvent, Schedule, RemoteAgent, TestTarget, TestSuite, TestDefinition,
+        StageOutcome, CheckRun, RunRequest, TestCheck, SuiteMember,
+        AuditEvent, EntityVersion, Suite, Test, Check, Target,
     ])
     print("Deleted ALL operational rows (clean slate).")
 
 
-def cmd_seed(session, with_runs: bool) -> None:
+def cmd_seed(session, with_demo: bool) -> None:
     from app.services.seed import seed_all
 
-    seed_all(session, with_sample_runs=with_runs)
-    print(f"Seeded catalog (sample_runs={with_runs}).")
+    seed_all(session, with_demo_targets=with_demo)
+    print(f"Seeded catalog (demo_targets={with_demo}).")
 
 
 def cmd_info(session) -> None:
@@ -95,7 +94,7 @@ def cmd_info(session) -> None:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Regression validation management CLI")
+    parser = argparse.ArgumentParser(description="Validation platform management CLI")
     parser.add_argument(
         "command",
         choices=["purge-runs", "purge-seed", "purge-all", "seed", "seed-demo", "info"],
@@ -120,9 +119,9 @@ def main(argv: list[str]) -> int:
         elif args.command in ("purge-seed", "purge-all"):
             cmd_purge_seed(session)
         elif args.command == "seed":
-            cmd_seed(session, with_runs=False)
+            cmd_seed(session, with_demo=False)
         elif args.command == "seed-demo":
-            cmd_seed(session, with_runs=True)
+            cmd_seed(session, with_demo=True)
         elif args.command == "info":
             cmd_info(session)
     return 0

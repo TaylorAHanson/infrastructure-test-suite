@@ -1,8 +1,17 @@
-"""Operational system-of-record tables (Lakebase Postgres / local SQLite).
+"""System-of-record tables (Lakebase Postgres / local SQLite).
 
-These map 1:1 to the tables in the plan. JSON columns are used for flexible,
-metadata-driven fields (tags, schemas, summaries) so adding a new test is
-mostly configuration rather than schema change. All timestamps are UTC.
+The rebuilt domain (ADR-0001, amended by ADR-0017) is three cleanly separated
+units plus an extensible, data-driven result model:
+
+* **Check** — the atomic assertion: one open-SDK operation + one expectation.
+* **Test**  — a target-agnostic, ordered bundle of Checks (incl. counterfactuals).
+* **Suite** — a named selection of Tests for a Run (grouping only).
+
+Results map onto the **canonical stage spine** (a :class:`StageOutcome` row per
+stage, keyed by the data-backed stage id — *not* a hardcoded ``StepKind``) and
+carry a **failure-taxonomy bucket** (a string id, not a closed enum). The store
+is Lakebase-authoritative: edits version in-app (:class:`EntityVersion`) and roll
+back in-app; YAML is an export format only. All timestamps are naive UTC.
 """
 from __future__ import annotations
 
@@ -13,17 +22,14 @@ from sqlalchemy import JSON, Column, Index, Text
 from sqlmodel import Field, SQLModel
 
 from app.core.enums import (
-    AuthMode,
-    CleanupPolicy,
-    ConnectivityOutcome,
-    ExecutionMode,
-    ExecutorKind,
+    Depth,
+    Evaluator,
+    Expectation,
     ProbeOutcome,
     RequestSource,
-    RootCauseBucket,
+    RiskTier,
     RunStatus,
-    StepKind,
-    TestCategory,
+    SafetyClass,
 )
 from app.core.ids import new_id, utcnow
 
@@ -37,115 +43,176 @@ def _json_list() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Catalog: definitions, suites, targets
+# Catalog: Check / Test / Suite
 # ---------------------------------------------------------------------------
-class TestDefinition(SQLModel, table=True):
-    __tablename__ = "test_definitions"
+class Check(SQLModel, table=True):
+    """The atomic unit: one operation + its expectation."""
 
-    id: str = Field(default_factory=lambda: new_id("test"), primary_key=True)
+    __tablename__ = "checks"
+
+    id: str = Field(default_factory=lambda: new_id("chk"), primary_key=True)
     display_name: str
     description: str = ""
-    category: TestCategory = Field(index=True)
-    tags: list[str] = _json_list()
 
-    target_type: str = Field(index=True)
-    required_capabilities: list[str] = _json_list()
-    # Stored as plain strings in JSON (values of ExecutionMode) for clean
-    # round-tripping through SQLite/Postgres JSON columns.
-    supported_execution_modes: list[str] = _json_list()
-    executor_kind: ExecutorKind = Field(index=True)
-    # The plugin key the registry resolves to; lets many definitions share one
-    # executor differentiated by parameters.
-    executor_key: str = Field(index=True)
-    auth_mode: AuthMode = Field(default=AuthMode.APP)
+    # Open-SDK operation: an arbitrary Databricks SDK/API call (ADR-0017),
+    # {"service", "method", "verb", "params"}. Ground truth is the SDK surface
+    # minus the blocklist — never a curated manifest allowlist.
+    operation: dict = _json_col()
+    #: Registry key of the handler that performs the operation on the spine.
+    handler_key: str = Field(default="databricks_sdk", index=True)
 
-    enterprise_only: bool = Field(default=False)
-    destructive: bool = Field(default=False)
+    # Assertion authored in plain text + its compiled form.
+    assertion: str = ""
+    expectation: Expectation = Field(default=Expectation.PASS)
+    evaluator: Evaluator = Field(default=Evaluator.DETERMINISTIC, index=True)
+    compiled_predicate: dict = _json_col()
+    compilable: bool = Field(default=True)
+    #: For a counterfactual: the canonical stage the denial is expected at.
+    expected_stage: Optional[str] = Field(default=None)
+
+    # Coarse verb/category-derived tier (ADR-0017); confirmed_risk_tier is the
+    # one-confirm operation-specific tier captured only for mutating targets.
+    risk_tier: str = Field(default=RiskTier.R0.value, index=True)
+    confirmed_risk_tier: Optional[str] = Field(default=None)
+
+    # Optional grounding hints (what remains of the "handler manifest"): the
+    # canonical stages the op maps to, counterfactual pair, evidence schema.
+    hints: dict = _json_col()
+
+    version: int = Field(default=1)
     enabled: bool = Field(default=True, index=True)
-
-    timeout_seconds: int = Field(default=120)
-    retries: int = Field(default=0)
-    cleanup_policy: CleanupPolicy = Field(default=CleanupPolicy.ALWAYS)
-
-    parameter_schema: dict = _json_col()
-    evidence_schema: dict = _json_col()
-    default_parameters: dict = _json_col()
-
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
-class TestSuite(SQLModel, table=True):
-    __tablename__ = "test_suites"
+class Test(SQLModel, table=True):
+    """A target-agnostic, ordered bundle of Checks (with counterfactuals)."""
+
+    __tablename__ = "tests"
+
+    id: str = Field(default_factory=lambda: new_id("tst"), primary_key=True)
+    name: str = Field(index=True)
+    description: str = ""
+    tags: list[str] = _json_list()
+    #: Default identity for the Test: None = the target's own SP; else a
+    #: registered role-profile it assumes (ADR-0018; enforcement is Spec 2).
+    run_as_role: Optional[str] = Field(default=None)
+
+    version: int = Field(default=1)
+    enabled: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class TestCheck(SQLModel, table=True):
+    """Ordered membership of a Check in a Test."""
+
+    __tablename__ = "test_checks"
+    __table_args__ = (Index("ix_test_check", "test_id", "check_id", unique=True),)
+
+    id: str = Field(default_factory=lambda: new_id("tc"), primary_key=True)
+    test_id: str = Field(foreign_key="tests.id", index=True)
+    check_id: str = Field(foreign_key="checks.id", index=True)
+    sort_order: int = Field(default=0)
+    #: "assertion" (ordinary) or "counterfactual" (expects denial).
+    kind: str = Field(default="assertion")
+    #: Per-member identity override (lets a counterfactual differ by role,
+    #: e.g. "allowed as admin / denied as analyst" — user story 22 / ADR-0018).
+    run_as_role: Optional[str] = Field(default=None)
+    #: Links a counterfactual to the positive Check it negates.
+    counterpart_check_id: Optional[str] = Field(default=None)
+
+
+class Suite(SQLModel, table=True):
+    """A named selection of Tests for a Run (grouping only; no cost logic)."""
+
+    __tablename__ = "suites"
 
     id: str = Field(default_factory=lambda: new_id("suite"), primary_key=True)
     name: str = Field(index=True)
     description: str = ""
     tags: list[str] = _json_list()
+    #: Fail-closed verdict computed from deterministic Checks alone (ADR-0008).
+    #: This spec defines the flag; CI-gate enforcement is Spec 3.
+    deterministic_only: bool = Field(default=False)
+    version: int = Field(default=1)
     enabled: bool = Field(default=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
 class SuiteMember(SQLModel, table=True):
+    """Membership of a Test in a Suite."""
+
     __tablename__ = "suite_members"
-    __table_args__ = (Index("ix_suite_member", "suite_id", "test_definition_id", unique=True),)
+    __table_args__ = (Index("ix_suite_member", "suite_id", "test_id", unique=True),)
 
     id: str = Field(default_factory=lambda: new_id("sm"), primary_key=True)
-    suite_id: str = Field(foreign_key="test_suites.id", index=True)
-    test_definition_id: str = Field(foreign_key="test_definitions.id", index=True)
+    suite_id: str = Field(foreign_key="suites.id", index=True)
+    test_id: str = Field(foreign_key="tests.id", index=True)
     sort_order: int = Field(default=0)
-    # Optional per-suite parameter overrides for this test.
-    parameter_overrides: dict = _json_col()
 
 
-class TestTarget(SQLModel, table=True):
-    """A concrete environment a test can run against (workspace + catalog + ...)."""
+class Target(SQLModel, table=True):
+    """One Databricks workspace under test (bound to a Test at run time)."""
 
-    __tablename__ = "test_targets"
+    __tablename__ = "targets"
 
     id: str = Field(default_factory=lambda: new_id("tgt"), primary_key=True)
     name: str = Field(index=True)
-    # e.g. "catalog", "workspace", "external_system"
-    target_type: str = Field(index=True)
-    catalog: Optional[str] = Field(default=None, index=True)
-    schema_name: Optional[str] = Field(default=None)
+    workspace_name: Optional[str] = Field(default=None, index=True)
     workspace_id: Optional[str] = Field(default=None)
-    workspace_name: Optional[str] = Field(default=None)
-    cloud: str = Field(default="aws")
-    account_id: Optional[str] = None
-    region: Optional[str] = None
-    # Binding hints (resource keys, connection names) - NOT raw secrets.
-    config: dict = _json_col()
-    enabled: bool = Field(default=True)
+    host: Optional[str] = Field(default=None)
+    #: Authoritative cap on the max risk tier this target will run (ADR-0003).
+    safety_class: SafetyClass = Field(default=SafetyClass.READ_ONLY, index=True)
+    #: Reference to the target's OAuth M2M SP as a secret-scope ``scope/key``.
+    identity_handle: Optional[str] = Field(default=None)
+    #: Registered role-profiles this target may assume, capped by safety class.
+    assumable_roles: list[str] = _json_list()
+    tags: dict = _json_col()
+    enabled: bool = Field(default=True, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 
 # ---------------------------------------------------------------------------
-# Execution: requests, runs, steps
+# In-app versioning / rollback (Lakebase-authoritative, ADR-0001)
+# ---------------------------------------------------------------------------
+class EntityVersion(SQLModel, table=True):
+    """An immutable snapshot of a Check/Test/Suite for in-app rollback."""
+
+    __tablename__ = "entity_versions"
+    __table_args__ = (Index("ix_entity_version", "entity_type", "entity_id", "version"),)
+
+    id: str = Field(default_factory=lambda: new_id("ver"), primary_key=True)
+    entity_type: str = Field(index=True)  # "check" | "test" | "suite"
+    entity_id: str = Field(index=True)
+    version: int = Field(default=1)
+    snapshot: dict = _json_col()
+    actor: str = Field(default="system")
+    created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Execution: request → check runs → stage outcomes
 # ---------------------------------------------------------------------------
 class RunRequest(SQLModel, table=True):
-    """An intent to execute a selection of tests. The poller turns these into
-    one or more :class:`TestRun` rows. Idempotency key dedupes retries."""
+    """An intent to run a selection of Tests/Suites against targets."""
 
     __tablename__ = "run_requests"
 
     id: str = Field(default_factory=lambda: new_id("req"), primary_key=True)
     idempotency_key: Optional[str] = Field(default=None, index=True, unique=True)
     requested_by: str = Field(default="system")
-    request_source: RequestSource = Field(default=RequestSource.UI_MANUAL)
+    request_source: RequestSource = Field(default=RequestSource.API)
 
-    # Selection: empty list means "all".
+    # Selection: empty lists mean "all".
     suite_ids: list[str] = _json_list()
-    test_definition_ids: list[str] = _json_list()
+    test_ids: list[str] = _json_list()
+    check_ids: list[str] = _json_list()
     target_ids: list[str] = _json_list()
-    catalogs: list[str] = _json_list()
-    execution_mode: ExecutionMode = Field(default=ExecutionMode.SMOKE)
+    depth: Depth = Field(default=Depth.QUICK)
 
-    schedule_id: Optional[str] = Field(default=None, foreign_key="schedules.id")
     status: RunStatus = Field(default=RunStatus.PENDING, index=True)
-
-    # Poller coordination (claim/lock).
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
 
@@ -154,157 +221,94 @@ class RunRequest(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
-class TestRun(SQLModel, table=True):
-    __tablename__ = "test_runs"
+class CheckRun(SQLModel, table=True):
+    """One Check executed against one Target — the atomic result record.
+
+    connectable/functional are **derived** from the stage outcomes at read time
+    (see :func:`app.core.stages.derive_connectivity`) and are never stored here
+    as authoritative columns.
+    """
+
+    __tablename__ = "check_runs"
+    __table_args__ = (Index("ix_check_run_provenance", "target_id", "check_id", "created_at"),)
 
     run_id: str = Field(default_factory=lambda: new_id("run"), primary_key=True)
     request_id: Optional[str] = Field(default=None, foreign_key="run_requests.id", index=True)
-    test_definition_id: str = Field(foreign_key="test_definitions.id", index=True)
-    target_id: Optional[str] = Field(default=None, foreign_key="test_targets.id", index=True)
+    test_id: Optional[str] = Field(default=None, foreign_key="tests.id", index=True)
+    check_id: str = Field(foreign_key="checks.id", index=True)
+    target_id: Optional[str] = Field(default=None, foreign_key="targets.id", index=True)
 
     requested_by: str = "system"
-    request_source: RequestSource = Field(default=RequestSource.UI_MANUAL)
-    execution_mode: ExecutionMode = Field(default=ExecutionMode.SMOKE)
+    request_source: RequestSource = Field(default=RequestSource.API)
+    depth: Depth = Field(default=Depth.QUICK)
 
-    # Context
-    workspace_id: Optional[str] = None
+    evaluator: Evaluator = Field(default=Evaluator.DETERMINISTIC, index=True)
+    expectation: Expectation = Field(default=Expectation.PASS)
+    #: True = this result gates (deterministic); False = advisory (agentic).
+    gating: bool = Field(default=True)
+    run_as_role: Optional[str] = Field(default=None)
+    risk_tier: str = Field(default=RiskTier.R0.value)
+
+    # Verdict + failure classification.
+    verdict: RunStatus = Field(default=RunStatus.PENDING, index=True)
+    failure_bucket: Optional[str] = Field(default=None, index=True)
+    failure_stage: Optional[str] = Field(default=None)
+    message: str = ""
+
+    # Context (denormalized for provenance queries).
     workspace_name: Optional[str] = None
-    cloud: str = "aws"
-    account_id: Optional[str] = None
-    region: Optional[str] = None
-    catalog: Optional[str] = Field(default=None, index=True)
     git_sha: str = "unknown"
     app_version: str = "0.0.0"
-    idempotency_key: Optional[str] = Field(default=None, index=True)
 
-    # Lifecycle
-    status: RunStatus = Field(default=RunStatus.PENDING, index=True)
-    probe_outcome: Optional[ProbeOutcome] = Field(default=None, index=True)
-    connectivity_outcome: Optional[ConnectivityOutcome] = Field(default=None, index=True)
+    evidence: dict = _json_col()
+
     started_at: Optional[datetime] = Field(default=None, index=True)
     finished_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
-
-    # Aggregates
-    summary_counts: dict = _json_col()       # {PASS: n, FAIL: n, ...}
-    connectivity_summary: dict = _json_col()  # {CONNECTABLE: n, ...}
-    failure_buckets: list[str] = _json_list()  # normalized RootCauseBucket values
-    root_cause_bucket: Optional[RootCauseBucket] = Field(default=None, index=True)
-    recommendation: Optional[str] = Field(default=None, sa_column=Column(Text))
-
-    # Links to raw evidence / telemetry
-    databricks_job_run_id: Optional[str] = None
-    databricks_job_run_url: Optional[str] = None
-    telemetry_trace_id: Optional[str] = None
-    telemetry_logs_url: Optional[str] = None
-
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
-class TestRunStep(SQLModel, table=True):
-    """One probe step within a run (the six-question contract)."""
+class StageOutcome(SQLModel, table=True):
+    """One stage on the canonical spine within a CheckRun.
 
-    __tablename__ = "test_run_steps"
+    Keyed by the data-backed canonical-stage id (a string), not a hardcoded
+    ``StepKind`` enum — adding a stage is a config entry (ADR-0001).
+    """
 
-    id: str = Field(default_factory=lambda: new_id("step"), primary_key=True)
-    run_id: str = Field(foreign_key="test_runs.run_id", index=True)
-    step_kind: StepKind = Field(index=True)
+    __tablename__ = "stage_outcomes"
+
+    id: str = Field(default_factory=lambda: new_id("stage"), primary_key=True)
+    run_id: str = Field(foreign_key="check_runs.run_id", index=True)
+    stage: str = Field(index=True)  # canonical stage id, e.g. "AUTHENTICATE"
     sort_order: int = Field(default=0)
 
     outcome: ProbeOutcome = Field(default=ProbeOutcome.SKIP)
-    connectivity: ConnectivityOutcome = Field(default=ConnectivityOutcome.UNKNOWN)
+    message: str = ""
+    failure_bucket: Optional[str] = Field(default=None, index=True)
+    raw_excerpt: Optional[str] = Field(default=None, sa_column=Column(Text))
+    evidence: dict = _json_col()
+
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
 
-    message: str = ""
-    error_class: Optional[str] = None
-    root_cause_bucket: Optional[RootCauseBucket] = Field(default=None, index=True)
-    recommendation: Optional[str] = Field(default=None, sa_column=Column(Text))
-
-    # Truncated request/response excerpt for forensics (never full secrets).
-    raw_payload_excerpt: Optional[str] = Field(default=None, sa_column=Column(Text))
-    evidence: dict = _json_col()
-
 
 # ---------------------------------------------------------------------------
-# Scheduling, audit, agents, artifacts
+# Audit (config-plane mutations + version pointers, ADR-0014)
 # ---------------------------------------------------------------------------
-class Schedule(SQLModel, table=True):
-    __tablename__ = "schedules"
-
-    id: str = Field(default_factory=lambda: new_id("sched"), primary_key=True)
-    name: str = Field(index=True)
-    cron: str
-    timezone: str = "UTC"
-    enabled: bool = Field(default=True, index=True)
-
-    suite_ids: list[str] = _json_list()
-    test_definition_ids: list[str] = _json_list()
-    target_ids: list[str] = _json_list()
-    catalogs: list[str] = _json_list()
-    execution_mode: ExecutionMode = Field(default=ExecutionMode.SMOKE)
-
-    # The Databricks Job this schedule is materialised as (created via SDK).
-    databricks_job_id: Optional[str] = None
-    last_fired_at: Optional[datetime] = None
-    created_by: str = "system"
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
-
-
 class AuditEvent(SQLModel, table=True):
-    """Durable audit trail. App logs are ephemeral; these rows are not."""
+    """Append-only record of a config-plane mutation."""
 
     __tablename__ = "audit_events"
 
     id: str = Field(default_factory=lambda: new_id("audit"), primary_key=True)
     ts: datetime = Field(default_factory=utcnow, index=True)
     actor: str = Field(default="system", index=True)
-    actor_kind: str = "user"  # user | service_principal | schedule | agent
-    action: str = Field(index=True)  # e.g. suite.update, run.trigger, schedule.create
+    actor_kind: str = "user"
+    action: str = Field(index=True)
     entity_type: str = Field(index=True)
     entity_id: Optional[str] = Field(default=None, index=True)
     summary: str = ""
     before: dict = _json_col()
     after: dict = _json_col()
-    request_source: RequestSource = Field(default=RequestSource.API)
-
-
-class RemoteAgent(SQLModel, table=True):
-    """A remote executor running in an external vantage point.
-
-    The Databricks App is the control plane; agents poll for work and post
-    signed results back. This row stores registration + health, not secrets.
-    """
-
-    __tablename__ = "remote_agents"
-
-    id: str = Field(default_factory=lambda: new_id("agent"), primary_key=True)
-    name: str = Field(index=True)
-    description: str = ""
-    # Network vantage point this agent represents (e.g. "corp-network", "onprem-oracle").
-    vantage_point: str = Field(index=True)
-    # Capabilities/executor_keys this agent can run.
-    capabilities: list[str] = _json_list()
-    # Key id used to look up the HMAC verification secret (in a secret store).
-    signing_key_id: Optional[str] = None
-    enabled: bool = Field(default=True)
-    last_seen_at: Optional[datetime] = Field(default=None, index=True)
-    status: str = "UNKNOWN"  # ONLINE | OFFLINE | UNKNOWN
-    created_at: datetime = Field(default_factory=utcnow)
-
-
-class Artifact(SQLModel, table=True):
-    """Pointer to raw evidence stored durably (UC Volume / workspace files)."""
-
-    __tablename__ = "artifacts"
-
-    id: str = Field(default_factory=lambda: new_id("art"), primary_key=True)
-    run_id: Optional[str] = Field(default=None, foreign_key="test_runs.run_id", index=True)
-    step_id: Optional[str] = Field(default=None, foreign_key="test_run_steps.id")
-    kind: str = "evidence"  # evidence | payload | log | screenshot
-    content_type: str = "application/json"
-    uri: Optional[str] = None        # durable storage location (UC Volume etc.)
-    inline_excerpt: Optional[str] = Field(default=None, sa_column=Column(Text))
-    created_at: datetime = Field(default_factory=utcnow)
+    request_source: str = "API"

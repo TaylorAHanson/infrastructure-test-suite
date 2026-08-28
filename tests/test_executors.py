@@ -1,60 +1,74 @@
-"""Executor contract tests: step ordering, modes, connectable vs functional."""
+"""Handler contract: stage-spine execution, depth, short-circuit, cleanup."""
 from __future__ import annotations
 
-from app.core.enums import CleanupPolicy, ExecutionMode, ProbeOutcome, StepKind
-from app.executors import ProbeContext
-from app.executors.builtin.sql_warehouse import SqlWarehouseSmokeExecutor
+from app.core.enums import Depth, ProbeOutcome
+from app.core.operations import Operation
+from app.core.stages import connectivity_stage_ids, ordered_stages
+from app.executors.base import Handler, HandlerContext, HandlerError, StageResult
+from app.executors.builtin.sql_warehouse import SqlWarehouseHandler
 
 
-class _Def:
-    cleanup_policy = CleanupPolicy.NEVER
-    enterprise_only = False
-    executor_key = "sql_warehouse_smoke"
-
-
-def _ctx(mode):
-    return ProbeContext(
-        run_id="run_test", definition=_Def(), execution_mode=mode,
-        parameters={"query": "SELECT 1"}, demo_mode=True,
+def _ctx(depth, params=None):
+    params = params or {}
+    return HandlerContext(
+        run_id="r", operation=Operation("svc", "list", params=params),
+        depth=depth, params=params, demo_mode=True,
     )
 
 
-def test_preflight_skips_functional():
-    steps = SqlWarehouseSmokeExecutor().run(_ctx(ExecutionMode.PREFLIGHT))
-    kinds = [s.step_kind for s in steps]
-    assert StepKind.FUNCTIONAL not in kinds
-    assert StepKind.AUTH in kinds and StepKind.NETWORK in kinds
+def test_quick_runs_only_connectivity_stages():
+    steps = SqlWarehouseHandler().run(_ctx(Depth.QUICK))
+    ids = [s.stage for s in steps]
+    assert ids, "quick run should still probe connectivity"
+    assert all(sid in connectivity_stage_ids() for sid in ids)
+    assert "OPERATE" not in ids and "VERIFY" not in ids
+    assert "AUTHENTICATE" in ids
 
 
-def test_smoke_runs_functional_and_passes_in_demo():
-    steps = SqlWarehouseSmokeExecutor().run(_ctx(ExecutionMode.SMOKE))
-    functional = [s for s in steps if s.step_kind == StepKind.FUNCTIONAL]
-    assert functional and functional[0].outcome == ProbeOutcome.PASS
+def test_full_runs_operate_and_verify():
+    steps = SqlWarehouseHandler().run(_ctx(Depth.FULL, {"demo_row_count": 2}))
+    ids = [s.stage for s in steps]
+    assert "OPERATE" in ids and "VERIFY" in ids
+    operate = next(s for s in steps if s.stage == "OPERATE")
+    assert operate.outcome == ProbeOutcome.PASS
+    assert operate.evidence.get("row_count") == 2
 
 
-def test_cleanup_runs_when_policy_requires(monkeypatch):
-    class _DefClean(_Def):
-        cleanup_policy = CleanupPolicy.ALWAYS
-
-    ctx = ProbeContext(run_id="r", definition=_DefClean(), execution_mode=ExecutionMode.SMOKE,
-                       parameters={}, demo_mode=True)
-    steps = SqlWarehouseSmokeExecutor().run(ctx)
-    assert any(s.step_kind == StepKind.CLEANUP for s in steps)
+def test_stages_emit_in_canonical_spine_order():
+    steps = SqlWarehouseHandler().run(_ctx(Depth.FULL))
+    order = {s.id: s.order for s in ordered_stages()}
+    emitted = [order[s.stage] for s in steps]
+    assert emitted == sorted(emitted)
 
 
-def test_connectable_short_circuits_on_failure():
-    """A failing precheck stops before functional work."""
-    from app.executors.base import Executor, ProbeError, StepResult
-    from app.core.enums import RootCauseBucket
+def test_failed_connectivity_stage_short_circuits():
+    class _Failing(Handler):
+        STAGES = ("AUTHENTICATE", "OPERATE")
 
-    class _Failing(Executor):
-        def step_precheck(self, ctx):
-            raise ProbeError("missing", root_cause=RootCauseBucket.APP_RESOURCE_MISSING)
+        def stage_authenticate(self, ctx):
+            raise HandlerError("no identity", failure_bucket="AUTHENTICATION_FAILURE")
 
-        def step_functional(self, ctx):  # should never run
-            raise AssertionError("functional ran despite failed precheck")
+        def stage_operate(self, ctx):  # must never run
+            raise AssertionError("operate ran despite a failed authenticate")
 
-    steps = _Failing().run(_ctx(ExecutionMode.SMOKE))
-    assert steps[0].step_kind == StepKind.PRECHECK
-    assert steps[0].outcome == ProbeOutcome.FAIL
-    assert all(s.step_kind != StepKind.FUNCTIONAL for s in steps)
+    steps = _Failing().run(_ctx(Depth.FULL))
+    assert steps[0].stage == "AUTHENTICATE" and steps[0].outcome == ProbeOutcome.FAIL
+    assert steps[0].failure_bucket == "AUTHENTICATION_FAILURE"
+    assert all(s.stage != "OPERATE" for s in steps)
+
+
+def test_cleanup_runs_even_when_a_stage_fails():
+    seen = {}
+
+    class _Handler(Handler):
+        STAGES = ("OPERATE",)
+
+        def stage_operate(self, ctx):
+            raise HandlerError("boom", failure_bucket="OPERATION_FAILED")
+
+        def cleanup(self, ctx):
+            seen["cleaned"] = True
+            return StageResult("VERIFY", ProbeOutcome.PASS, message="cleaned up")
+
+    _Handler().run(_ctx(Depth.FULL))
+    assert seen.get("cleaned") is True
