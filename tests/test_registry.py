@@ -1,28 +1,52 @@
-"""Registry resolves live executors and falls back to a clean stub."""
+"""Registry + open-SDK operation validation against the blocklist (ADR-0017)."""
 from __future__ import annotations
 
+import pytest
 
-def test_builtin_executors_registered():
-    from app.executors import registry
+from app.core.operations import Operation
+from app.executors import (
+    OperationBlocked,
+    get_handler,
+    is_operation_allowed,
+    registry,
+    validate_operation,
+)
+from app.executors.builtin.generic import UnsupportedHandler
 
-    for key in ("sql_warehouse_smoke", "lakebase_smoke", "outbound_http", "remote_agent"):
+
+def test_builtin_handlers_registered():
+    for key in ("databricks_sdk", "sql_warehouse", "outbound_http", "lakebase"):
         assert key in registry, f"{key} should be registered"
 
 
-def test_unknown_key_falls_back_to_stub():
-    from app.executors import get_executor
-    from app.executors.builtin.stubs import CapabilityGatedStub
+def test_open_sdk_allows_arbitrary_non_blocklisted_call():
+    # No allowlist: an ordinary SDK call validates fine (SDK surface − blocklist).
+    validate_operation(Operation("clusters", "create"))
+    ok, reason = is_operation_allowed(Operation("jobs", "list"))
+    assert ok and reason is None
+    ok, reason = is_operation_allowed(Operation("dashboards", "delete"))  # R2, not R3
+    assert ok
 
-    ex = get_executor("does_not_exist_kind")
-    assert isinstance(ex, CapabilityGatedStub)
+
+def test_blocklisted_operation_is_refused():
+    ok, reason = is_operation_allowed(Operation("workspaces", "delete"))
+    assert not ok and "blocklisted" in reason.lower()
+    with pytest.raises(OperationBlocked):
+        validate_operation(Operation("metastores", "delete"))
+    with pytest.raises(OperationBlocked):
+        validate_operation({"service": "catalogs", "method": "delete"})
 
 
-def test_every_seeded_definition_resolves(seeded_session):
-    from app.executors import get_executor
-    from app.models import TestDefinition
+def test_unknown_handler_falls_back_to_stub():
+    assert isinstance(get_handler("does_not_exist"), UnsupportedHandler)
+
+
+def test_every_seeded_check_resolves_a_handler(seeded_session):
     from sqlmodel import select
 
-    defs = seeded_session.exec(select(TestDefinition)).all()
-    assert len(defs) >= 20
-    for d in defs:
-        assert get_executor(d.executor_key) is not None
+    from app.models import Check
+
+    checks = seeded_session.exec(select(Check)).all()
+    assert len(checks) >= 5
+    for c in checks:
+        assert get_handler(c.handler_key) is not None

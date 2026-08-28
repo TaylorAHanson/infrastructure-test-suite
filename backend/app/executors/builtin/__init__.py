@@ -1,9 +1,7 @@
-"""Built-in executors. Importing this package registers all of them."""
+"""Built-in handlers. Importing this package registers all of them."""
 from app.executors.builtin import (  # noqa: F401
+    generic,
     lakebase,
     outbound_http,
-    remote_agent,
     sql_warehouse,
-    workspace_probes,
-    stubs,
 )

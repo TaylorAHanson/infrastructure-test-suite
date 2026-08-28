@@ -1,22 +1,16 @@
-"""Executor base class implementing the six-question probe contract.
+"""Handler base class — executes the stages a handler declares, in spine order.
 
-Every probe answers, in order:
+The old base executor orchestrated a fixed six-question ladder
+(PRECHECK→AUTH→DNS→NETWORK→FUNCTIONAL→CLEANUP). The rebuilt base is spine-driven
+(ADR-0001): a handler declares which **canonical stages** (RESOLVE…VERIFY) it
+maps onto, and the base runs exactly those, in spine order, emitting a
+:class:`StageResult` per stage. It invents no stages and hardcodes no ladder.
 
-1. PRECHECK   - is config/credential/permission present?
-2. AUTH       - can I authenticate?
-3. DNS        - can I resolve the target?
-4. NETWORK    - can I establish the network path / handshake?
-5. FUNCTIONAL - can I perform the minimum useful operation and verify it?
-6. CLEANUP    - can I clean up any temporary artifacts?
-
-The base class orchestrates these according to the requested
-:class:`ExecutionMode` and guarantees cleanup runs in a ``finally`` block.
-
-* **Connectable** = PRECHECK + AUTH + DNS + NETWORK all non-failing.
-* **Functional**  = FUNCTIONAL passes.
-
-Subclasses override only the steps they support; everything else degrades to a
-clean SKIP. This keeps "add a new test" to mostly config + a small plugin.
+* A **connectivity** stage failing (≤ AUTHORIZE) short-circuits the rest — you
+  can't OPERATE against something you can't reach.
+* **Depth** ``quick`` runs only the connectivity stages; ``full`` runs through
+  OPERATE/VERIFY (ADR-0007).
+* **Cleanup always runs** in a ``finally`` block, even if a stage raises.
 """
 from __future__ import annotations
 
@@ -25,69 +19,63 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from app.core.enums import (
-    ConnectivityOutcome,
-    ExecutionMode,
-    ProbeOutcome,
-    RootCauseBucket,
-    StepKind,
-)
+from app.core.enums import CleanupPolicy, Depth, ProbeOutcome
 from app.core.ids import utcnow
+from app.core.operations import Operation
+from app.core.stages import ordered_stages
 
 
-class ProbeError(Exception):
-    """An error carrying a normalized root-cause classification."""
+class HandlerError(Exception):
+    """A stage failure carrying a failure-taxonomy bucket (a string id)."""
 
     def __init__(
         self,
         message: str,
-        root_cause: RootCauseBucket = RootCauseBucket.UNKNOWN,
+        failure_bucket: str = "UNKNOWN",
         recommendation: Optional[str] = None,
-        connectivity: ConnectivityOutcome = ConnectivityOutcome.UNKNOWN,
+        outcome: ProbeOutcome = ProbeOutcome.FAIL,
     ) -> None:
         super().__init__(message)
-        self.root_cause = root_cause
+        self.failure_bucket = failure_bucket
         self.recommendation = recommendation
-        self.connectivity = connectivity
+        self.outcome = outcome
 
 
 @dataclass
-class StepResult:
-    step_kind: StepKind
+class StageResult:
+    """The outcome of one stage on the canonical spine."""
+
+    stage: str
     outcome: ProbeOutcome = ProbeOutcome.SKIP
-    connectivity: ConnectivityOutcome = ConnectivityOutcome.UNKNOWN
     message: str = ""
-    error_class: Optional[str] = None
-    root_cause_bucket: Optional[RootCauseBucket] = None
-    recommendation: Optional[str] = None
-    raw_payload_excerpt: Optional[str] = None
+    failure_bucket: Optional[str] = None
     evidence: dict = field(default_factory=dict)
+    raw_excerpt: Optional[str] = None
     duration_ms: Optional[int] = None
     started_at: Optional[Any] = None
     finished_at: Optional[Any] = None
 
     @property
     def failed(self) -> bool:
-        return self.outcome in (ProbeOutcome.FAIL, ProbeOutcome.ERROR)
+        return self.outcome.failed
 
 
 @dataclass
-class ProbeContext:
-    """Everything an executor needs to run one probe against one target."""
+class HandlerContext:
+    """Everything a handler needs to run one Check against one Target."""
 
     run_id: str
-    definition: Any  # TestDefinition
-    target: Any = None  # TestTarget | None
-    execution_mode: ExecutionMode = ExecutionMode.SMOKE
-    parameters: dict = field(default_factory=dict)
-    # Factory so executors get a fresh authed client only when needed.
+    operation: Operation
+    check: Any = None  # Check
+    target: Any = None  # Target | None
+    depth: Depth = Depth.QUICK
+    params: dict = field(default_factory=dict)
     workspace_client_factory: Optional[Callable[[], Any]] = None
-    # Set True when no real Databricks binding exists (local/demo mode).
     demo_mode: bool = False
     logger: Any = None
 
     def param(self, key: str, default: Any = None) -> Any:
-        return self.parameters.get(key, default)
+        return self.params.get(key, default)
 
 
 def _excerpt(value: Any, limit: int = 2000) -> str:
@@ -95,112 +83,94 @@ def _excerpt(value: Any, limit: int = 2000) -> str:
     return text[:limit]
 
 
-class Executor:
-    """Base executor. Subclass and override the relevant ``step_*`` methods."""
+class Handler:
+    """Base handler. Declare ``STAGES`` and override the matching ``stage_*``.
+
+    A handler maps onto the spine by listing the canonical stage ids it
+    implements in :attr:`STAGES`; the base runs those (intersected with the
+    run depth) in spine order. Everything else is a clean SKIP.
+    """
 
     #: Registry key (set via :func:`app.executors.registry.register`).
-    executor_key: str = "base"
+    handler_key: str = "base"
+    #: Canonical stage ids this handler maps onto (spine order enforced by base).
+    STAGES: tuple[str, ...] = ()
+    #: Cleanup policy for any synthetic artifacts the handler creates.
+    cleanup_policy: CleanupPolicy = CleanupPolicy.ALWAYS
 
-    # ---- Steps (override in subclasses) --------------------------------
-    def step_precheck(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.PRECHECK, ProbeOutcome.PASS, ConnectivityOutcome.UNKNOWN,
-                          message="No precheck implemented.")
-
-    def step_auth(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.AUTH, ProbeOutcome.SKIP, ConnectivityOutcome.UNKNOWN,
-                          message="No auth step implemented.")
-
-    def step_dns(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.DNS, ProbeOutcome.SKIP, ConnectivityOutcome.UNKNOWN,
-                          message="No DNS step implemented.")
-
-    def step_network(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.NETWORK, ProbeOutcome.SKIP, ConnectivityOutcome.UNKNOWN,
-                          message="No network step implemented.")
-
-    def step_functional(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.FUNCTIONAL, ProbeOutcome.SKIP, ConnectivityOutcome.UNKNOWN,
-                          message="No functional step implemented.")
-
-    def step_cleanup(self, ctx: ProbeContext) -> StepResult:
-        return StepResult(StepKind.CLEANUP, ProbeOutcome.SKIP, ConnectivityOutcome.UNKNOWN,
-                          message="Nothing to clean up.")
+    # ---- Stage methods (override the ones you declare in STAGES) --------
+    # Each returns a StageResult. Not overriding one that's declared yields a
+    # SKIP; raising HandlerError yields a FAIL with the given bucket.
+    def cleanup(self, ctx: HandlerContext) -> Optional[StageResult]:
+        """Tear down synthetic artifacts. Runs in ``finally``. Override if needed."""
+        return None
 
     # ---- Orchestration -------------------------------------------------
-    # Steps that make up "connectable".
-    _CONNECTABLE_STEPS = (StepKind.PRECHECK, StepKind.AUTH, StepKind.DNS, StepKind.NETWORK)
+    def _declared_stages(self, depth: Depth) -> list:
+        declared = [s for s in ordered_stages() if s.id in self.STAGES]
+        if depth == Depth.QUICK:
+            declared = [s for s in declared if s.connectivity]
+        return declared
 
-    def _ordered_steps(self, mode: ExecutionMode) -> list[StepKind]:
-        connectable = list(self._CONNECTABLE_STEPS)
-        if mode == ExecutionMode.PREFLIGHT:
-            return connectable
-        return connectable + [StepKind.FUNCTIONAL]
+    def _dispatch(self, stage_id: str, ctx: HandlerContext) -> StageResult:
+        method = getattr(self, f"stage_{stage_id.lower()}", None)
+        if method is None:
+            return StageResult(stage_id, ProbeOutcome.SKIP, message=f"No {stage_id} stage implemented.")
+        return method(ctx)
 
-    def _dispatch(self, kind: StepKind, ctx: ProbeContext) -> StepResult:
-        return {
-            StepKind.PRECHECK: self.step_precheck,
-            StepKind.AUTH: self.step_auth,
-            StepKind.DNS: self.step_dns,
-            StepKind.NETWORK: self.step_network,
-            StepKind.FUNCTIONAL: self.step_functional,
-            StepKind.CLEANUP: self.step_cleanup,
-        }[kind](ctx)
-
-    def _run_one(self, kind: StepKind, ctx: ProbeContext) -> StepResult:
+    def _run_one(self, stage_id: str, ctx: HandlerContext) -> StageResult:
         started = utcnow()
         t0 = time.monotonic()
         try:
-            result = self._dispatch(kind, ctx)
-        except ProbeError as exc:
-            result = StepResult(
-                step_kind=kind,
-                outcome=ProbeOutcome.FAIL,
-                connectivity=exc.connectivity,
-                message=str(exc),
-                error_class=type(exc).__name__,
-                root_cause_bucket=exc.root_cause,
-                recommendation=exc.recommendation,
+            result = self._dispatch(stage_id, ctx)
+        except HandlerError as exc:
+            result = StageResult(
+                stage=stage_id, outcome=exc.outcome, message=str(exc),
+                failure_bucket=exc.failure_bucket,
+                evidence={"recommendation": exc.recommendation} if exc.recommendation else {},
             )
-        except Exception as exc:  # noqa: BLE001 - we classify everything
-            result = StepResult(
-                step_kind=kind,
-                outcome=ProbeOutcome.ERROR,
-                connectivity=ConnectivityOutcome.UNKNOWN,
-                message=str(exc),
-                error_class=type(exc).__name__,
-                root_cause_bucket=RootCauseBucket.UNKNOWN,
-                raw_payload_excerpt=_excerpt(traceback.format_exc()),
+        except Exception as exc:  # noqa: BLE001 - classify everything, never crash a run
+            result = StageResult(
+                stage=stage_id, outcome=ProbeOutcome.ERROR, message=str(exc),
+                failure_bucket="UNKNOWN", raw_excerpt=_excerpt(traceback.format_exc()),
             )
-        result.step_kind = kind
+        result.stage = stage_id
         result.started_at = started
         result.finished_at = utcnow()
         result.duration_ms = int((time.monotonic() - t0) * 1000)
         return result
 
-    def run(self, ctx: ProbeContext) -> list[StepResult]:
-        """Run the probe, returning ordered step results.
-
-        Cleanup always runs (finally) when the cleanup policy is not NEVER, so
-        synthetic artifacts never leak even if a step raises.
-        """
-        results: list[StepResult] = []
+    def run(self, ctx: HandlerContext) -> list[StageResult]:
+        """Run the declared stages in spine order; cleanup always runs."""
+        results: list[StageResult] = []
         try:
-            for kind in self._ordered_steps(ctx.execution_mode):
-                step = self._run_one(kind, ctx)
-                results.append(step)
-                # Short-circuit functional work if we're not connectable.
-                if kind in self._CONNECTABLE_STEPS and step.failed:
-                    break
+            for stage in self._declared_stages(ctx.depth):
+                result = self._run_one(stage.id, ctx)
+                results.append(result)
+                if result.failed:
+                    break  # a failed stage makes every later stage meaningless
         finally:
-            from app.core.enums import CleanupPolicy
-
-            policy = getattr(ctx.definition, "cleanup_policy", CleanupPolicy.ALWAYS)
-            functional_failed = any(
-                r.step_kind == StepKind.FUNCTIONAL and r.failed for r in results
-            )
-            should_clean = policy != CleanupPolicy.NEVER and not (
-                policy == CleanupPolicy.ON_SUCCESS and functional_failed
+            functional_failed = any(r.failed for r in results)
+            should_clean = self.cleanup_policy != CleanupPolicy.NEVER and not (
+                self.cleanup_policy == CleanupPolicy.ON_SUCCESS and functional_failed
             )
             if should_clean:
-                results.append(self._run_one(StepKind.CLEANUP, ctx))
+                cleaned = self._run_one_cleanup(ctx)
+                if cleaned is not None:
+                    results.append(cleaned)
         return results
+
+    def _run_one_cleanup(self, ctx: HandlerContext) -> Optional[StageResult]:
+        started = utcnow()
+        t0 = time.monotonic()
+        try:
+            result = self.cleanup(ctx)
+        except Exception as exc:  # noqa: BLE001
+            result = StageResult("VERIFY", ProbeOutcome.ERROR, message=f"Cleanup failed: {exc}",
+                                 failure_bucket="CLEANUP_FAILURE")
+        if result is None:
+            return None
+        result.started_at = started
+        result.finished_at = utcnow()
+        result.duration_ms = int((time.monotonic() - t0) * 1000)
+        return result

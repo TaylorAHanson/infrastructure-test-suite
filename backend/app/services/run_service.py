@@ -1,15 +1,19 @@
-"""Run orchestration: submission, fan-out, execution, aggregation.
+"""Run orchestration: submit → expand → execute → aggregate → roll up.
 
-Design principles honoured here:
+A Run selects Tests/Suites (+ targets) and fans out to one **CheckRun** per
+(Check × Target). Each CheckRun executes its Check's operation across the
+canonical stage spine via the handler, records a :class:`StageOutcome` per
+stage, and derives a verdict:
 
-* **Idempotent submission** - re-submitting the same idempotency key returns the
-  existing request, never a duplicate.
-* **Metadata-driven fan-out** - a request's selection (suites/tests x targets/
-  catalogs) expands into one :class:`TestRun` per (definition, target).
-* **Async-friendly** - submission returns immediately (PENDING); the poller (or
-  a Databricks Job) does the work. The web process orchestrates, it does not
-  block on heavy validation.
-* **Separation of connectable vs functional** at aggregation time.
+* the operation is first checked against the **blocklist** — a blocklisted op is
+  refused as ``BLOCKED_BY_SAFETY`` and never runs (the R3-never floor, ADR-0017);
+* a **deterministic** Check's verdict comes from its compiled predicate over the
+  stage evidence — it **gates**;
+* an **agentic** Check is **advisory** (``gating=False``) and never a gate input
+  (ADR-0008); judge *execution* is Spec 4, so here it records the operation
+  outcome as advisory signal.
+
+connectable/functional are **derived** (never stored) — see the API layer.
 """
 from __future__ import annotations
 
@@ -19,24 +23,48 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from app.clients.databricks import databricks_available, get_workspace_context
-from app.core.config import get_workspace_client, settings
-from app.core.enums import (
-    CONNECTIVITY_ROOT_CAUSES,
-    ConnectivityOutcome,
-    ExecutionMode,
-    ProbeOutcome,
-    RequestSource,
-    RootCauseBucket,
-    RunStatus,
-    StepKind,
-)
+from app.core.enums import Evaluator, Expectation, RunStatus
 from app.core.ids import utcnow
-from app.executors import ProbeContext, get_executor
-from app.models import RunRequest, SuiteMember, TestDefinition, TestRun, TestRunStep, TestTarget
+from app.core.operations import Operation
+from app.executors import HandlerContext, OperationBlocked, get_handler, validate_operation
+from app.models import (
+    Check,
+    CheckRun,
+    RunRequest,
+    StageOutcome,
+    SuiteMember,
+    Target,
+    Test,
+    TestCheck,
+)
+from app.services.assertion_compiler import evaluate_predicate
 from app.schemas.schemas import RunSubmit
 
 logger = logging.getLogger(__name__)
+
+
+def _settings():
+    from app.core.config import settings
+
+    return settings
+
+
+def _demo_mode() -> bool:
+    try:
+        from app.clients.databricks import databricks_available
+
+        return not databricks_available()
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _workspace_client_factory():
+    try:
+        from app.core.config import get_workspace_client
+
+        return get_workspace_client
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -49,22 +77,21 @@ def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
             select(RunRequest).where(RunRequest.idempotency_key == payload.idempotency_key)
         ).first()
         if existing:
-            logger.info("Idempotent hit for key %s -> request %s", payload.idempotency_key, existing.id)
             return existing
 
-    ctx = get_workspace_context()
+    settings = _settings()
     request = RunRequest(
         idempotency_key=payload.idempotency_key,
         requested_by=payload.requested_by,
         request_source=payload.request_source,
         suite_ids=payload.suite_ids,
-        test_definition_ids=payload.test_definition_ids,
+        test_ids=payload.test_ids,
+        check_ids=payload.check_ids,
         target_ids=payload.target_ids,
-        catalogs=payload.catalogs,
-        execution_mode=payload.execution_mode,
+        depth=payload.depth,
         status=RunStatus.PENDING,
-        git_sha=settings.GIT_SHA,
-        app_version=settings.APP_VERSION,
+        git_sha=getattr(settings, "GIT_SHA", "unknown"),
+        app_version=getattr(settings, "APP_VERSION", "0.0.0"),
     )
     session.add(request)
     session.commit()
@@ -75,69 +102,101 @@ def submit_request(session: Session, payload: RunSubmit) -> RunRequest:
 # --------------------------------------------------------------------------
 # Fan-out
 # --------------------------------------------------------------------------
-def _selected_definition_ids(session: Session, request: RunRequest) -> list[str]:
-    ids: set[str] = set(request.test_definition_ids or [])
+class _Selection:
+    """One resolved (check, under-test, membership) unit to run."""
+
+    def __init__(self, check: Check, test_id: Optional[str], expectation: Expectation,
+                 run_as_role: Optional[str]):
+        self.check = check
+        self.test_id = test_id
+        self.expectation = expectation
+        self.run_as_role = run_as_role
+
+
+def _test_ids_from_request(session: Session, request: RunRequest) -> list[str]:
+    ids: set[str] = set(request.test_ids or [])
     if request.suite_ids:
         members = session.exec(
             select(SuiteMember).where(SuiteMember.suite_id.in_(request.suite_ids))  # type: ignore[attr-defined]
         ).all()
-        ids.update(m.test_definition_id for m in members)
-    if not ids:
-        # No explicit selection => all enabled definitions ("full suite").
-        defs = session.exec(select(TestDefinition).where(TestDefinition.enabled == True)).all()  # noqa: E712
-        ids.update(d.id for d in defs)
+        ids.update(m.test_id for m in members)
     return sorted(ids)
 
 
-def _selected_targets(session: Session, request: RunRequest) -> list[Optional[TestTarget]]:
+def _selections(session: Session, request: RunRequest) -> list[_Selection]:
+    """Resolve the request's selection down to concrete Check units."""
+    selections: list[_Selection] = []
+    seen: set[tuple[Optional[str], str, str]] = set()
+
+    def add(check: Check, test_id: Optional[str], expectation: Expectation, role: Optional[str]):
+        key = (test_id, check.id, expectation.value)
+        if key in seen:
+            return
+        seen.add(key)
+        selections.append(_Selection(check, test_id, expectation, role))
+
+    test_ids = _test_ids_from_request(session, request)
+    if not test_ids and not request.check_ids:
+        # No explicit selection => all enabled Tests ("run all", ADR-0017).
+        test_ids = [t.id for t in session.exec(select(Test).where(Test.enabled == True)).all()]  # noqa: E712
+
+    for test_id in test_ids:
+        test = session.get(Test, test_id)
+        if not test or not test.enabled:
+            continue
+        members = session.exec(
+            select(TestCheck).where(TestCheck.test_id == test_id).order_by(TestCheck.sort_order)  # type: ignore[arg-type]
+        ).all()
+        for m in members:
+            check = session.get(Check, m.check_id)
+            if not check or not check.enabled:
+                continue
+            expectation = Expectation.DENY if m.kind == "counterfactual" else check.expectation
+            add(check, test_id, expectation, m.run_as_role or test.run_as_role)
+
+    for check_id in request.check_ids or []:
+        check = session.get(Check, check_id)
+        if check and check.enabled:
+            add(check, None, check.expectation, None)
+
+    return selections
+
+
+def _selected_targets(session: Session, request: RunRequest) -> list[Optional[Target]]:
     if request.target_ids:
         targets = session.exec(
-            select(TestTarget).where(TestTarget.id.in_(request.target_ids))  # type: ignore[attr-defined]
-        ).all()
-    elif request.catalogs:
-        targets = session.exec(
-            select(TestTarget).where(TestTarget.catalog.in_(request.catalogs))  # type: ignore[attr-defined]
+            select(Target).where(Target.id.in_(request.target_ids))  # type: ignore[attr-defined]
         ).all()
     else:
-        targets = session.exec(select(TestTarget).where(TestTarget.enabled == True)).all()  # noqa: E712
-    # Allow tests with no target (e.g. workspace-global probes).
+        targets = session.exec(select(Target).where(Target.enabled == True)).all()  # noqa: E712
     return list(targets) if targets else [None]
 
 
-def expand_request(session: Session, request: RunRequest) -> list[TestRun]:
-    """Materialise PENDING TestRun rows for a request's selection."""
-    def_ids = _selected_definition_ids(session, request)
-    definitions = session.exec(
-        select(TestDefinition).where(TestDefinition.id.in_(def_ids))  # type: ignore[attr-defined]
-    ).all()
+def expand_request(session: Session, request: RunRequest) -> list[CheckRun]:
+    """Materialise PENDING CheckRun rows for a request's selection."""
+    selections = _selections(session, request)
     targets = _selected_targets(session, request)
-    wctx = get_workspace_context()
 
-    runs: list[TestRun] = []
-    for definition in definitions:
+    runs: list[CheckRun] = []
+    for sel in selections:
         for target in targets:
-            mode = request.execution_mode
-            # Honour each definition's supported modes; downgrade if needed.
-            supported = definition.supported_execution_modes or [ExecutionMode.PREFLIGHT.value]
-            if mode.value not in supported:
-                mode = ExecutionMode(supported[-1])
-            run = TestRun(
+            run = CheckRun(
                 request_id=request.id,
-                test_definition_id=definition.id,
+                test_id=sel.test_id,
+                check_id=sel.check.id,
                 target_id=target.id if target else None,
                 requested_by=request.requested_by,
                 request_source=request.request_source,
-                execution_mode=mode,
-                workspace_id=(target.workspace_id if target else None) or wctx.workspace_id,
-                workspace_name=(target.workspace_name if target else None) or wctx.workspace_name,
-                cloud=(target.cloud if target else None) or wctx.cloud,
-                account_id=(target.account_id if target else None) or wctx.account_id,
-                region=(target.region if target else None) or wctx.region,
-                catalog=target.catalog if target else None,
+                depth=request.depth,
+                evaluator=sel.check.evaluator,
+                expectation=sel.expectation,
+                gating=sel.check.evaluator == Evaluator.DETERMINISTIC,
+                run_as_role=sel.run_as_role,
+                risk_tier=sel.check.risk_tier,
+                workspace_name=(target.workspace_name if target else None),
                 git_sha=request.git_sha,
                 app_version=request.app_version,
-                idempotency_key=request.idempotency_key,
-                status=RunStatus.PENDING,
+                verdict=RunStatus.PENDING,
             )
             session.add(run)
             runs.append(run)
@@ -150,153 +209,128 @@ def expand_request(session: Session, request: RunRequest) -> list[TestRun]:
 # --------------------------------------------------------------------------
 # Execution
 # --------------------------------------------------------------------------
-def execute_run(run_id: str) -> None:
-    """Execute a single TestRun in its own session (thread-safe)."""
+def execute_check_run(run_id: str) -> None:
+    """Execute a single CheckRun in its own session (thread-safe)."""
     from app.db.session import session_scope
 
     with session_scope() as session:
-        run = session.get(TestRun, run_id)
+        run = session.get(CheckRun, run_id)
         if run is None:
             return
-        definition = session.get(TestDefinition, run.test_definition_id)
-        target = session.get(TestTarget, run.target_id) if run.target_id else None
-        if definition is None:
-            run.status = RunStatus.ERROR
-            run.recommendation = "Test definition not found."
+        check = session.get(Check, run.check_id)
+        target = session.get(Target, run.target_id) if run.target_id else None
+        if check is None:
+            run.verdict = RunStatus.ERROR
+            run.message = "Check not found."
+            run.finished_at = utcnow()
             session.add(run)
             session.commit()
             return
 
-        run.status = RunStatus.RUNNING
         run.started_at = utcnow()
-        session.add(run)
-        session.commit()
+        operation = Operation.from_dict(check.operation)
 
-        demo = not databricks_available()
-        parameters = dict(definition.default_parameters or {})
-        if target and target.config:
-            parameters.update(target.config)
+        # (b) Blocklist — the R3-never floor. A blocklisted op never runs.
+        try:
+            validate_operation(operation)
+        except OperationBlocked as exc:
+            run.verdict = RunStatus.BLOCKED_BY_SAFETY
+            run.failure_bucket = "BLOCKED_BY_SAFETY"
+            run.failure_stage = "AUTHORIZE"
+            run.message = str(exc)
+            run.finished_at = utcnow()
+            run.duration_ms = _elapsed_ms(run)
+            session.add(run)
+            session.commit()
+            return
 
-        ctx = ProbeContext(
+        params = dict(operation.params)
+        if target and target.tags:
+            params.setdefault("_target_tags", target.tags)
+
+        ctx = HandlerContext(
             run_id=run.run_id,
-            definition=definition,
+            operation=operation,
+            check=check,
             target=target,
-            execution_mode=run.execution_mode,
-            parameters=parameters,
-            workspace_client_factory=get_workspace_client,
-            demo_mode=demo,
+            depth=run.depth,
+            params=params,
+            workspace_client_factory=_workspace_client_factory(),
+            demo_mode=_demo_mode(),
             logger=logger,
         )
 
-        executor = get_executor(definition.executor_key)
-        step_results = executor.run(ctx)
+        handler = get_handler(check.handler_key)
+        stage_results = handler.run(ctx)
 
-        # Persist steps.
-        for idx, sr in enumerate(step_results):
-            session.add(
-                TestRunStep(
-                    run_id=run.run_id,
-                    step_kind=sr.step_kind,
-                    sort_order=idx,
-                    outcome=sr.outcome,
-                    connectivity=sr.connectivity,
-                    started_at=sr.started_at,
-                    finished_at=sr.finished_at,
-                    duration_ms=sr.duration_ms,
-                    message=sr.message,
-                    error_class=sr.error_class,
-                    root_cause_bucket=sr.root_cause_bucket,
-                    recommendation=sr.recommendation,
-                    raw_payload_excerpt=sr.raw_payload_excerpt,
-                    evidence=sr.evidence,
-                )
-            )
+        for idx, sr in enumerate(stage_results):
+            session.add(StageOutcome(
+                run_id=run.run_id, stage=sr.stage, sort_order=idx, outcome=sr.outcome,
+                message=sr.message, failure_bucket=sr.failure_bucket, raw_excerpt=sr.raw_excerpt,
+                evidence=sr.evidence, started_at=sr.started_at, finished_at=sr.finished_at,
+                duration_ms=sr.duration_ms,
+            ))
 
-        _aggregate_run(run, step_results)
+        _aggregate(run, check, stage_results)
         session.add(run)
         session.commit()
-        logger.info(
-            "run finished",
-            extra={"run_id": run.run_id, "test_id": definition.id, "root_cause": run.root_cause_bucket},
-        )
 
 
-def _aggregate_run(run: TestRun, steps: list) -> None:
-    """Compute run-level status, connectivity, and root cause from steps."""
-    summary: dict[str, int] = {}
-    conn_summary: dict[str, int] = {}
-    buckets: list[str] = []
+def _elapsed_ms(run: CheckRun) -> Optional[int]:
+    if run.started_at and run.finished_at:
+        return int((run.finished_at - run.started_at).total_seconds() * 1000)
+    return None
 
-    connectable_steps = [s for s in steps if s.step_kind in
-                         (StepKind.PRECHECK, StepKind.AUTH, StepKind.DNS, StepKind.NETWORK)]
-    # Connectivity verdict is driven by the network-facing steps; PRECHECK is a
-    # config gate, not a connectivity signal (but a failed precheck still blocks).
-    network_steps = [s for s in steps if s.step_kind in (StepKind.AUTH, StepKind.DNS, StepKind.NETWORK)]
-    functional_steps = [s for s in steps if s.step_kind == StepKind.FUNCTIONAL]
 
-    for s in steps:
-        summary[s.outcome.value] = summary.get(s.outcome.value, 0) + 1
-        conn_summary[s.connectivity.value] = conn_summary.get(s.connectivity.value, 0) + 1
-        if s.root_cause_bucket and s.failed:
-            buckets.append(s.root_cause_bucket.value)
+def _aggregate(run: CheckRun, check: Check, stage_results: list) -> None:
+    """Compute the CheckRun verdict + failure classification from stage outcomes."""
+    evidence: dict = {}
+    for sr in stage_results:
+        if isinstance(sr.evidence, dict):
+            evidence.update(sr.evidence)
 
-    # Connectivity outcome.
-    if any(s.failed or s.connectivity == ConnectivityOutcome.NOT_CONNECTABLE for s in connectable_steps):
-        run.connectivity_outcome = ConnectivityOutcome.NOT_CONNECTABLE
-    elif any(s.connectivity == ConnectivityOutcome.CONNECTABLE for s in network_steps):
-        run.connectivity_outcome = ConnectivityOutcome.CONNECTABLE
+    first_failed = next((sr for sr in stage_results if sr.failed), None)
+    operation_succeeded = first_failed is None
+
+    if run.evaluator == Evaluator.DETERMINISTIC:
+        if run.expectation == Expectation.DENY:
+            predicate = check.compiled_predicate or {"kind": "denied"}
+        else:
+            predicate = check.compiled_predicate or None
+        passed = evaluate_predicate(predicate, evidence, operation_succeeded)
     else:
-        run.connectivity_outcome = ConnectivityOutcome.UNKNOWN
+        # Agentic: advisory. Judge execution is Spec 4; record the operation
+        # outcome as advisory signal (never gates — gating=False set at fan-out).
+        passed = operation_succeeded if run.expectation == Expectation.PASS else not operation_succeeded
 
-    # Functional probe outcome.
-    if functional_steps:
-        fs = functional_steps[0]
-        run.probe_outcome = fs.outcome
-    elif any(s.failed for s in connectable_steps):
-        run.probe_outcome = ProbeOutcome.FAIL
-    elif all(s.outcome == ProbeOutcome.SKIP for s in steps):
-        run.probe_outcome = ProbeOutcome.SKIP
-    else:
-        run.probe_outcome = ProbeOutcome.PARTIAL
+    run.verdict = RunStatus.PASS if passed else RunStatus.FAIL
+    run.evidence = evidence
+    run.message = (first_failed.message if first_failed else "All stages passed.")
 
-    # Root cause = first failing step (connectable steps take precedence).
-    first_failing = next(
-        (s for s in connectable_steps if s.failed),
-        next((s for s in steps if s.failed), None),
-    )
-    if first_failing is None:
-        # Surface a skip-with-bucket (e.g. capability-gated) as informational.
-        first_failing = next((s for s in steps if s.root_cause_bucket), None)
-    if first_failing and first_failing.root_cause_bucket:
-        run.root_cause_bucket = first_failing.root_cause_bucket
-        run.recommendation = first_failing.recommendation or first_failing.message
+    if not passed:
+        if first_failed is not None:
+            run.failure_stage = first_failed.stage
+            run.failure_bucket = first_failed.failure_bucket or "UNKNOWN"
+        elif run.expectation == Expectation.DENY:
+            # Counterfactual that was NOT denied: the operation wrongly succeeded.
+            run.failure_stage = "AUTHORIZE"
+            run.failure_bucket = "COUNTERFACTUAL_NOT_DENIED"
+            run.message = "Counterfactual expected a denial but the operation succeeded."
+        else:
+            # Operation ran clean but the predicate rejected the evidence.
+            run.failure_stage = "VERIFY"
+            run.failure_bucket = "UNEXPECTED_RESULT"
+            run.message = "Operation succeeded but the assertion predicate was not satisfied."
 
-    # Map to run status.
-    po = run.probe_outcome
-    if po == ProbeOutcome.PASS:
-        run.status = RunStatus.PASSED
-    elif po == ProbeOutcome.FAIL:
-        run.status = RunStatus.FAILED
-    elif po == ProbeOutcome.ERROR:
-        run.status = RunStatus.ERROR
-    elif po == ProbeOutcome.PARTIAL:
-        run.status = RunStatus.PARTIAL
-    else:  # SKIP
-        run.status = RunStatus.PARTIAL
-
-    run.summary_counts = summary
-    run.connectivity_summary = conn_summary
-    run.failure_buckets = sorted(set(buckets))
     run.finished_at = utcnow()
-    if run.started_at:
-        run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
+    run.duration_ms = _elapsed_ms(run)
 
 
 # --------------------------------------------------------------------------
-# Request processing (used by poller and by manual /process)
+# Request processing
 # --------------------------------------------------------------------------
 def process_request(request_id: str, worker_id: str = "inline") -> int:
-    """Expand and execute a request. Returns the number of runs executed."""
+    """Expand and execute a request. Returns the number of CheckRuns executed."""
     from app.db.session import session_scope
 
     with session_scope() as session:
@@ -311,71 +345,49 @@ def process_request(request_id: str, worker_id: str = "inline") -> int:
         runs = expand_request(session, request)
         run_ids = [r.run_id for r in runs]
 
-    # Execute runs in parallel with bounded concurrency.
-    max_workers = max(1, settings.POLLER_MAX_CONCURRENT)
+    max_workers = max(1, getattr(_settings(), "POLLER_MAX_CONCURRENT", 4))
     if run_ids:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            list(pool.map(execute_run, run_ids))
+            list(pool.map(execute_check_run, run_ids))
 
     with session_scope() as session:
         request = session.get(RunRequest, request_id)
         if request:
-            request.status = RunStatus.PASSED  # request-level "completed"
+            check_runs = session.exec(
+                select(CheckRun).where(CheckRun.request_id == request_id)
+            ).all()
+            request.status = request_verdict(check_runs)
             session.add(request)
             session.commit()
     return len(run_ids)
 
 
 # --------------------------------------------------------------------------
-# Remote-agent signed results
+# Verdict roll-up (ADR-0005 / ADR-0008): gating vs advisory
 # --------------------------------------------------------------------------
-def apply_agent_results(session: Session, submit) -> TestRun:
-    """Verify a signed remote-agent result and fold it into the run."""
-    from app.executors.builtin.remote_agent import verify_signature
+def request_verdict(check_runs: list[CheckRun]) -> RunStatus:
+    """Roll a request's CheckRuns up to a single fail-closed verdict.
 
-    run = session.get(TestRun, submit.run_id)
-    if run is None:
-        raise ValueError("run_id not found")
+    Only **gating** (deterministic) runs affect the verdict; agentic/advisory
+    runs are signal only (ADR-0008). Fail-closed: any non-PASS gating run blocks.
+    """
+    gating = [r for r in check_runs if r.gating]
+    if not gating:
+        return RunStatus.PASS
+    if any(r.verdict == RunStatus.BLOCKED_BY_SAFETY for r in gating):
+        return RunStatus.BLOCKED_BY_SAFETY
+    if any(r.verdict == RunStatus.ERROR for r in gating):
+        return RunStatus.ERROR
+    if any(r.verdict == RunStatus.FAIL for r in gating):
+        return RunStatus.FAIL
+    if all(r.verdict == RunStatus.PASS for r in gating):
+        return RunStatus.PASS
+    return RunStatus.RUNNING
 
-    secret = settings.REMOTE_AGENT_SIGNING_SECRET or ""
-    steps_payload = [s.model_dump() for s in submit.steps]
-    if secret and not verify_signature(secret, submit.run_id, submit.agent_id, steps_payload, submit.signature):
-        raise PermissionError("invalid remote-agent signature")
 
-    class _S:  # lightweight step holder for aggregation
-        def __init__(self, d):
-            self.step_kind = StepKind(d["step_kind"])
-            self.outcome = ProbeOutcome(d["outcome"])
-            self.connectivity = ConnectivityOutcome(d.get("connectivity", "UNKNOWN"))
-            self.root_cause_bucket = (
-                RootCauseBucket(d["root_cause_bucket"]) if d.get("root_cause_bucket") else None
-            )
-            self.recommendation = d.get("recommendation")
-            self.message = d.get("message", "")
-            self.error_class = d.get("error_class")
-            self.raw_payload_excerpt = d.get("raw_payload_excerpt")
-            self.evidence = d.get("evidence", {})
-            self.started_at = utcnow()
-            self.finished_at = utcnow()
-            self.duration_ms = 0
-
-        @property
-        def failed(self):
-            return self.outcome in (ProbeOutcome.FAIL, ProbeOutcome.ERROR)
-
-    holders = [_S(d) for d in steps_payload]
-    for idx, h in enumerate(holders):
-        session.add(
-            TestRunStep(
-                run_id=run.run_id, step_kind=h.step_kind, sort_order=100 + idx,
-                outcome=h.outcome, connectivity=h.connectivity, message=h.message,
-                error_class=h.error_class, root_cause_bucket=h.root_cause_bucket,
-                recommendation=h.recommendation, raw_payload_excerpt=h.raw_payload_excerpt,
-                evidence=h.evidence,
-            )
-        )
-    _aggregate_run(run, holders)
-    session.add(run)
-    session.commit()
-    session.refresh(run)
-    return run
+def test_rollup(check_runs: list[CheckRun]) -> dict:
+    """Per-Test roll-up: {test_id: verdict} over its gating CheckRuns."""
+    by_test: dict[Optional[str], list[CheckRun]] = {}
+    for r in check_runs:
+        by_test.setdefault(r.test_id, []).append(r)
+    return {test_id or "(ad-hoc)": request_verdict(runs).value for test_id, runs in by_test.items()}

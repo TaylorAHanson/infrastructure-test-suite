@@ -1,4 +1,4 @@
-"""Pydantic request/response schemas for the REST API."""
+"""Pydantic request/response schemas for the REST API (Check/Test/Suite/Run)."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -6,49 +6,76 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from app.core.enums import (
-    AuthMode,
-    CleanupPolicy,
-    ExecutionMode,
-    ExecutorKind,
-    RequestSource,
-    TestCategory,
-)
+from app.core.enums import Depth, Expectation, RequestSource, SafetyClass
 
 
-# --------------------------- Test definitions ----------------------------
-class TestDefinitionCreate(BaseModel):
+# --------------------------- Operation ----------------------------
+class OperationIn(BaseModel):
+    """An open-SDK Databricks call (bounded by the blocklist, not an allowlist)."""
+
+    service: str = ""
+    method: str = ""
+    verb: str = ""
+    params: dict = Field(default_factory=dict)
+
+
+# --------------------------- Checks ----------------------------
+class CheckCreate(BaseModel):
     display_name: str
     description: str = ""
-    category: TestCategory
-    tags: list[str] = Field(default_factory=list)
-    target_type: str
-    required_capabilities: list[str] = Field(default_factory=list)
-    supported_execution_modes: list[ExecutionMode] = Field(default_factory=list)
-    executor_kind: ExecutorKind
-    executor_key: str
-    auth_mode: AuthMode = AuthMode.APP
-    enterprise_only: bool = False
-    destructive: bool = False
+    operation: OperationIn = Field(default_factory=OperationIn)
+    handler_key: str = "databricks_sdk"
+    assertion: str = ""
+    #: Optional; when omitted it is inferred from the compiled assertion
+    #: (a denial assertion → DENY, otherwise PASS).
+    expectation: Optional[Expectation] = None
+    expected_stage: Optional[str] = None
+    #: Optional one-confirm operation-specific tier (mutating targets only).
+    confirmed_risk_tier: Optional[str] = None
+    hints: dict = Field(default_factory=dict)
     enabled: bool = True
-    timeout_seconds: int = 120
-    retries: int = 0
-    cleanup_policy: CleanupPolicy = CleanupPolicy.ALWAYS
-    parameter_schema: dict = Field(default_factory=dict)
-    evidence_schema: dict = Field(default_factory=dict)
-    default_parameters: dict = Field(default_factory=dict)
 
 
-class TestDefinitionUpdate(BaseModel):
+class CheckUpdate(BaseModel):
     display_name: Optional[str] = None
     description: Optional[str] = None
-    tags: Optional[list[str]] = None
+    operation: Optional[OperationIn] = None
+    handler_key: Optional[str] = None
+    assertion: Optional[str] = None
+    expectation: Optional[Expectation] = None
+    expected_stage: Optional[str] = None
+    confirmed_risk_tier: Optional[str] = None
+    hints: Optional[dict] = None
     enabled: Optional[bool] = None
-    timeout_seconds: Optional[int] = None
-    retries: Optional[int] = None
-    cleanup_policy: Optional[CleanupPolicy] = None
-    default_parameters: Optional[dict] = None
-    supported_execution_modes: Optional[list[ExecutionMode]] = None
+
+
+# --------------------------- Tests ----------------------------
+class TestCheckIn(BaseModel):
+    check_id: str
+    kind: str = "assertion"  # "assertion" | "counterfactual"
+    run_as_role: Optional[str] = None
+    counterpart_check_id: Optional[str] = None
+
+
+class TestCreate(BaseModel):
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    run_as_role: Optional[str] = None
+    #: Ordered membership. A bare list of check ids is also accepted via
+    #: ``check_ids`` for convenience (all treated as ordinary assertions).
+    members: list[TestCheckIn] = Field(default_factory=list)
+    check_ids: list[str] = Field(default_factory=list)
+
+
+class TestUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
+    run_as_role: Optional[str] = None
+    members: Optional[list[TestCheckIn]] = None
+    check_ids: Optional[list[str]] = None
+    enabled: Optional[bool] = None
 
 
 # --------------------------- Suites ----------------------------
@@ -56,108 +83,54 @@ class SuiteCreate(BaseModel):
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
-    test_definition_ids: list[str] = Field(default_factory=list)
+    deterministic_only: bool = False
+    test_ids: list[str] = Field(default_factory=list)
 
 
 class SuiteUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     tags: Optional[list[str]] = None
+    deterministic_only: Optional[bool] = None
     enabled: Optional[bool] = None
-    test_definition_ids: Optional[list[str]] = None
+    test_ids: Optional[list[str]] = None
 
 
 # --------------------------- Targets ----------------------------
 class TargetCreate(BaseModel):
     name: str
-    target_type: str
-    catalog: Optional[str] = None
-    schema_name: Optional[str] = None
-    workspace_id: Optional[str] = None
     workspace_name: Optional[str] = None
-    cloud: str = "aws"
-    account_id: Optional[str] = None
-    region: Optional[str] = None
-    config: dict = Field(default_factory=dict)
+    workspace_id: Optional[str] = None
+    host: Optional[str] = None
+    safety_class: SafetyClass = SafetyClass.READ_ONLY
+    identity_handle: Optional[str] = None
+    assumable_roles: list[str] = Field(default_factory=list)
+    tags: dict = Field(default_factory=dict)
 
 
 # --------------------------- Runs ----------------------------
 class RunSubmit(BaseModel):
-    """Submit a run request. Empty selection lists mean "all".
-
-    ``idempotency_key`` makes submission safe to retry: re-submitting the same
-    key returns the existing request instead of creating a duplicate.
-    """
+    """Submit a run request. Empty selection lists mean "all"."""
 
     suite_ids: list[str] = Field(default_factory=list)
-    test_definition_ids: list[str] = Field(default_factory=list)
+    test_ids: list[str] = Field(default_factory=list)
+    check_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
-    catalogs: list[str] = Field(default_factory=list)
-    execution_mode: ExecutionMode = ExecutionMode.SMOKE
+    depth: Depth = Depth.QUICK
     requested_by: str = "ui-user"
-    request_source: RequestSource = RequestSource.UI_MANUAL
+    request_source: RequestSource = RequestSource.API
     idempotency_key: Optional[str] = None
 
 
 class RunRequestOut(BaseModel):
     id: str
     status: str
-    execution_mode: ExecutionMode
+    depth: Depth
     requested_by: str
     created_at: datetime
     run_ids: list[str] = Field(default_factory=list)
 
 
-# --------------------------- Schedules ----------------------------
-class ScheduleCreate(BaseModel):
-    name: str
-    cron: str
-    timezone: str = "UTC"
-    suite_ids: list[str] = Field(default_factory=list)
-    test_definition_ids: list[str] = Field(default_factory=list)
-    target_ids: list[str] = Field(default_factory=list)
-    catalogs: list[str] = Field(default_factory=list)
-    execution_mode: ExecutionMode = ExecutionMode.SMOKE
-    enabled: bool = True
-
-
-class ScheduleUpdate(BaseModel):
-    name: Optional[str] = None
-    cron: Optional[str] = None
-    timezone: Optional[str] = None
-    enabled: Optional[bool] = None
-    execution_mode: Optional[ExecutionMode] = None
-    suite_ids: Optional[list[str]] = None
-    test_definition_ids: Optional[list[str]] = None
-    target_ids: Optional[list[str]] = None
-    catalogs: Optional[list[str]] = None
-
-
-# --------------------------- Remote agents ----------------------------
-class AgentRegister(BaseModel):
-    name: str
-    description: str = ""
-    vantage_point: str
-    capabilities: list[str] = Field(default_factory=list)
-    signing_key_id: Optional[str] = None
-
-
-class AgentResultStep(BaseModel):
-    step_kind: str
-    outcome: str
-    connectivity: str = "UNKNOWN"
-    message: str = ""
-    error_class: Optional[str] = None
-    root_cause_bucket: Optional[str] = None
-    recommendation: Optional[str] = None
-    raw_payload_excerpt: Optional[str] = None
-    evidence: dict = Field(default_factory=dict)
-
-
-class AgentResultSubmit(BaseModel):
-    """Signed results posted back by a remote agent for a claimed run."""
-
-    run_id: str
-    agent_id: str
-    signature: str  # HMAC-SHA256 over the canonical payload
-    steps: list[AgentResultStep] = Field(default_factory=list)
+# --------------------------- Assistant / compiler ----------------------------
+class CompileRequest(BaseModel):
+    assertion: str

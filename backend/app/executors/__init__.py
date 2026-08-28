@@ -1,21 +1,31 @@
-"""Executor framework: metadata-driven, plugin-based probes."""
+"""Handler framework: metadata-driven, spine-based, plugin handlers."""
 from app.executors.base import (  # noqa: F401
-    Executor,
-    ProbeContext,
-    ProbeError,
-    StepResult,
+    Handler,
+    HandlerContext,
+    HandlerError,
+    StageResult,
 )
-from app.executors.registry import get_executor, register, registry  # noqa: F401
+from app.executors.registry import (  # noqa: F401
+    OperationBlocked,
+    get_handler,
+    is_operation_allowed,
+    register,
+    registry,
+    validate_operation,
+)
 
 # Import built-ins for their registration side effects.
 from app.executors import builtin  # noqa: F401,E402
 
 __all__ = [
-    "Executor",
-    "ProbeContext",
-    "ProbeError",
-    "StepResult",
+    "Handler",
+    "HandlerContext",
+    "HandlerError",
+    "StageResult",
     "register",
-    "get_executor",
+    "get_handler",
     "registry",
+    "validate_operation",
+    "is_operation_allowed",
+    "OperationBlocked",
 ]
