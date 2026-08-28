@@ -296,6 +296,11 @@ class FindingOut(BaseModel):
     request_source: str
     git_sha: str = "unknown"
     message: str = ""
+    #: The last-green → first-bad troubleshooting spine (#34, ADR-0009): keyed to
+    #: a commit sha or a non-deploy event ref, honest across the retention edge.
+    provenance: Optional[dict] = None
+    #: Advisory: recent deterministic verdicts alternate. Never gates (ADR-0008).
+    flaky: bool = False
     finished_at: Optional[datetime] = None
     created_at: datetime
 

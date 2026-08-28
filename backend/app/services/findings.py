@@ -22,8 +22,14 @@ CheckRun history into that feed.
   Assistant's RCA (ADR-0012) may *suggest* a richer attribution on top, but never
   moves a finding off the Overnight default without a commit-backed reason.
 
-Each finding states its failure as ``bucket @ stage`` (ADR-0001). This is a
-strictly read-only computation over history — it never mutates a run.
+Each finding states its failure as ``bucket @ stage`` (ADR-0001) and carries its
+**troubleshooting spine** (#34): the commit-provenance thread (last-green →
+first-bad, keyed to a commit sha or a non-deploy event ref, and honest even when
+the last green predates the retention window — the sweeper's preserved anchor)
+and an **advisory** ``flaky`` flag for a check whose recent deterministic
+verdicts alternate. Flaky is advisory only — it never turns a finding into a
+gating regression (ADR-0008). This is a strictly read-only computation over
+history — it never mutates a run.
 """
 from __future__ import annotations
 
@@ -37,6 +43,8 @@ from app.core.enums import RunStatus, RequestSource, TERMINAL_STATUSES
 from app.core.ids import utcnow
 from app.core.taxonomy import bucket_at_stage
 from app.models import Check, CheckRun
+from app.services import flaky as flaky_service
+from app.services.assistant_tools import commit_provenance_thread
 from app.services.rca import LANE_OVERNIGHT, LANE_RECENT
 
 #: A failing current state that a triager should act on. The other terminal
@@ -89,8 +97,19 @@ def classify_lane(run: CheckRun, *, now: datetime, window: timedelta) -> str:
     return LANE_RECENT if deploy_attributed else LANE_OVERNIGHT
 
 
-def _finding(run: CheckRun, check_name: str, lane: str) -> dict:
-    """Render one finding — the current failing state of a series."""
+def _finding(session: Session, run: CheckRun, check_name: str, lane: str) -> dict:
+    """Render one finding — the current failing state of a series.
+
+    Each finding carries its **troubleshooting spine**: the commit-provenance
+    thread (last-green → first-bad, keyed to a commit sha or event ref, #34) and
+    an **advisory** ``flaky`` flag. Flaky rides *beside* ``gating`` and never
+    changes it — an alternating check is signal, never a hard/gating regression
+    (ADR-0008).
+    """
+    provenance = commit_provenance_thread(
+        session, check_id=run.check_id, target_id=run.target_id)
+    flaky = flaky_service.is_flaky(
+        session, check_id=run.check_id, target_id=run.target_id)
     return {
         "check_id": run.check_id,
         "check_name": check_name,
@@ -103,11 +122,16 @@ def _finding(run: CheckRun, check_name: str, lane: str) -> dict:
         # Every finding states its failure as `bucket @ stage` (ADR-0001).
         "bucket_at_stage": bucket_at_stage(run.failure_bucket, run.failure_stage),
         "lane": lane,
+        # Gating is decided by the evaluator alone; flaky never flips it.
         "gating": run.gating,
         "evaluator": run.evaluator.value,
         "request_source": run.request_source.value,
         "git_sha": run.git_sha,
         "message": run.message,
+        # The last-green → first-bad troubleshooting spine (#34).
+        "provenance": provenance,
+        # Advisory only — never turns the finding into a gating regression.
+        "flaky": flaky,
         "finished_at": run.finished_at,
         "created_at": run.created_at,
     }
@@ -134,7 +158,7 @@ def build_feed(session: Session, *, window_hours: Optional[int] = None,
         lane = classify_lane(run, now=now, window=window)
         if run.verdict in _ACTIONABLE:
             name = checks[run.check_id].display_name if run.check_id in checks else run.check_id
-            lanes[lane]["findings"].append(_finding(run, name, lane))
+            lanes[lane]["findings"].append(_finding(session, run, name, lane))
         else:
             lanes[lane]["everything_else"] += 1
 
