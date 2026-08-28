@@ -200,18 +200,28 @@ export interface AuditEvent {
   summary: string
 }
 
-// ---------------- Target ----------------
-// NOTE: the Targets page + registration ceremony are owned by spec #24; this
-// type still reflects the prototype shape and is rebuilt there.
+// ---------------- Target (rebuilt model, ADR-0003/0004/0018; spec #24) --------
+export type SafetyClass = 'read-only' | 'sandbox' | 'prod-for-us'
+
+/** An assumable role-profile registered with a Target (ADR-0018). */
+export interface AssumableRole {
+  group_id: string
+  label: string
+  safety_class: SafetyClass
+}
+
 export interface Target {
   id: string
   name: string
-  target_type: string
-  catalog?: string | null
-  schema_name?: string | null
   workspace_name?: string | null
-  cloud: string
-  region?: string | null
+  workspace_id?: string | null
+  host?: string | null
+  /** Authoritative cap on the max risk tier this target will run (ADR-0003). */
+  safety_class: SafetyClass
+  /** The target's OAuth M2M SP as a secret-scope `scope/key` handle. */
+  identity_handle?: string | null
+  assumable_roles: AssumableRole[]
+  tags?: Record<string, unknown>
   enabled: boolean
 }
 

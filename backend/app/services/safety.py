@@ -46,6 +46,26 @@ from app.services.risk import effective_risk_tier
 #: for override purposes and can never escalate its own blast radius.
 _HUMAN_GUI_SOURCES = frozenset({RequestSource.UI_MANUAL})
 
+#: The AWS-style phrase the friction ceremony makes a human type to confirm a
+#: safety-gate-defeating edit (ADR-0010). Matched case-insensitively, trimmed.
+CEREMONY_CONFIRMATION_PHRASE = "i understand"
+
+
+def ceremony_rejection(typed_confirmation: str, reason: str) -> Optional[str]:
+    """Return None if the friction ceremony passed, else why it did not.
+
+    The ceremony is **friction, not permission** (ADR-0010): the backend only
+    enforces that the human typed the confirmation phrase *and* gave a reason
+    (which the audit record captures). The escalating-warning UX and the concrete
+    consequence example are the GUI's; here we check the two load-bearing inputs.
+    """
+    if (typed_confirmation or "").strip().lower() != CEREMONY_CONFIRMATION_PHRASE:
+        return (f"type '{CEREMONY_CONFIRMATION_PHRASE}' to confirm this "
+                f"safety-gate-defeating change")
+    if not (reason or "").strip():
+        return "a reason is required and recorded in the audit log"
+    return None
+
 
 @dataclass(frozen=True)
 class SafetyOverride:

@@ -120,8 +120,20 @@ class TargetCreate(BaseModel):
     tags: dict = Field(default_factory=dict)
 
 
+class SafetyCeremonyIn(BaseModel):
+    """The friction-ceremony inputs for a safety-gate-defeating edit (ADR-0010).
+
+    Required only when a ``safety_class`` change **widens** the blast radius (a
+    downgrade). ``typed_confirmation`` is the AWS-style phrase the human typed;
+    ``reason`` is recorded in the audit log. Friction, not permission."""
+
+    typed_confirmation: str = ""
+    reason: str = ""
+
+
 class TargetUpdate(BaseModel):
-    """Edit a Target. Changing ``safety_class`` is audited (downgrades flagged);
+    """Edit a Target. A ``safety_class`` **downgrade** (wider blast radius)
+    requires the friction ceremony (``ceremony``) and is audited with its reason;
     changing ``identity_handle`` re-runs the test-connection guard."""
 
     name: Optional[str] = None
@@ -133,6 +145,8 @@ class TargetUpdate(BaseModel):
     assumable_roles: Optional[list[RoleProfileIn]] = None
     tags: Optional[dict] = None
     enabled: Optional[bool] = None
+    #: The friction ceremony, required on a safety-class downgrade (ADR-0010).
+    ceremony: Optional[SafetyCeremonyIn] = None
 
 
 # --------------------------- Runs ----------------------------
