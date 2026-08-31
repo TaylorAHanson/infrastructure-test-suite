@@ -33,6 +33,22 @@ def test_denial_assertion_is_a_counterfactual():
     assert c.predicate == {"kind": "denied"}
 
 
+def test_reachability_without_error_assertions_compile_deterministic():
+    # The safe form for a resource that can legitimately be empty (issue #96):
+    # "returns ... without error" must gate deterministically, not fall through
+    # to agentic-advisory, or a real posture Check could never be CI-gating.
+    for text in (
+        "the call returns the pipeline list without error",
+        "the call returns the cluster policy list without error",
+        "the call returns the warehouse list without error",
+        "the call returns the secret scope list without error",
+        "the call returns the model-serving endpoint list without error",
+    ):
+        c = compile_assertion(text)
+        assert c.compilable and c.evaluator == Evaluator.DETERMINISTIC
+        assert c.predicate == {"kind": "ok"}
+
+
 def test_non_compilable_assertions_are_flagged_agentic():
     for text in ("the warehouse came up healthy-ish", "the error message is clear and actionable"):
         c = compile_assertion(text)
