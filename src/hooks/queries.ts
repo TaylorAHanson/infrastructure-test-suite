@@ -230,6 +230,16 @@ export const useCheckRun = (runId?: string, enabled = true) =>
     enabled: !!runId && enabled,
   })
 
+/** A per-run safety-gate override (ADR-0004 §5/#81) — human-only, GUI-only,
+ *  exactly one elevated tier (R2) on a `prod-for-us` target. `target_name` is
+ *  the value the operator typed to confirm; the gate rejects it for any
+ *  non-UI_MANUAL request source and for any class/tier other than that one. */
+export interface SafetyOverrideBody {
+  target_name: string
+  reason: string
+  confirmed: boolean
+}
+
 export interface SubmitRunBody {
   suite_ids?: string[]
   test_ids?: string[]
@@ -238,6 +248,7 @@ export interface SubmitRunBody {
   depth?: 'quick' | 'full'
   requested_by?: string
   request_source?: string
+  override?: SafetyOverrideBody
 }
 
 export const useSubmitRun = () => {
