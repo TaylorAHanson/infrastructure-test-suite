@@ -151,8 +151,9 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # tier), since its create+run+delete lifecycle is a full mutating round-trip
 # the coarse verb guess (submit -> POST/R1) would under-classify — the safety
 # gate then caps it to sandbox targets only.
-# A reworked CI Gate (#91's remaining suggested phasing) is a later slice,
-# appended here without disturbing these.
+# The CI Gate (#98) adds no new Checks — it recomposes the deterministic
+# Tests already wired from these slices below (Security Posture + Identity &
+# Access + Governance/UC), so it stays deterministic_only and prod-safe.
 # ---------------------------------------------------------------------------
 CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
     # --- Producer: ingestion layer -------------------------------------------
@@ -584,13 +585,27 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
             ["consumer", "security", "posture"],
         ),
         # --- Real posture Tests (Spec #91, issue #94) -------------------------
-        "identity_access": make_test(
-            "Identity & Access posture",
+        # Split into a deterministic read-only Test and an advisory-only Test
+        # (issue #98) so the CI Gate can compose the former without ever
+        # pulling the agentic least-privilege read along with it — a Suite's
+        # gating unit is a whole Test (SuiteMember), so the two evaluator
+        # kinds can't share one Test if either is to be independently
+        # CI-gateable. The Identity & Access Suite below still carries both,
+        # in the same order as before, so its own membership is unchanged.
+        "identity_access_readonly": make_test(
+            "Identity & Access posture (read-only)",
             "Effective identity resolves, SCIM groups are provisioned, and an IP access list "
-            "is active — plus an advisory read on service-principal least privilege.",
+            "is active — the deterministic reads that can gate CI.",
             [("whoami", "assertion"), ("scim_groups_present", "assertion"),
-             ("ip_access_list_active", "assertion"), ("sp_least_privilege", "assertion")],
+             ("ip_access_list_active", "assertion")],
             ["identity", "access", "security"],
+        ),
+        "identity_access_advisory": make_test(
+            "Identity & Access posture (advisory)",
+            "Advisory read on service-principal least privilege — judgment, not an "
+            "objective pass/fail, so it never gates CI.",
+            [("sp_least_privilege", "assertion")],
+            ["identity", "access", "security", "advisory"],
         ),
         # --- Real posture Tests (Spec #91, issue #95) -------------------------
         "governance": make_test(
@@ -649,8 +664,6 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     make_suite("Connectivity Suite", "Reachability across producer/consumer paths.",
                ["egress", "sql", "uc"])
     make_suite("Full Regression", "Every seeded Test.", list(tests.keys()))
-    make_suite("CI Gate", "Deterministic-only gate for the CI trigger.",
-               ["sql", "policy"], deterministic_only=True, tags=["seeded", "ci"])
     # Category suites — one per Producer/Processing/Consumer lane (README §2).
     # Each grows in place with its real posture Test (issue #96) alongside the
     # tutorial Test it already carried — the lane stays coherent either way.
@@ -663,7 +676,8 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     make_suite("Identity & Access Suite",
                "Effective identity, SCIM-managed groups, and IP access-list posture, plus "
                "an advisory service-principal least-privilege read.",
-               ["identity_access"], tags=["seeded", "identity", "security"])
+               ["identity_access_readonly", "identity_access_advisory"],
+               tags=["seeded", "identity", "security"])
     make_suite("Governance / Unity Catalog Suite",
                "UC governance posture: metastore, ISOLATED catalog binding, external-location/"
                "storage-credential reachability, and a grant-denied counterfactual.",
@@ -671,16 +685,28 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     # Security Posture (issue #93) is the platform's SAT-style posture
     # battery: read-only/R0 settings Checks plus one agentic advisory Check,
     # bundled together — a fresh install's first real validation battery, not
-    # a demo. A reworked CI Gate (Spec #91's remaining suggested phasing) is a
-    # later slice, added here by make_suite(), the same helper used above —
-    # the lane Suites above (Producer/Processing/Consumer) also grow in place
-    # as their slices land, without disturbing the tutorial Tests they
-    # already carry.
+    # a demo. The lane Suites above (Producer/Processing/Consumer) also grow
+    # in place as their slices land, without disturbing the tutorial Tests
+    # they already carry.
     make_suite("Security Posture Suite",
                "SSO, user isolation, exfiltration controls, and token hygiene — "
                "plus an advisory read on the workspace-admin count.",
                ["sso", "isolation", "exfiltration", "token_hygiene", "admin_count"],
                tags=["seeded", "security", "posture"])
+    # CI Gate (issue #98): reworked from a demo grouping into the real,
+    # deterministic-only, read-only posture gate — its membership is exactly
+    # the deterministic Tests from Security Posture + Identity & Access +
+    # Governance/UC above, i.e. every objective read those Suites carry,
+    # minus each Suite's agentic/advisory Test (ADR-0008 deterministic-only
+    # gate). No mutating Check (e.g. Sandbox Functional's job-smoke) is a
+    # member of any source Suite here, so none can leak in transitively.
+    make_suite("CI Gate",
+               "Deterministic-only, read-only posture gate for the CI trigger: the "
+               "objective reads from Security Posture, Identity & Access, and "
+               "Governance / Unity Catalog — never a judgment read, never a mutation.",
+               ["sso", "isolation", "exfiltration", "token_hygiene",
+                "identity_access_readonly", "governance"],
+               deterministic_only=True, tags=["seeded", "ci"])
     # Sandbox Functional (#97): the catalog's mutating Checks, fenced off from
     # every deterministic-only/CI-gated Suite above — never listed in CI Gate.
     make_suite("Sandbox Functional", "Mutating validations confined to sandbox targets, with automatic cleanup.",
