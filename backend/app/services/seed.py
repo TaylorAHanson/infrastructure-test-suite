@@ -127,10 +127,35 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # (see the matching comment markers in seed_all): append to the ``tests``
 # dict / call make_suite() without passing ``tutorial=True``.
 #
-# Empty until the next slice (Security Posture + CI Gate rework, per #91's
-# suggested phasing). Adding entries here never touches CHECK_SPECS above.
+# Populated by later slices of #91's suggested phasing. Adding entries here
+# never touches CHECK_SPECS above.
 # ---------------------------------------------------------------------------
-CATALOG_CHECK_SPECS: list[tuple[str, dict]] = []
+CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
+    # --- Sandbox Functional (#97): the catalog's one mutating validation ----
+    ("job_smoke", dict(
+        display_name="Job create/run/delete smoke",
+        description=(
+            "Submit a trivial one-time Databricks Job run, confirm it completes "
+            "and produces output, then delete the run via the generic handler's "
+            "cleanup hook. Confirmed R2: a create+run+delete lifecycle is a full "
+            "mutating round-trip that the coarse verb guess (submit -> POST/R1) "
+            "would under-classify (ADR-0017 SS2c/3) — the confirmation keeps this "
+            "sandbox-only under the safety-class cap matrix (ADR-0004)."
+        ),
+        operation=OperationIn(
+            service="jobs", method="submit",
+            params={
+                "run_name": "infra-test-suite-job-smoke",
+                "tasks": [{"task_key": "smoke",
+                          "notebook_task": {"notebook_path": "/Shared/job-smoke"}}],
+                "demo_evidence": {"run_id": "demo-run-1", "output": "job-smoke ok"},
+                "cleanup": {"service": "jobs", "method": "delete_run",
+                           "params": {"run_id": "$response.run_id"}},
+            }),
+        handler_key="databricks_sdk",
+        assertion="the job run completes and produces output",
+        confirmed_risk_tier="R2")),
+]
 
 
 # The repo-seeded worked-example library (ADR-0006 §9): gold Tests the Assistant
@@ -329,6 +354,13 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
         # --- Real posture Tests (Spec #91) -----------------------------------
         # Later slices add entries to this dict here, via make_test(...) without
         # tutorial=True, wiring CATALOG_CHECK_SPECS checks into Suites below.
+        "job_smoke": make_test(
+            "Job create/run/delete smoke",
+            "Create, run, and delete a trivial job — proves the ingestion layer "
+            "actually executes, not just reachable (sandbox-only; cleans up after itself).",
+            [("job_smoke", "assertion")],
+            ["sandbox", "producer", "functional"],
+        ),
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -357,10 +389,15 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
                ["sql", "uc", "egress"], tags=["seeded", "consumer"])
     # Real posture Suites (Security Posture, Identity & Access, Governance/UC,
-    # a reworked CI Gate, Sandbox Functional — Spec #91) are added here by
-    # later slices via make_suite(), the same helper used above — the lane
-    # Suites above (Producer/Processing/Consumer) also grow in place as their
-    # slices land, without disturbing the tutorial Tests they already carry.
+    # a reworked CI Gate — Spec #91) are added here by later slices via
+    # make_suite(), the same helper used above — the lane Suites above
+    # (Producer/Processing/Consumer) also grow in place as their slices land,
+    # without disturbing the tutorial Tests they already carry.
+    #
+    # Sandbox Functional (#97): the catalog's mutating Checks, fenced off from
+    # every deterministic-only/CI-gated Suite above — never listed in CI Gate.
+    make_suite("Sandbox Functional", "Mutating validations confined to sandbox targets, with automatic cleanup.",
+               ["job_smoke"], tags=["seeded", "sandbox", "functional"])
 
     if with_demo_targets:
         for t in [
