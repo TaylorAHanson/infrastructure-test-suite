@@ -27,6 +27,15 @@ from app.core import sdk_surface
 from app.models import Check, CheckRun, RunRequest, Target, Test, TestCheck, WorkedExample
 from app.services.roles import normalize_roles
 
+#: Verdict values that represent a failed/bad run outcome (in-memory checks only;
+#: DB-level `.in_()` calls keep their own tuples for compatibility).
+_BAD_VERDICTS: frozenset[str] = frozenset({"FAIL", "ERROR", "BLOCKED_BY_SAFETY"})
+
+
+def _tokenize_query(q: str) -> list[str]:
+    """Normalise a query string into filter terms (len > 2, comma-tolerant)."""
+    return [t for t in (q or "").lower().replace(",", " ").split() if len(t) > 2]
+
 
 # ---------------------------------------------------------------------------
 # Write-path grounding tools
@@ -77,7 +86,7 @@ def search_roles(session: Session, target_ref: str) -> list[dict]:
 def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:
     """Rank the worked-example library against an intent (ADR-0006 §9)."""
     examples = session.exec(select(WorkedExample)).all()
-    terms = [t for t in (query or "").lower().replace(",", " ").split() if len(t) > 2]
+    terms = _tokenize_query(query)
 
     def score(ex: WorkedExample) -> int:
         hay = " ".join([ex.intent, ex.title, ex.description, ex.assertion,
@@ -96,18 +105,26 @@ def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:
 
 def search_tests(session: Session, query: str = "", status: Optional[str] = None,
                  limit: int = 10) -> list[dict]:
-    """Search Tests (and their member Checks) by name, description, operation, tags, status."""
-    tests = session.exec(select(Test)).all()
-    q = (query or "").lower().strip()
-    terms = [t for t in q.replace(",", " ").split() if len(t) > 2] if q else []
+    """Search Tests (and their member Checks) by name, description, operation, tags, status.
 
+    ``operation_summary`` reflects the first member Check's operation; use
+    ``check_count`` to know when a Test has more.
+    """
+    tests = session.exec(select(Test)).all()
+    # Bulk-load all TestChecks and Checks to avoid N+1 round-trips.
+    all_tc = session.exec(select(TestCheck)).all()
+    all_checks: dict[str, Check] = {c.id: c for c in session.exec(select(Check)).all()}
+    checks_by_test: dict[str, list[Check]] = {}
+    for tc in sorted(all_tc, key=lambda x: x.sort_order):
+        if tc.check_id in all_checks:
+            checks_by_test.setdefault(tc.test_id, []).append(all_checks[tc.check_id])
+
+    terms = _tokenize_query(query)
     results: list[dict] = []
     for test in tests:
         if status and status != "all" and test.status.value != status:
             continue
-        tc_rows = session.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()
-        checks = [session.get(Check, tc.check_id) for tc in tc_rows]
-        checks = [c for c in checks if c]
+        checks = checks_by_test.get(test.id, [])
         ops_text = " ".join(
             f"{c.operation.get('service', '')}.{c.operation.get('method', '')} "
             f"{c.display_name} {c.description}"
@@ -171,19 +188,18 @@ def _global_run_summary(session: Session) -> dict:
     runs = session.exec(select(CheckRun).where(CheckRun.request_id == req.id)).all()
     counts: dict[str, int] = {"pass": 0, "fail": 0, "error": 0, "blocked": 0, "pending": 0}
     for r in runs:
-        v = r.verdict.value.upper()
+        v = r.verdict.value
         if v == "PASS":
             counts["pass"] += 1
         elif v == "FAIL":
             counts["fail"] += 1
         elif v == "ERROR":
             counts["error"] += 1
-        elif "BLOCKED" in v:
+        elif v in _BAD_VERDICTS:
             counts["blocked"] += 1
         else:
             counts["pending"] += 1
-    top_failures = [_run_summary(r) for r in runs
-                    if r.verdict.value in ("FAIL", "ERROR", "BLOCKED_BY_SAFETY")][:5]
+    top_failures = [_run_summary(r) for r in runs if r.verdict.value in _BAD_VERDICTS][:5]
     return {
         "request_id": req.id,
         "created_at": req.created_at.isoformat() if req.created_at else None,
@@ -221,7 +237,7 @@ def commit_provenance_thread(session: Session, *, check_id: str,
         if r.verdict.value == "PASS":
             last_green = r
             first_bad = None  # a later green resets the search
-        elif r.verdict.value in ("FAIL", "ERROR", "BLOCKED_BY_SAFETY") and first_bad is None:
+        elif r.verdict.value in _BAD_VERDICTS and first_bad is None:
             first_bad = r
     return {
         "check_id": check_id,
