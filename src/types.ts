@@ -382,6 +382,7 @@ export interface PageContext {
   target_id?: string | null
   target_ids?: string[]
   test_id?: string | null
+  suite_id?: string | null
   finding?: { check_id: string; target_id?: string | null } | null
 }
 

@@ -27,7 +27,7 @@ import logging
 from typing import Any, Callable, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.models import Target
 from app.schemas.schemas import AssistantTurnIn
@@ -92,6 +92,115 @@ def _operation_reference(session, target, args):
                                                str(args.get("method", "")))
 
 
+# ---------------------------------------------------------------------------
+# Suite composition tools — proposal-only (issue #63, spec #56 user stories 8-11)
+# ---------------------------------------------------------------------------
+def _compose_suite_add_test(session, target, args):
+    from app.models import Suite, SuiteMember, Test
+    from app.services import suite_safety
+    suite_id = str(args.get("suite_id", ""))
+    test_id = str(args.get("test_id", ""))
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        return {"error": f"suite {suite_id!r} not found"}
+    test = session.get(Test, test_id)
+    if not test:
+        return {"error": f"test {test_id!r} not found"}
+    existing = session.exec(
+        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
+    ).all()
+    current_ids = [m.test_id for m in existing]
+    if test_id in current_ids:
+        return {"error": f"test {test_id!r} is already a member of this suite"}
+    proposed_ids = current_ids + [test_id]
+    violation = suite_safety.check_deterministic_violation(session, suite, proposed_ids)
+    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
+    return {
+        "suite_id": suite_id,
+        "proposed_test_ids": proposed_ids,
+        "proposed_deterministic_only": suite.deterministic_only,
+        "deterministic_violation": violation,
+        "job_scheduled": job_scheduled,
+        "requires_confirmation": True,
+    }
+
+
+def _compose_suite_remove_test(session, target, args):
+    from app.models import Suite, SuiteMember
+    from app.services import suite_safety
+    suite_id = str(args.get("suite_id", ""))
+    test_id = str(args.get("test_id", ""))
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        return {"error": f"suite {suite_id!r} not found"}
+    existing = session.exec(
+        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
+    ).all()
+    current_ids = [m.test_id for m in existing]
+    if test_id not in current_ids:
+        return {"error": f"test {test_id!r} is not a member of this suite"}
+    proposed_ids = [tid for tid in current_ids if tid != test_id]
+    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
+    return {
+        "suite_id": suite_id,
+        "proposed_test_ids": proposed_ids,
+        "proposed_deterministic_only": suite.deterministic_only,
+        "deterministic_violation": None,
+        "job_scheduled": job_scheduled,
+        "requires_confirmation": True,
+    }
+
+
+def _compose_suite_reorder(session, target, args):
+    from app.models import Suite, SuiteMember
+    from app.services import suite_safety
+    suite_id = str(args.get("suite_id", ""))
+    new_order = list(args.get("test_ids") or [])
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        return {"error": f"suite {suite_id!r} not found"}
+    existing = session.exec(
+        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
+    ).all()
+    current_ids = {m.test_id for m in existing}
+    if set(new_order) != current_ids:
+        return {"error": "test_ids must be a permutation of the suite's current member ids"}
+    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
+    return {
+        "suite_id": suite_id,
+        "proposed_test_ids": new_order,
+        "proposed_deterministic_only": suite.deterministic_only,
+        "deterministic_violation": None,
+        "job_scheduled": job_scheduled,
+        "requires_confirmation": True,
+    }
+
+
+def _compose_suite_toggle_det_only(session, target, args):
+    from app.models import Suite, SuiteMember
+    from app.services import suite_safety
+    suite_id = str(args.get("suite_id", ""))
+    new_value = bool(args.get("deterministic_only", False))
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        return {"error": f"suite {suite_id!r} not found"}
+    existing = session.exec(
+        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
+    ).all()
+    current_ids = [m.test_id for m in existing]
+    violation = suite_safety.check_deterministic_violation(
+        session, suite, current_ids, proposed_deterministic_only=new_value)
+    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
+    return {
+        "suite_id": suite_id,
+        "proposed_test_ids": current_ids,
+        "proposed_deterministic_only": new_value,
+        "deterministic_violation": violation,
+        "job_scheduled": job_scheduled,
+        "requires_confirmation": True,
+    }
+
+
 #: name → adapter ``(session, target, arguments) -> result``. The single dispatch
 #: table for what the model is allowed to invoke; nothing outside it is reachable.
 TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
@@ -104,6 +213,11 @@ TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
     "commit_provenance_thread": _commit_provenance_thread,
     "failure_archive": _failure_archive,
     "operation_reference": _operation_reference,
+    # Suite composition (propose-only, issue #63)
+    "compose_suite_add_test": _compose_suite_add_test,
+    "compose_suite_remove_test": _compose_suite_remove_test,
+    "compose_suite_reorder": _compose_suite_reorder,
+    "compose_suite_toggle_det_only": _compose_suite_toggle_det_only,
 }
 
 
@@ -152,6 +266,29 @@ TOOL_SCHEMAS: list[dict] = [
         "Look up one SDK-surface operation (verb, stages, hints) by service.method.",
         {"service": {"type": "string"}, "method": {"type": "string"}},
         ["service", "method"]),
+    # Suite composition tools — return proposals only (issue #63)
+    _function_schema("compose_suite_add_test",
+        "Propose adding a Test to a Suite. Returns a proposal with deterministic-only "
+        "violation check and nightly-job warning. Never auto-applies; requires confirmation.",
+        {"suite_id": {"type": "string"}, "test_id": {"type": "string"}},
+        ["suite_id", "test_id"]),
+    _function_schema("compose_suite_remove_test",
+        "Propose removing a Test from a Suite. Returns a proposal with nightly-job "
+        "warning. Never auto-applies; requires confirmation.",
+        {"suite_id": {"type": "string"}, "test_id": {"type": "string"}},
+        ["suite_id", "test_id"]),
+    _function_schema("compose_suite_reorder",
+        "Propose reordering Tests in a Suite. test_ids must be a permutation of the "
+        "current member ids. Never auto-applies; requires confirmation.",
+        {"suite_id": {"type": "string"},
+         "test_ids": {"type": "array", "items": {"type": "string"}}},
+        ["suite_id", "test_ids"]),
+    _function_schema("compose_suite_toggle_det_only",
+        "Propose toggling deterministic_only on a Suite. Refused if any member Test "
+        "contains agentic Checks. Never auto-applies; requires confirmation.",
+        {"suite_id": {"type": "string"},
+         "deterministic_only": {"type": "boolean", "description": "new value for the flag"}},
+        ["suite_id", "deterministic_only"]),
 ]
 
 

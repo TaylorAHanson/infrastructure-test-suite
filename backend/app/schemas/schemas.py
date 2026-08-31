@@ -220,6 +220,7 @@ class PageContextIn(BaseModel):
     target_id: Optional[str] = None
     target_ids: list[str] = Field(default_factory=list)
     test_id: Optional[str] = None
+    suite_id: Optional[str] = None
     #: A finding under triage: {"check_id", "target_id"} — routes to RCA.
     finding: Optional[dict] = None
 
@@ -282,6 +283,21 @@ class RcaRequestIn(BaseModel):
     check_id: str
     target_id: Optional[str] = None
     turn: str = ""
+
+
+class SuiteComposeConfirmIn(BaseModel):
+    """Confirm a suite composition proposal from a suite tool call (suggest-then-confirm).
+
+    The human confirms (or rejects) a proposal returned by one of the four suite
+    composition tools. The confirm endpoint re-validates the invariant before
+    applying so the safety gate cannot be bypassed.
+    """
+
+    suite_id: str
+    action: str  # "add_test" | "remove_test" | "reorder" | "toggle_det_only"
+    test_id: Optional[str] = None       # for add_test / remove_test
+    test_ids: Optional[list[str]] = None  # for reorder
+    deterministic_only: Optional[bool] = None  # for toggle_det_only
 
 
 # --------------------------- Findings feed (ADR-0009, #33) ----------------

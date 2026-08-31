@@ -1,20 +1,40 @@
+import { useState } from 'react'
+import { MessageSquarePlus } from 'lucide-react'
+
 import { PageHeader } from '../components/PageHeader'
+import { useAssistantContext, useDeclarePageContext } from '../lib/assistantContext'
 import { useSuites, useTests } from '../hooks/queries'
 
 export default function Suites() {
   const { data: suites } = useSuites()
   const { data: tests } = useTests()
+  const { openWithPrompt } = useAssistantContext()
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const nameOf = (id: string) => tests?.find((t) => t.id === id)?.name ?? id
+
+  useDeclarePageContext({ page: 'suites', suite_id: selectedId ?? undefined })
 
   return (
     <div>
       <PageHeader
         title="Suites"
         subtitle="A Suite is a named selection of Tests for a Run. A deterministic-only Suite computes its fail-closed verdict from deterministic Checks alone (agentic Checks stay advisory)."
+        actions={
+          <button
+            className="btn btn-accent"
+            onClick={() => openWithPrompt('Create a new suite that ')}
+          >
+            <MessageSquarePlus size="15" /> New Suite
+          </button>
+        }
       />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {suites?.map((s) => (
-          <div key={s.id} className="card">
+          <div
+            key={s.id}
+            className={`card cursor-pointer ${selectedId === s.id ? 'ring-2 ring-accent' : ''}`}
+            onClick={() => setSelectedId(s.id)}
+          >
             <div className="flex items-center justify-between">
               <div className="text-base font-semibold text-white">{s.name}</div>
               <div className="flex items-center gap-2">
