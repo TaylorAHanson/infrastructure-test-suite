@@ -384,6 +384,28 @@ export interface SuiteProposal {
   requires_confirmation: boolean
 }
 
+/** One tool the Assistant called this turn, surfaced for transparency (#65): the
+ *  tool name, the args it was invoked with, and its result. Rendered as a
+ *  collapsed one-line indicator, expandable to show args/result. */
+export interface ToolCall {
+  name: string
+  arguments: Record<string, unknown>
+  result: unknown
+}
+
+/** A dynamic follow-up button offered after an answer (#65). Driven generically
+ *  by the tool registry, not a hardcoded per-capability set: `author` seeds the
+ *  shelf input with a starting sentence; `navigate` routes the main pane. */
+export type NextActionKind = 'author' | 'navigate'
+export interface NextAction {
+  kind: NextActionKind
+  label: string
+  /** For `author`: the sentence to pre-fill the input with. */
+  seed?: string
+  /** For `navigate`: the route to send the main pane to. */
+  href?: string
+}
+
 export interface AssistantTurnResponse {
   mode: 'authoring' | 'rca' | 'suite_authoring' | 'query'
   page: string
@@ -392,6 +414,10 @@ export interface AssistantTurnResponse {
   suite_proposal?: SuiteProposal | null
   answer?: string | null
   clarifying_question?: string
+  /** Which tools the agent called this turn, with args/result (additive, #65). */
+  tool_calls?: ToolCall[]
+  /** Contextual follow-up buttons derived from the tools that ran (additive, #65). */
+  next_actions?: NextAction[]
 }
 
 export interface PageContext {

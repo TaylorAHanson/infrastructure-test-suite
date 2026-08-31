@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import {
+  Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical,
+  Check, ChevronRight, ArrowUpRight, Wand2,
+} from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
 import {
@@ -11,7 +15,14 @@ import {
   useStarterPrompts,
 } from '../hooks/queries'
 import type { DraftCheckBody } from '../hooks/queries'
-import type { DraftProposal, RcaSuggestion, SuiteProposal, WorkedExample } from '../types'
+import type {
+  DraftProposal,
+  NextAction,
+  RcaSuggestion,
+  SuiteProposal,
+  ToolCall,
+  WorkedExample,
+} from '../types'
 
 interface AssistantShelfProps {
   open: boolean
@@ -28,7 +39,8 @@ interface AssistantShelfProps {
 // It hands the harness the page's declared context, then shows an authoring
 // Draft (suggest-then-human-confirms) or an advisory RCA suggestion.
 export default function AssistantShelf({ open, onOpen, onClose, width, onResizeStart }: AssistantShelfProps) {
-  const { pageContext, seedPrompt } = useAssistantContext()
+  const { pageContext, seedPrompt, openWithPrompt } = useAssistantContext()
+  const navigate = useNavigate()
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // Set when a seed request arrives while the input isn't mounted yet; the
   // focus effect below consumes it once the shelf has opened and rendered.
@@ -46,6 +58,9 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const [rca, setRca] = useState<RcaSuggestion | null>(null)
   const [suiteProposal, setSuiteProposal] = useState<SuiteProposal | null>(null)
   const [answer, setAnswer] = useState<string | null>(null)
+  // Tool-call transparency + dynamic follow-up buttons for the last answer (#65).
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
+  const [nextActions, setNextActions] = useState<NextAction[]>([])
   const [savedId, setSavedId] = useState<string | null>(null)
   const [savedSuiteId, setSavedSuiteId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -68,6 +83,8 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     setRca(null)
     setSuiteProposal(null)
     setAnswer(null)
+    setToolCalls([])
+    setNextActions([])
     setSavedId(null)
     setSavedSuiteId(null)
     setError(null)
@@ -97,6 +114,8 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     setRca(null)
     setSuiteProposal(null)
     setAnswer(null)
+    setToolCalls([])
+    setNextActions([])
     setSavedId(null)
     setSavedSuiteId(null)
     setApplyCf(false)
@@ -110,6 +129,9 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
         setAnswer(res.answer ?? null)
       } else if (res.mode === 'query') setAnswer(res.answer ?? null)
       else setRca(res.rca ?? null)
+      // Additive: which tools ran + the contextual follow-up buttons (#65).
+      setToolCalls(res.tool_calls ?? [])
+      setNextActions(res.next_actions ?? [])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The Assistant could not respond.')
     }
@@ -124,6 +146,14 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create the Suite.')
     }
+  }
+
+  // Run a dynamic next-action button (#65): `author` re-seeds the input with a
+  // starting sentence; `navigate` routes the main pane (the shelf stays open, so
+  // both are visible — the push-pane layout, #58).
+  function runNextAction(action: NextAction) {
+    if (action.kind === 'author' && action.seed) openWithPrompt(action.seed)
+    else if (action.kind === 'navigate' && action.href) navigate(action.href)
   }
 
   async function saveDraft() {
@@ -229,6 +259,11 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
               <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
             )}
 
+            {/* Tool-call transparency (#65): the tools the agent ran this turn,
+                each a collapsed one-liner expandable to its args/result. Shown
+                before the answer so it reads as "it looked, then it answered." */}
+            {toolCalls.length > 0 && <ToolCallList calls={toolCalls} />}
+
             {draft && (
               <DraftView
                 draft={draft}
@@ -250,6 +285,12 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
               />
             )}
             {!suiteProposal && !draft && !rca && answer && <AnswerView answer={answer} />}
+
+            {/* Dynamic follow-up buttons (#65), rendered from whatever the turn's
+                tools made relevant — generic, not a per-capability button set. */}
+            {nextActions.length > 0 && (
+              <NextActions actions={nextActions} onRun={runNextAction} />
+            )}
           </div>
 
           <div className="border-t border-edge p-3">
@@ -299,6 +340,63 @@ function StarterPrompts({
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+// Tool-call transparency (#65, spec #56 stories 3-5): each tool the agent called
+// renders as a collapsed one-line indicator ("✓ Called `name`"), expandable to
+// show the exact args + result so the answer isn't a black box. Native
+// <details> keeps it accessible and collapsed-by-default with no extra state.
+function ToolCallList({ calls }: { calls: ToolCall[] }) {
+  return (
+    <div className="mb-3 space-y-1">
+      {calls.map((call, i) => (
+        <details key={i} className="group rounded-lg border border-edge bg-panel">
+          <summary className="flex cursor-pointer list-none items-center gap-2 p-2 text-xs text-gray-200">
+            <ChevronRight
+              size="12"
+              className="shrink-0 text-muted transition group-open:rotate-90"
+            />
+            <Check size="12" className="shrink-0 text-pass" />
+            <span>
+              Called <code className="font-mono text-info">{call.name}</code>
+            </span>
+          </summary>
+          <div className="border-t border-edge p-2">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">Arguments</div>
+            <pre className="mb-2 overflow-x-auto rounded bg-ink p-2 text-[11px] text-gray-300">
+              {JSON.stringify(call.arguments ?? {}, null, 2)}
+            </pre>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">Result</div>
+            <pre className="max-h-52 overflow-auto rounded bg-ink p-2 text-[11px] text-gray-300">
+              {JSON.stringify(call.result ?? null, null, 2)}
+            </pre>
+          </div>
+        </details>
+      ))}
+    </div>
+  )
+}
+
+// Dynamic next-action buttons (#65, spec #56 stories 6/7): rendered from whatever
+// the turn's tools made relevant (server-derived, registry-driven), so a new tool
+// contributes its own buttons without a per-capability change here.
+function NextActions({
+  actions,
+  onRun,
+}: {
+  actions: NextAction[]
+  onRun: (a: NextAction) => void
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {actions.map((a, i) => (
+        <button key={i} className="btn text-sm" onClick={() => onRun(a)}>
+          {a.kind === 'author' ? <Wand2 size="14" /> : <ArrowUpRight size="14" />}
+          {a.label}
+        </button>
+      ))}
     </div>
   )
 }

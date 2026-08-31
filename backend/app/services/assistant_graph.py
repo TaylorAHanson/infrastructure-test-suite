@@ -362,6 +362,77 @@ def dispatch_tool(session: Session, target: Optional[Target], name: str, args: d
 
 
 # ---------------------------------------------------------------------------
+# Dynamic next-action buttons — derived from which tools ran (spec #56 story 6/7)
+# ---------------------------------------------------------------------------
+# After an answer, the shelf offers follow-up buttons. They are **driven
+# generically by the tool registry**, not a hardcoded button set per capability:
+# each tool that ran contributes its own follow-ups from its *result*, keyed by
+# the same tool name as ``TOOL_REGISTRY``. A tool with no builder contributes
+# nothing; adding a tool + a builder is all it takes to add its actions — so this
+# extends unchanged as the inventory grows (Suite/Run tools, #63/#64). Each
+# action is a small kind-tagged descriptor the frontend renders and wires:
+#   ``author``   — seed the shelf input with a starting sentence (openWithPrompt);
+#   ``navigate`` — route the main pane to ``href``.
+def _na_author_when_empty(args: dict, result: Any) -> list[dict]:
+    """A grounding search that came back empty → offer to author one (story 7)."""
+    if result:
+        return []
+    q = str(args.get("query", "")).strip()
+    seed = f"Create a new test that {q}" if q else "Create a new test that…"
+    return [{"kind": "author", "label": "Author this test", "seed": seed}]
+
+
+def _na_search_targets(args: dict, result: Any) -> list[dict]:
+    if result:
+        return [{"kind": "navigate", "label": "View targets", "href": "/targets"}]
+    return []
+
+
+def _na_run_history(args: dict, result: Any) -> list[dict]:
+    return [{"kind": "navigate", "label": "View run history", "href": "/runs"}]
+
+
+def _na_whats_interesting(args: dict, result: Any) -> list[dict]:
+    return [{"kind": "navigate", "label": "Open What's Interesting", "href": "/"}]
+
+
+#: tool name → a builder ``(arguments, result) -> [NextAction]``. Keyed by the
+#: same names as :data:`TOOL_REGISTRY` (a builder for a non-tool is meaningless);
+#: enforced ``⊆ TOOL_REGISTRY`` by test so the button set stays registry-driven.
+NEXT_ACTION_BUILDERS: dict[str, Callable[[dict, Any], list[dict]]] = {
+    "search_sdk_surface": _na_author_when_empty,
+    "search_examples": _na_author_when_empty,
+    "search_targets": _na_search_targets,
+    "run_history": _na_run_history,
+    "commit_provenance_thread": _na_whats_interesting,
+    "failure_archive": _na_whats_interesting,
+}
+
+
+def build_next_actions(executed: list[dict]) -> list[dict]:
+    """Derive follow-up-action descriptors from the tools a turn actually ran.
+
+    Walks the executed tool calls, asks each tool's builder (if any) what
+    follow-ups its result warrants, and returns them deduped in first-seen order.
+    Generic by construction — no per-capability branching (spec #56 story 6/7).
+    """
+    actions: list[dict] = []
+    seen: set = set()
+    for call in executed or []:
+        builder = NEXT_ACTION_BUILDERS.get(str(call.get("name", "")))
+        if builder is None:
+            continue
+        for action in builder(call.get("arguments") or {}, call.get("result")):
+            key = (action.get("kind"), action.get("href"), action.get("seed"),
+                   action.get("label"))
+            if key in seen:
+                continue
+            seen.add(key)
+            actions.append(action)
+    return actions
+
+
+# ---------------------------------------------------------------------------
 # The StateGraph tool-calling loop
 # ---------------------------------------------------------------------------
 class _TurnState(TypedDict, total=False):
@@ -562,7 +633,7 @@ def _authoring_turn(session: Session, payload: AssistantTurnIn,
     proposal = authoring.build_draft(session, intent, plan, bool(plan), target,
                                      grounding=grounding)
     return {"mode": "authoring", "page": ctx.page, "draft": proposal.to_dict(),
-            "tool_calls": executed}
+            "tool_calls": executed, "next_actions": build_next_actions(executed)}
 
 
 def _rca_turn(session: Session, payload: AssistantTurnIn,
@@ -571,7 +642,7 @@ def _rca_turn(session: Session, payload: AssistantTurnIn,
     finding = ctx.finding or {}
     check_id = finding.get("check_id")
     if not check_id:
-        return {"mode": "rca", "page": ctx.page, "tool_calls": [],
+        return {"mode": "rca", "page": ctx.page, "tool_calls": [], "next_actions": [],
                 "clarifying_question": "Which finding should I look at? "
                                        "Open a failing check to give me its context."}
     target_id = finding.get("target_id") or ctx.target_id
@@ -588,7 +659,7 @@ def _rca_turn(session: Session, payload: AssistantTurnIn,
          "result": evidence.get("run_history")},
     ]
     return {"mode": "rca", "page": ctx.page, "rca": suggestion.to_dict(),
-            "tool_calls": executed}
+            "tool_calls": executed, "next_actions": build_next_actions(executed)}
 
 
 def _run_submission_turn(session: Session, payload: AssistantTurnIn,
