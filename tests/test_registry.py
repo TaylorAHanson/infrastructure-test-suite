@@ -45,8 +45,28 @@ def test_every_seeded_check_resolves_a_handler(seeded_session):
     from sqlmodel import select
 
     from app.models import Check
+    from app.services.seed import CHECK_SPECS
 
     checks = seeded_session.exec(select(Check)).all()
-    assert len(checks) >= 5
+    assert len(checks) >= len(CHECK_SPECS)
     for c in checks:
         assert get_handler(c.handler_key) is not None
+
+
+def test_seeded_catalog_covers_producer_processing_consumer(seeded_session):
+    """The default catalog covers all three README test-category lanes (issue #61)."""
+    from sqlmodel import select
+
+    from app.models import Suite, Test
+
+    tests = seeded_session.exec(select(Test)).all()
+    test_tags = {tag for t in tests for tag in (t.tags or [])}
+    assert "producer" in test_tags, "No producer-tagged test in catalog"
+    assert "processing" in test_tags, "No processing-tagged test in catalog"
+    assert "consumer" in test_tags, "No consumer-tagged test in catalog"
+
+    suites = seeded_session.exec(select(Suite)).all()
+    suite_names = {s.name for s in suites}
+    assert "Producer Suite" in suite_names, "Producer Suite missing from catalog"
+    assert "Processing Suite" in suite_names, "Processing Suite missing from catalog"
+    assert "Consumer Suite" in suite_names, "Consumer Suite missing from catalog"
