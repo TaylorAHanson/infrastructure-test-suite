@@ -131,12 +131,14 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # Slices landed so far: Producer/Processing/Consumer posture reads (#96),
 # Identity & Access (#94, including one deliberately agentic/advisory
 # least-privilege Check), Governance/Unity Catalog (#95, including its
-# grant-denied counterfactual pair), and Security Posture (#93, the platform's
+# grant-denied counterfactual pair), Security Posture (#93, the platform's
 # SAT-style posture battery: SSO/isolation/exfiltration/token-hygiene settings
-# Checks plus one deliberately agentic admin-count Check). Every read-only
-# entry declares ``verb="GET"`` explicitly (R0) and phrases its assertion as
-# bare success ("... succeeds" / "... completes without error") or a
-# field-comparison ("field == N") — both compile deterministically via
+# Checks plus one deliberately agentic admin-count Check), and Sandbox
+# Functional (#97, the catalog's one mutating validation: create a trivial
+# Job, run it, confirm it produces output, then delete it via cleanup). Every
+# read-only entry declares ``verb="GET"`` explicitly (R0) and phrases its
+# assertion as bare success ("... succeeds" / "... completes without error")
+# or a field-comparison ("field == N") — both compile deterministically via
 # ``compile_assertion``, so every non-advisory Check here still gates CI. The
 # bare-success/"without error" form is the reachability shape for a resource
 # that can legitimately be empty on a clean workspace (a fresh install has
@@ -144,8 +146,13 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # ...; asserting non-emptiness there would false-fail); the field-comparison
 # form is for settings Checks that assert a specific evidence value, seeded via
 # ``demo_evidence`` so every Check stays runnable without a workspace binding.
-# A reworked CI Gate and Sandbox Functional (#91's remaining suggested
-# phasing) are later slices, appended here without disturbing these.
+# The job-smoke Check (#97) is the one exception to "read-only": it declares
+# a ``confirmed_risk_tier`` of R2 (ADR-0017 §3's one-confirm operation-specific
+# tier), since its create+run+delete lifecycle is a full mutating round-trip
+# the coarse verb guess (submit -> POST/R1) would under-classify — the safety
+# gate then caps it to sandbox targets only.
+# A reworked CI Gate (#91's remaining suggested phasing) is a later slice,
+# appended here without disturbing these.
 # ---------------------------------------------------------------------------
 CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
     # --- Producer: ingestion layer -------------------------------------------
@@ -324,6 +331,30 @@ CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
                               params={"demo_evidence": {"admin_count": 3}}),
         handler_key="databricks_sdk",
         assertion="the workspace-admin count is sane")),
+    # --- Sandbox Functional (#97): the catalog's one mutating validation ----
+    ("job_smoke", dict(
+        display_name="Job create/run/delete smoke",
+        description=(
+            "Submit a trivial one-time Databricks Job run, confirm it completes "
+            "and produces output, then delete the run via the generic handler's "
+            "cleanup hook. Confirmed R2: a create+run+delete lifecycle is a full "
+            "mutating round-trip that the coarse verb guess (submit -> POST/R1) "
+            "would under-classify (ADR-0017 §2c/3) — the confirmation keeps this "
+            "sandbox-only under the safety-class cap matrix (ADR-0004)."
+        ),
+        operation=OperationIn(
+            service="jobs", method="submit",
+            params={
+                "run_name": "infra-test-suite-job-smoke",
+                "tasks": [{"task_key": "smoke",
+                          "notebook_task": {"notebook_path": "/Shared/job-smoke"}}],
+                "demo_evidence": {"run_id": "demo-run-1", "output": "job-smoke ok"},
+                "cleanup": {"service": "jobs", "method": "delete_run",
+                           "params": {"run_id": "$response.run_id"}},
+            }),
+        handler_key="databricks_sdk",
+        assertion="the job run completes and produces output",
+        confirmed_risk_tier="R2")),
 ]
 
 
@@ -593,6 +624,13 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
                                  [("admin_count_sane", "assertion")], ["security", "posture", "advisory"]),
         # Later slices add entries to this dict here, via make_test(...) without
         # tutorial=True, wiring CATALOG_CHECK_SPECS checks into Suites below.
+        "job_smoke": make_test(
+            "Job create/run/delete smoke",
+            "Create, run, and delete a trivial job — proves the ingestion layer "
+            "actually executes, not just reachable (sandbox-only; cleans up after itself).",
+            [("job_smoke", "assertion")],
+            ["sandbox", "producer", "functional"],
+        ),
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -633,16 +671,20 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     # Security Posture (issue #93) is the platform's SAT-style posture
     # battery: read-only/R0 settings Checks plus one agentic advisory Check,
     # bundled together — a fresh install's first real validation battery, not
-    # a demo. A reworked CI Gate and Sandbox Functional (Spec #91's remaining
-    # suggested phasing) are added here by later slices via make_suite(), the
-    # same helper used above — the lane Suites above (Producer/Processing/
-    # Consumer) also grow in place as their slices land, without disturbing
-    # the tutorial Tests they already carry.
+    # a demo. A reworked CI Gate (Spec #91's remaining suggested phasing) is a
+    # later slice, added here by make_suite(), the same helper used above —
+    # the lane Suites above (Producer/Processing/Consumer) also grow in place
+    # as their slices land, without disturbing the tutorial Tests they
+    # already carry.
     make_suite("Security Posture Suite",
                "SSO, user isolation, exfiltration controls, and token hygiene — "
                "plus an advisory read on the workspace-admin count.",
                ["sso", "isolation", "exfiltration", "token_hygiene", "admin_count"],
                tags=["seeded", "security", "posture"])
+    # Sandbox Functional (#97): the catalog's mutating Checks, fenced off from
+    # every deterministic-only/CI-gated Suite above — never listed in CI Gate.
+    make_suite("Sandbox Functional", "Mutating validations confined to sandbox targets, with automatic cleanup.",
+               ["job_smoke"], tags=["seeded", "sandbox", "functional"])
 
     if with_demo_targets:
         for t in [
