@@ -87,6 +87,11 @@ def _operation_reference(session, target, args):
                                                str(args.get("method", "")))
 
 
+def _search_suites(session, target, args):
+    return assistant_tools.search_suites(session, str(args.get("query", "")),
+                                         int(args.get("limit", 10) or 10))
+
+
 #: name → adapter ``(session, target, arguments) -> result``. The single dispatch
 #: table for what the model is allowed to invoke; nothing outside it is reachable.
 TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
@@ -98,6 +103,7 @@ TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
     "commit_provenance_thread": _commit_provenance_thread,
     "failure_archive": _failure_archive,
     "operation_reference": _operation_reference,
+    "search_suites": _search_suites,
 }
 
 
@@ -140,6 +146,10 @@ TOOL_SCHEMAS: list[dict] = [
         "Look up one SDK-surface operation (verb, stages, hints) by service.method.",
         {"service": {"type": "string"}, "method": {"type": "string"}},
         ["service", "method"]),
+    _function_schema("search_suites",
+        "List available Suites by name/description/tags — for grounding a run-submission "
+        "proposal. Returns id, name, test_count, deterministic_only.",
+        {"query": {"type": "string"}, "limit": {"type": "integer"}}),
 ]
 
 
@@ -176,12 +186,23 @@ _AUTHORING_TOOL_SYSTEM = (
     "(or null)}. Ground your operation on the tools; never invent a role."
 )
 
+_RUN_SUBMISSION_TOOL_SYSTEM = (
+    "You are the run-submission capability of a Databricks validation Assistant. "
+    "Use search_targets and search_suites to identify the target(s) and suite(s)/test(s) "
+    "the user wants to run. When ready, reply with a single JSON object: "
+    "{\"run_proposal\": {\"target_ids\": [...], \"suite_ids\": [...], \"test_ids\": [...], "
+    "\"depth\": \"quick\" or \"full\", \"summary\": \"human-readable description\"}}. "
+    "If you cannot identify required slots, reply with {\"clarifying_question\": \"...\"}. "
+    "Never invent target or suite ids — only use ids returned by the search tools."
+)
+
 
 def _initial_messages(intent: str, grounding: dict) -> list[dict]:
     return [
         {"role": "system", "content": _AUTHORING_TOOL_SYSTEM},
         {"role": "user", "content": json.dumps({"intent": intent, "grounding": grounding})},
     ]
+
 
 
 def _build_graph(session: Session, target: Optional[Target], model_call: Optional[ModelCall]):
@@ -248,6 +269,8 @@ def run_agent_turn(session: Session, payload: AssistantTurnIn,
     everything else is authoring.
     """
     ctx = payload.page_context
+    if payload.mode == "run_submission":
+        return _run_submission_turn(session, payload, model_call)
     mode = payload.mode if payload.mode in ("authoring", "rca") else (
         "rca" if ctx.finding else "authoring")
     if mode == "rca":
@@ -292,6 +315,39 @@ def _rca_turn(session: Session, payload: AssistantTurnIn,
     ]
     return {"mode": "rca", "page": ctx.page, "rca": suggestion.to_dict(),
             "tool_calls": executed}
+
+
+def _run_submission_turn(session: Session, payload: AssistantTurnIn,
+                         model_call: Optional[ModelCall]) -> dict:
+    """Propose a Run (suggest-then-human-confirms) via the tool-calling loop.
+
+    The model calls search_targets / search_suites to ground its proposal, then
+    returns a ``run_proposal`` JSON object. Nothing is submitted here — the user
+    must confirm by calling ``POST /api/v1/assistant/run``, which routes through
+    the same ``run_service.submit_request()`` path as the manual ``POST /runs``
+    endpoint (guardrail reuse, issue #64 AC #2).
+    """
+    intent = payload.turn
+    init: _TurnState = {
+        "messages": [{"role": "system", "content": _RUN_SUBMISSION_TOOL_SYSTEM},
+                     {"role": "user", "content": intent}],
+        "executed": [], "pending": [], "plan": {}, "iters": 0,
+    }
+    graph = _build_graph(session, None, model_call)
+    final = graph.invoke(init, {"recursion_limit": 2 * MAX_ITERS + 5})
+    plan = final.get("plan") or {}
+    executed = final.get("executed", [])
+
+    run_proposal = plan.get("run_proposal") or None
+    clarifying_question = plan.get("clarifying_question") or None
+
+    return {
+        "mode": "run_submission",
+        "page": payload.page_context.page,
+        "run_proposal": run_proposal,
+        "clarifying_question": clarifying_question,
+        "tool_calls": executed,
+    }
 
 
 def _page_target(session: Session, ctx) -> Optional[Target]:
