@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { AlertTriangle, Plus, ShieldAlert, Trash2, X } from 'lucide-react'
 
 import { PageHeader } from '../components/PageHeader'
@@ -47,8 +47,31 @@ function isDowngrade(from: SafetyClass, to: SafetyClass): boolean {
   return TIER_ORDER[to] > TIER_ORDER[from]
 }
 
+// A Tag is a plain `key=value` navigation filter (CONTEXT.md) — never a query
+// language. `environment` is just a tag among others here; it gets no special
+// casing, so a target's tags render/filter identically regardless of key.
+function tagEntries(target: Target): string[] {
+  const tags = target.tags
+  if (!tags) return []
+  return Object.entries(tags)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .sort()
+}
+
 function ClassBadge({ value }: { value: SafetyClass }) {
   return <span className={`badge ${CLASS_BADGE[value]}`}>{value}</span>
+}
+
+function TagsCell({ target }: { target: Target }) {
+  const tags = tagEntries(target)
+  if (!tags.length) return <>-</>
+  return (
+    <>
+      {tags.map((tag) => (
+        <span key={tag} className="badge mr-1 bg-ink-soft text-muted">{tag}</span>
+      ))}
+    </>
+  )
 }
 
 const EMPTY: CreateTargetBody = {
@@ -70,6 +93,35 @@ export default function Targets() {
   const [error, setError] = useState<string | null>(null)
   // The target whose safety-class downgrade is awaiting the friction ceremony.
   const [ceremony, setCeremony] = useState<{ target: Target; to: SafetyClass } | null>(null)
+
+  // Tags are a navigation filter, not a query language (CONTEXT.md): a plain
+  // toggle set of `key=value` chips, ANDed together. One click adds or removes
+  // a chip — no modifier keys — so the same gesture composes a multi-tag
+  // filter for downstream run/selection flows.
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set())
+
+  const allTags = useMemo(() => {
+    const seen = new Set<string>()
+    for (const t of targets ?? []) for (const tag of tagEntries(t)) seen.add(tag)
+    return [...seen].sort()
+  }, [targets])
+
+  const filteredTargets = useMemo(() => {
+    if (selectedTags.size === 0) return targets ?? []
+    return (targets ?? []).filter((t) => {
+      const own = new Set(tagEntries(t))
+      return [...selectedTags].every((tag) => own.has(tag))
+    })
+  }, [targets, selectedTags])
+
+  function toggleTag(tag: string) {
+    setSelectedTags((prev) => {
+      const next = new Set(prev)
+      if (next.has(tag)) next.delete(tag)
+      else next.add(tag)
+      return next
+    })
+  }
 
   function set<K extends keyof CreateTargetBody>(key: K, value: CreateTargetBody[K]) {
     setForm((f) => ({ ...f, [key]: value }))
@@ -115,6 +167,11 @@ export default function Targets() {
       <AddTargetForm form={form} set={set} submit={submit} pending={create.isPending} error={error}
                      setRoles={(r) => set('assumable_roles', r)} />
 
+      {allTags.length > 0 && (
+        <TagFilterBar tags={allTags} selected={selectedTags} onToggle={toggleTag}
+                      onClear={() => setSelectedTags(new Set())} />
+      )}
+
       <div className="card overflow-hidden p-0">
         <table className="w-full">
           <thead className="border-b border-edge bg-ink">
@@ -124,11 +181,12 @@ export default function Targets() {
               <th className="th">Safety class</th>
               <th className="th">Identity handle</th>
               <th className="th">Assumable roles</th>
+              <th className="th">Tags</th>
               <th className="th"></th>
             </tr>
           </thead>
           <tbody>
-            {targets?.map((t) => (
+            {filteredTargets.map((t) => (
               <tr key={t.id} className={`border-b border-edge/50 hover:bg-ink-soft ${t.enabled ? '' : 'opacity-50'}`}>
                 <td className="td text-white">
                   {t.name}
@@ -160,6 +218,9 @@ export default function Targets() {
                       ))
                     : '-'}
                 </td>
+                <td className="td text-muted">
+                  <TagsCell target={t} />
+                </td>
                 <td className="td text-right">
                   <button
                     className="text-muted hover:text-fail disabled:opacity-40"
@@ -174,7 +235,17 @@ export default function Targets() {
             ))}
             {!targets?.length && (
               <tr>
-                <td className="td text-sm text-muted" colSpan={6}>No targets yet. Register one above.</td>
+                <td className="td text-sm text-muted" colSpan={7}>No targets yet. Register one above.</td>
+              </tr>
+            )}
+            {!!targets?.length && !filteredTargets.length && (
+              <tr>
+                <td className="td text-sm text-muted" colSpan={7}>
+                  No targets match the selected tags.{' '}
+                  <button className="text-info underline" onClick={() => setSelectedTags(new Set())}>
+                    Clear filters
+                  </button>
+                </td>
               </tr>
             )}
           </tbody>
@@ -276,6 +347,47 @@ function AddTargetForm({
         </button>
         {error && <div className="text-sm text-fail">{error}</div>}
       </div>
+    </div>
+  )
+}
+
+// --------------------------- Tag filter chips ---------------------------
+// Tags are a plain navigation filter over the target list, never a query
+// language (CONTEXT.md) — every `key=value` pair across registered targets
+// renders as a chip; toggling one narrows the list, and any number can be
+// active at once (ANDed) in the same one-click gesture.
+function TagFilterBar({
+  tags, selected, onToggle, onClear,
+}: {
+  tags: string[]
+  selected: Set<string>
+  onToggle: (tag: string) => void
+  onClear: () => void
+}) {
+  return (
+    <div className="card mb-4 flex flex-wrap items-center gap-2">
+      <span className="card-title">Tags</span>
+      {tags.map((tag) => {
+        const active = selected.has(tag)
+        return (
+          <button
+            key={tag}
+            type="button"
+            aria-pressed={active}
+            className={`badge transition ${
+              active ? 'bg-accent text-ink' : 'bg-ink-soft text-muted hover:text-white'
+            }`}
+            onClick={() => onToggle(tag)}
+          >
+            {tag}
+          </button>
+        )
+      })}
+      {selected.size > 0 && (
+        <button className="ml-1 text-xs text-muted underline hover:text-white" onClick={onClear}>
+          Clear ({selected.size})
+        </button>
+      )}
     </div>
   )
 }
