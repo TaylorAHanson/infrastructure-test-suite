@@ -113,6 +113,15 @@ export const usePromoteExample = () => {
 export const useExamples = () =>
   useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 
+/** The curated onboarding starter prompts (spec #56 stories 30/32): the 3-4
+ *  clickable examples the Assistant shelf shows a first-time user with an empty
+ *  conversation, sourced from the WorkedExample library via `search_examples`. */
+export const useStarterPrompts = () =>
+  useQuery({
+    queryKey: ['examples', 'onboarding'],
+    queryFn: () => api.get<WorkedExample[]>('/assistant/examples?q=onboarding'),
+  })
+
 // ---------------- Targets (rebuilt model + friction ceremony, ADR-0010; #37) ----
 export interface CreateTargetBody {
   name: string

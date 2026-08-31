@@ -201,7 +201,9 @@ def test_accept_and_edit_create_new_versions(client):
 # --------------------------- example promotion ---------------------------
 def test_example_library_seeded_and_promotion_is_explicit(client):
     seeded = client.get("/api/v1/assistant/examples").json()
-    assert len(seeded) >= 4  # repo-seeded worked-example library (ADR-0006 §9)
+    # Gold authoring examples + curated onboarding starter prompts (ADR-0006 §9,
+    # spec #56 stories 30/32); bumped from 4 when onboarding examples landed.
+    assert len(seeded) >= 8
 
     tid = _commit_sql_draft(client)
     client.post(f"/api/v1/tests/{tid}/accept")
@@ -210,6 +212,18 @@ def test_example_library_seeded_and_promotion_is_explicit(client):
     after = client.get("/api/v1/assistant/examples").json()
     assert len(after) == len(seeded) + 1
     assert any(e.get("source_test_id") == tid for e in after)
+
+
+def test_onboarding_starter_prompts_are_surfaced_via_search(client):
+    """The shelf's starter prompts come from the WorkedExample library through
+    the existing ``search_examples`` path — 3-4 curated onboarding intents
+    tagged ``onboarding`` (spec #56 stories 30/32, ticket #60)."""
+    starters = client.get("/api/v1/assistant/examples", params={"q": "onboarding"}).json()
+    assert 3 <= len(starters) <= 4
+    # Every surfaced starter is an onboarding-tagged example with clickable text.
+    for ex in starters:
+        assert "onboarding" in ex["tags"]
+        assert ex["intent"].strip()  # the text a click populates the input with
 
 
 # --------------------------- RCA + agentic (advisory) ---------------------------
