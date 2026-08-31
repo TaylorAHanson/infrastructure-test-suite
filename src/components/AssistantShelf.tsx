@@ -3,9 +3,9 @@ import type { ReactNode } from 'react'
 import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
-import { useAssistantTurn, useBranding, useCommitDraft } from '../hooks/queries'
+import { useAssistantTurn, useBranding, useCommitDraft, useStarterPrompts } from '../hooks/queries'
 import type { DraftCheckBody } from '../hooks/queries'
-import type { DraftProposal, RcaSuggestion } from '../types'
+import type { DraftProposal, RcaSuggestion, WorkedExample } from '../types'
 
 interface AssistantShelfProps {
   open: boolean
@@ -25,6 +25,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const { pageContext } = useAssistantContext()
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
+  const { data: starters } = useStarterPrompts()
   // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
   const { data: branding } = useBranding()
   const assistantName = branding?.assistant_name || 'Assistant'
@@ -154,6 +155,12 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
             {error && <div className="mb-3 text-sm text-fail">{error}</div>}
             {turn.isPending && <div className="text-sm text-muted">Thinking…</div>}
 
+            {/* Empty-conversation onboarding: concrete example prompts a
+                first-time user can click to see what they can ask (story 30). */}
+            {!draft && !rca && !turn.isPending && starters && starters.length > 0 && (
+              <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
+            )}
+
             {draft && (
               <DraftView
                 draft={draft}
@@ -184,6 +191,36 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
             </div>
           </div>
     </aside>
+  )
+}
+
+// Onboarding starter prompts (spec #56 story 30): 3-4 curated examples from the
+// WorkedExample library. Clicking one populates the input with its intent text —
+// nothing is asked or saved until the user hits send.
+function StarterPrompts({
+  examples,
+  onPick,
+}: {
+  examples: WorkedExample[]
+  onPick: (intent: string) => void
+}) {
+  return (
+    <div className="mb-3">
+      <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
+        <Lightbulb size="12" /> Try asking
+      </div>
+      <div className="space-y-2">
+        {examples.slice(0, 4).map((ex) => (
+          <button
+            key={ex.id}
+            className="w-full rounded-lg border border-edge bg-panel p-2 text-left text-sm text-gray-200 hover:border-accent hover:text-white"
+            onClick={() => onPick(ex.intent)}
+          >
+            {ex.intent}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 
