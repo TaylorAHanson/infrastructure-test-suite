@@ -82,6 +82,11 @@ def _failure_archive(session, target, args):
                                            limit=int(args.get("limit", 20) or 20))
 
 
+def _search_tests(session, target, args):
+    return assistant_tools.search_tests(session, str(args.get("query", "")),
+                                        args.get("status"), int(args.get("limit", 10) or 10))
+
+
 def _operation_reference(session, target, args):
     return assistant_tools.operation_reference(str(args.get("service", "")),
                                                str(args.get("method", "")))
@@ -203,6 +208,7 @@ TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
     "search_targets": _search_targets,
     "search_roles": _search_roles,
     "search_examples": _search_examples,
+    "search_tests": _search_tests,
     "run_history": _run_history,
     "commit_provenance_thread": _commit_provenance_thread,
     "failure_archive": _failure_archive,
@@ -239,6 +245,12 @@ TOOL_SCHEMAS: list[dict] = [
     _function_schema("search_examples",
         "Rank the worked-example library against an authoring intent.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+    _function_schema("search_tests",
+        "Search existing Tests/Checks by name, description, operation, tags, and status "
+        "(draft/active). Use to answer 'Do we have a test for X?' without authoring.",
+        {"query": {"type": "string"}, "status": {"type": "string",
+         "description": "filter by status: 'draft', 'active', or 'all' (default all)"},
+         "limit": {"type": "integer"}}),
     _function_schema("run_history",
         "Recent CheckRuns, newest first; callable with no ids for the latest runs.",
         {"check_id": {"type": "string"}, "target_id": {"type": "string"},
@@ -306,11 +318,13 @@ class _TurnState(TypedDict, total=False):
 _AUTHORING_TOOL_SYSTEM = (
     "You are the authoring capability of a Databricks validation Assistant. Use the "
     "provided tools to ground on the live SDK surface, worked examples, and the "
-    "target's registered roles as needed. When ready, reply with a single JSON "
-    "object: {\"name\", \"description\", \"operation\": {\"service\", \"method\", "
-    "\"params\"}, \"assertion\", \"handler_key\", \"run_as_role\" (or null), "
-    "\"counterfactual\": {\"assertion\", \"params\"} or null, \"clarifying_question\" "
-    "(or null)}. Ground your operation on the tools; never invent a role."
+    "target's registered roles as needed. "
+    "For a query turn (e.g. 'Do we have a test for X?', 'What happened last run?'), "
+    "call the appropriate read tool(s), then reply with {\"answer\": \"<plain-English answer>\"}. "
+    "For authoring, reply with a single JSON object: {\"name\", \"description\", "
+    "\"operation\": {\"service\", \"method\", \"params\"}, \"assertion\", \"handler_key\", "
+    "\"run_as_role\" (or null), \"counterfactual\": {\"assertion\", \"params\"} or null, "
+    "\"clarifying_question\" (or null)}. Ground your operation on the tools; never invent a role."
 )
 
 
@@ -399,6 +413,10 @@ def _authoring_turn(session: Session, payload: AssistantTurnIn,
     intent = payload.turn
     grounding = authoring._grounding(session, intent, target)
     plan, executed = _tool_loop(session, target, intent, grounding, model_call)
+    # Query answer: model resolved the turn as a read/lookup, not an authoring request.
+    if plan.get("answer") and "operation" not in plan and "name" not in plan:
+        return {"mode": "query", "page": ctx.page, "answer": plan["answer"],
+                "tool_calls": executed}
     proposal = authoring.build_draft(session, intent, plan, bool(plan), target,
                                      grounding=grounding)
     return {"mode": "authoring", "page": ctx.page, "draft": proposal.to_dict(),

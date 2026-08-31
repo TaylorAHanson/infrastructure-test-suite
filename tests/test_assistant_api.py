@@ -55,6 +55,7 @@ def test_tool_inventory_is_closed_by_omission():
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
     assert names == {
         "search_sdk_surface", "search_targets", "search_roles", "search_examples",
+        "search_tests",
         "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
         # Suite composition tools (issue #63)
         "compose_suite_add_test", "compose_suite_remove_test",
@@ -304,6 +305,106 @@ def test_agentic_evaluate_endpoint_cites_field_and_is_advisory(client):
     body = r.json()
     assert body["cited"] is True and body["cited_fields"] == ["row_count"]
     assert body["gating"] is False  # advisory: never gates CI (ADR-0008)
+
+
+# --------------------------- search_tests (#62) ---------------------------
+def test_search_tests_returns_seeded_checks(client):
+    # search_tests returns existing Tests from the seeded catalog.
+    from app.services.assistant_tools import search_tests
+    from app.db.session import session_scope
+
+    with session_scope() as s:
+        results = search_tests(s, query="cluster")
+    assert results, "Expected at least one seeded test matching 'cluster'"
+    names = [r["name"] for r in results]
+    assert any("cluster" in n.lower() for n in names)
+    for r in results:
+        assert "id" in r and "name" in r and "status" in r and "check_count" in r
+
+
+def test_search_tests_filters_by_status(client):
+    # status filter works: passing "active" returns only active tests.
+    from app.services.assistant_tools import search_tests
+    from app.db.session import session_scope
+
+    with session_scope() as s:
+        results = search_tests(s, query="", status="active")
+    assert all(r["status"] == "active" for r in results)
+
+
+def test_turn_query_for_existing_test_answers_directly(client):
+    # A turn like "Do we have a test for cluster creation?" uses search_tests and
+    # returns mode="query" with an answer — no draft, no clarifying question.
+    calls = {"n": 0}
+
+    def script(messages):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tool_calls": [{"name": "search_tests",
+                                    "arguments": {"query": "cluster creation"}}]}
+        return {"answer": "Yes, there is a test for cluster creation."}
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "Do we have a test for cluster creation?",
+        "page_context": {"page": "test-studio"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "query"
+    assert body["answer"]
+    assert "draft" not in body
+    executed = body.get("tool_calls") or []
+    assert any(t["name"] == "search_tests" for t in executed)
+
+
+# --------------------------- run_history global (#62) ---------------------------
+def test_run_history_global_returns_most_recent_run_summary(client):
+    # seed at least one run so run_history has something to summarise.
+    checks = client.get("/api/v1/checks").json()
+    run_id = client.post("/api/v1/runs", json={
+        "test_ids": [], "check_ids": [checks[0]["id"]],
+        "requested_by": "test"}).json()["run_id"]
+    client.get(f"/api/v1/runs/{run_id}")  # drive background task
+
+    from app.services.assistant_tools import run_history
+    from app.db.session import session_scope
+
+    with session_scope() as s:
+        result = run_history(s)  # no IDs → global summary
+    assert isinstance(result, dict), "Expected a dict summary when no IDs are given"
+    assert "request_id" in result
+    assert "total" in result
+    for key in ("pass", "fail", "error", "blocked", "pending"):
+        assert key in result
+
+
+def test_turn_run_history_global_answers_without_draft(client):
+    # "What happened last run?" uses run_history with no ids and answers via mode="query".
+    # Create a run first so there is history to report.
+    checks = client.get("/api/v1/checks").json()
+    run_id = client.post("/api/v1/runs", json={
+        "test_ids": [], "check_ids": [checks[0]["id"]],
+        "requested_by": "test"}).json()["run_id"]
+    client.get(f"/api/v1/runs/{run_id}")  # drive background task
+
+    calls = {"n": 0}
+
+    def script(messages):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tool_calls": [{"name": "run_history", "arguments": {}}]}
+        return {"answer": "The last run had 1 check."}
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "What happened last run?",
+        "page_context": {"page": "test-studio"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "query"
+    assert body["answer"]
+    executed = body.get("tool_calls") or []
+    assert any(t["name"] == "run_history" for t in executed)
 
 
 # --------------------- suite composition tools (issue #63) ---------------------
