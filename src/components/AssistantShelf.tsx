@@ -1,17 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search } from 'lucide-react'
+import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
-import { useAssistantTurn, useBranding, useCommitDraft } from '../hooks/queries'
+import { useAssistantTurn, useBranding, useCommitDraft, useStarterPrompts } from '../hooks/queries'
 import type { DraftCheckBody } from '../hooks/queries'
-import type { DraftProposal, RcaSuggestion } from '../types'
+import type { DraftProposal, RcaSuggestion, WorkedExample } from '../types'
 
-// The single, app-wide Assistant surface (ADR-0012): a slide-out shelf reachable
-// from every page. It hands the harness the page's declared context, then shows
-// an authoring Draft (suggest-then-human-confirms) or an advisory RCA suggestion.
-export default function AssistantShelf() {
-  const [open, setOpen] = useState(false)
+interface AssistantShelfProps {
+  open: boolean
+  onOpen: () => void
+  onClose: () => void
+  // Live shelf width (px) and the drag-handle mousedown, owned by Layout via
+  // useShelfWidth so the sidebar can collapse when the shelf gets wide (#58).
+  width: number
+  onResizeStart: (e: React.MouseEvent) => void
+}
+
+// The single, app-wide Assistant surface (ADR-0012): a resizable push-pane
+// (issue #58) that shares horizontal space with <main> rather than covering it.
+// It hands the harness the page's declared context, then shows an authoring
+// Draft (suggest-then-human-confirms) or an advisory RCA suggestion.
+export default function AssistantShelf({ open, onOpen, onClose, width, onResizeStart }: AssistantShelfProps) {
   const { pageContext, seedPrompt } = useAssistantContext()
   const inputRef = useRef<HTMLTextAreaElement>(null)
   // Set when a seed request arrives while the input isn't mounted yet; the
@@ -19,6 +29,7 @@ export default function AssistantShelf() {
   const pendingFocus = useRef(false)
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
+  const { data: starters } = useStarterPrompts()
   // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
   const { data: branding } = useBranding()
   const assistantName = branding?.assistant_name || 'Assistant'
@@ -41,7 +52,7 @@ export default function AssistantShelf() {
   // the human still decides when to ask.
   useEffect(() => {
     if (!seedPrompt) return
-    setOpen(true)
+    onOpen()
     setText(seedPrompt.text)
     setDraft(null)
     setRca(null)
@@ -132,28 +143,44 @@ export default function AssistantShelf() {
     }
   }
 
-  return (
-    <>
-      {!open && (
-        <button
-          className="btn btn-accent fixed bottom-6 right-6 z-40 shadow-lg"
-          onClick={() => setOpen(true)}
-        >
-          <Sparkles size="16" />
-          {assistantName}
-        </button>
-      )}
+  // Closed: a floating launcher, out of flow so it never takes split-pane width.
+  if (!open) {
+    return (
+      <button className="btn btn-accent fixed bottom-6 right-6 z-40 shadow-lg" onClick={onOpen}>
+        <Sparkles size="16" />
+        {assistantName}
+      </button>
+    )
+  }
 
-      {open && (
-        <aside className="fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-edge bg-ink shadow-2xl">
-          <div className="flex items-center gap-2 border-b border-edge p-4">
-            <Sparkles size="18" className="text-accent" />
-            <span className="text-sm font-semibold text-white">{assistantName}</span>
-            <span className="badge bg-panel text-muted">{pageContext.page || 'app'}</span>
-            <button className="ml-auto text-muted hover:text-white" onClick={() => setOpen(false)}>
-              <X size="18" />
-            </button>
-          </div>
+  // Open: a split-pane flex sibling of <main> (not an overlay), width-driven by
+  // Layout, with a drag handle pinned to its left edge.
+  return (
+    <aside
+      className="relative flex h-full shrink-0 flex-col border-l border-edge bg-ink shadow-2xl"
+      style={{ width }}
+    >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize assistant"
+        onMouseDown={onResizeStart}
+        className="group absolute left-0 top-0 z-10 flex h-full w-1.5 -translate-x-1/2 cursor-col-resize items-center justify-center hover:bg-accent/30"
+      >
+        <GripVertical
+          size="14"
+          className="text-edge opacity-0 transition group-hover:opacity-100"
+        />
+      </div>
+
+      <div className="flex items-center gap-2 border-b border-edge p-4">
+        <Sparkles size="18" className="text-accent" />
+        <span className="text-sm font-semibold text-white">{assistantName}</span>
+        <span className="badge bg-panel text-muted">{pageContext.page || 'app'}</span>
+        <button className="ml-auto text-muted hover:text-white" onClick={onClose}>
+          <X size="18" />
+        </button>
+      </div>
 
           <div className="flex-1 overflow-auto p-4">
             <p className="mb-3 text-xs text-muted">
@@ -163,6 +190,12 @@ export default function AssistantShelf() {
 
             {error && <div className="mb-3 text-sm text-fail">{error}</div>}
             {turn.isPending && <div className="text-sm text-muted">Thinking…</div>}
+
+            {/* Empty-conversation onboarding: concrete example prompts a
+                first-time user can click to see what they can ask (story 30). */}
+            {!draft && !rca && !turn.isPending && starters && starters.length > 0 && (
+              <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
+            )}
 
             {draft && (
               <DraftView
@@ -194,9 +227,37 @@ export default function AssistantShelf() {
               </button>
             </div>
           </div>
-        </aside>
-      )}
-    </>
+    </aside>
+  )
+}
+
+// Onboarding starter prompts (spec #56 story 30): 3-4 curated examples from the
+// WorkedExample library. Clicking one populates the input with its intent text —
+// nothing is asked or saved until the user hits send.
+function StarterPrompts({
+  examples,
+  onPick,
+}: {
+  examples: WorkedExample[]
+  onPick: (intent: string) => void
+}) {
+  return (
+    <div className="mb-3">
+      <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
+        <Lightbulb size="12" /> Try asking
+      </div>
+      <div className="space-y-2">
+        {examples.slice(0, 4).map((ex) => (
+          <button
+            key={ex.id}
+            className="w-full rounded-lg border border-edge bg-panel p-2 text-left text-sm text-gray-200 hover:border-accent hover:text-white"
+            onClick={() => onPick(ex.intent)}
+          >
+            {ex.intent}
+          </button>
+        ))}
+      </div>
+    </div>
   )
 }
 

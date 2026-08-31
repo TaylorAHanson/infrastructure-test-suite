@@ -121,15 +121,60 @@ WORKED_EXAMPLES: list[dict] = [
 ]
 
 
+# Curated **onboarding** worked examples (spec #56, user stories 30/32): the
+# starter prompts a first-time, untrained user sees when they open the Assistant
+# with an empty conversation. Deliberately read-only, single-sentence intents
+# that make the authoring flow succeed on the first click — distinct from the
+# default Test/Suite catalog content. They carry the ``onboarding`` tag so the
+# shelf can surface exactly these via the existing ``search_examples`` path
+# (``GET /assistant/examples?q=onboarding``).
+ONBOARDING_EXAMPLES: list[dict] = [
+    dict(
+        intent="list the workspace clusters and confirm at least one comes back",
+        title="List clusters",
+        operation=dict(service="clusters", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns at least one cluster",
+        tags=["onboarding", "clusters", "connectivity"]),
+    dict(
+        intent="check which identity the platform is running as",
+        title="Who am I?",
+        operation=dict(service="current_user", method="me", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the current identity",
+        tags=["onboarding", "identity"]),
+    dict(
+        intent="list the jobs in the workspace to confirm access",
+        title="List jobs",
+        operation=dict(service="jobs", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the job list",
+        tags=["onboarding", "jobs"]),
+    dict(
+        intent="confirm a SQL warehouse is up and reachable",
+        title="Warehouse reachable",
+        operation=dict(service="warehouses", method="get", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the warehouse is reachable",
+        tags=["onboarding", "warehouse", "connectivity"]),
+]
+
+
 def _make_check(spec: dict) -> Check:
     return Check(**build_check_fields(CheckCreate(**spec)))
 
 
 def _seed_examples(session: Session) -> int:
-    """Seed the worked-example library (idempotent within a fresh seed)."""
+    """Seed the worked-example library (idempotent within a fresh seed).
+
+    Seeds the gold authoring examples **plus** the curated onboarding starter
+    prompts (:data:`ONBOARDING_EXAMPLES`) — both live in the same library and
+    are grounded/surfaced through the same ``search_examples`` path.
+    """
     if session.exec(select(WorkedExample)).first():
         return 0
-    for spec in WORKED_EXAMPLES:
+    specs = WORKED_EXAMPLES + ONBOARDING_EXAMPLES
+    for spec in specs:
         session.add(WorkedExample(
             intent=spec["intent"], title=spec["title"], description=spec["intent"],
             operation=spec["operation"], handler_key=spec["handler_key"],
@@ -138,7 +183,7 @@ def _seed_examples(session: Session) -> int:
             curated=True,
         ))
     session.commit()
-    return len(WORKED_EXAMPLES)
+    return len(specs)
 
 
 def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> None:
