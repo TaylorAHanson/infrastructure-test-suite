@@ -21,10 +21,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.core import sdk_surface
-from app.models import Check, CheckRun, RunRequest, Target, Test, TestCheck, WorkedExample
+from app.models import Check, CheckRun, RunRequest, Suite, SuiteMember, Target, Test, TestCheck, WorkedExample
 from app.services.roles import normalize_roles
 
 #: Verdict values that represent a failed/bad run outcome (in-memory checks only;
@@ -81,6 +82,39 @@ def search_roles(session: Session, target_ref: str) -> list[dict]:
     if target is None:
         return []
     return [r.to_dict() for r in normalize_roles(target.assumable_roles)]
+
+
+def search_suites(session: Session, query: str = "", limit: int = 10) -> list[dict]:
+    """Return available suites matching a free-text query (name/description/tags).
+
+    Read-only grounding for run-submission proposals: lets the model discover
+    which suites exist and how many tests each contains, so it can propose a
+    sensible run without inventing suite ids.
+    """
+    # One aggregating query for member counts — avoids N+1 selects per suite.
+    counts: dict[str, int] = dict(session.exec(
+        select(SuiteMember.suite_id, func.count(SuiteMember.id))
+        .group_by(SuiteMember.suite_id)
+    ).all())
+    suites = session.exec(select(Suite)).all()
+    q = (query or "").lower().strip()
+
+    def hit(s: Suite) -> bool:
+        if not q:
+            return True
+        hay = " ".join([s.name, s.description,
+                        " ".join(s.tags or [])]).lower()
+        return q in hay
+
+    out = []
+    for s in suites:
+        if not hit(s):
+            continue
+        out.append({
+            "id": s.id, "name": s.name, "description": s.description,
+            "test_count": counts.get(s.id, 0), "deterministic_only": s.deterministic_only,
+        })
+    return out[:limit]
 
 
 def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:

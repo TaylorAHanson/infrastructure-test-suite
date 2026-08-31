@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from app.db.session import get_session
@@ -23,9 +23,13 @@ from app.schemas.schemas import (
     DraftCommitIn,
     ExamplePromoteIn,
     RcaRequestIn,
+    RunProposalIn,
+    RunRequestOut,
     SuiteComposeConfirmIn,
 )
-from app.services import agentic_evaluator, assistant, rca
+from app.core.enums import RequestSource
+from app.schemas.schemas import RunSubmit
+from app.services import agentic_evaluator, assistant, rca, run_service
 from app.services import suite_safety as _suite_safety
 from app.services.assistant import get_model_call
 from app.services.audit import record_audit
@@ -85,6 +89,41 @@ def list_examples(session: Session = Depends(get_session),
         "assertion": ex.assertion, "expectation": ex.expectation.value, "tags": ex.tags,
         "curated": ex.curated, "source_test_id": ex.source_test_id,
     } for ex in session.exec(select(WorkedExample)).all()]
+
+
+@router.post("/run", response_model=RunRequestOut, status_code=202)
+def submit_run_from_proposal(
+    payload: RunProposalIn,
+    background: BackgroundTasks,
+    session: Session = Depends(get_session),
+    actor: str = Query("assistant"),
+) -> RunRequestOut:
+    """Submit a human-confirmed run proposal through the shared run engine.
+
+    The confirmation half of suggest-then-human-confirms for run submission
+    (issue #64 AC #3): routes through ``run_service.submit_request()`` — the
+    exact same path as ``POST /runs`` — so safety-class checks and TargetLease
+    enforcement are identical (AC #2). No new authorization code path.
+    """
+    run_payload = RunSubmit(
+        suite_ids=payload.suite_ids,
+        test_ids=payload.test_ids,
+        target_ids=payload.target_ids,
+        depth=payload.depth,
+        requested_by=actor,
+        request_source=RequestSource.API,
+    )
+    try:
+        request = run_service.submit_request(session, run_payload)
+    except run_service.UnknownTargetError as exc:
+        raise HTTPException(400, str(exc))
+    background.add_task(run_service.process_request, request.id, "assistant-bg")
+    session.refresh(request)
+    return RunRequestOut(
+        id=request.id, run_id=request.id, status=request.status.value,
+        phase=run_service.request_phase(request).value, depth=request.depth,
+        requested_by=request.requested_by, created_at=request.created_at, run_ids=[],
+    )
 
 
 @router.post("/examples/promote", status_code=201)

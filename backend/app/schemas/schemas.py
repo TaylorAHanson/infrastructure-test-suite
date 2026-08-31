@@ -285,6 +285,21 @@ class RcaRequestIn(BaseModel):
     turn: str = ""
 
 
+class RunProposalIn(BaseModel):
+    """A human-confirmed run proposal from the Assistant's run-submission turn.
+
+    This is the *confirm* half of suggest-then-human-confirms for run submission:
+    the user accepts the Assistant's proposed parameters and submits them here.
+    The endpoint routes through ``run_service.submit_request()`` — the same path
+    as ``POST /runs`` — so the same safety-class / TargetLease checks fire.
+    """
+
+    target_ids: list[str] = Field(default_factory=list)
+    suite_ids: list[str] = Field(default_factory=list)
+    test_ids: list[str] = Field(default_factory=list)
+    depth: Depth = Depth.QUICK
+
+
 class SuiteComposeConfirmIn(BaseModel):
     """Confirm a suite composition proposal from a suite tool call (suggest-then-confirm).
 

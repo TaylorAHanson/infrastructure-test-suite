@@ -46,10 +46,9 @@ SQL_PLAN = {
 
 # --------------------------- tool-calling plumbing (#57) ---------------------------
 def test_tool_inventory_is_closed_by_omission():
-    # The registered tool schemas are exactly the 8 read/grounding tools plus the
-    # 4 suite-composition proposal tools (issue #63). No schema exists for a Target
-    # write, /admin/*, Branding, or Webhook action — closed by omission at design
-    # time (a missing schema, not a runtime refusal).
+    # The registered tool schemas are the read/grounding tools plus search_suites (#64)
+    # and 4 suite-composition proposal tools (#63). No schema exists for a Target write,
+    # /admin/*, Branding, or Webhook action — closed by omission at design time.
     from app.services.assistant_graph import TOOL_REGISTRY, TOOL_SCHEMAS
 
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
@@ -57,6 +56,7 @@ def test_tool_inventory_is_closed_by_omission():
         "search_sdk_surface", "search_targets", "search_roles", "search_examples",
         "search_tests",
         "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
+        "search_suites",
         # Suite composition tools (issue #63)
         "compose_suite_add_test", "compose_suite_remove_test",
         "compose_suite_reorder", "compose_suite_toggle_det_only",
@@ -305,6 +305,170 @@ def test_agentic_evaluate_endpoint_cites_field_and_is_advisory(client):
     body = r.json()
     assert body["cited"] is True and body["cited_fields"] == ["row_count"]
     assert body["gating"] is False  # advisory: never gates CI (ADR-0008)
+
+
+# --------------------------- run submission tool (#64) ---------------------------
+def test_run_submission_turn_returns_proposal(client):
+    # The assistant's run-submission mode proposes a Run without executing it
+    # (suggest-then-human-confirms — the user must call POST /assistant/run to act).
+    suites = client.get("/api/v1/suites").json()
+    suite_id = suites[0]["id"]
+    targets = client.get("/api/v1/targets").json()
+    target_id = next(t for t in targets if t["safety_class"] == "read-only")["id"]
+
+    set_model({"run_proposal": {
+        "target_ids": [target_id], "suite_ids": [suite_id],
+        "test_ids": [], "depth": "quick",
+        "summary": "Run the default suite on the read-only target",
+    }})
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "run the default suite on the read-only target",
+        "mode": "run_submission",
+        "page_context": {"page": "runs"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "run_submission"
+    proposal = body["run_proposal"]
+    assert target_id in proposal["target_ids"]
+    assert suite_id in proposal["suite_ids"]
+    # The proposal is NOT a submitted run — no run_id is present in the turn response.
+    assert "run_id" not in body
+
+
+def test_run_submission_turn_asks_clarifying_question_when_slots_missing(client):
+    # When the model can't identify a target or suite it returns a clarifying question.
+    set_model({"clarifying_question": "Which target should I run against?"})
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "run something", "mode": "run_submission",
+        "page_context": {"page": "runs"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "run_submission"
+    assert body["run_proposal"] is None
+    assert body["clarifying_question"]
+
+
+def test_run_submission_confirm_uses_same_safety_path_as_runs(client):
+    # POST /api/v1/assistant/run is the confirmation half of suggest-then-confirms.
+    # It goes through run_service.submit_request() — the exact same path as POST /runs —
+    # so safety-class/TargetLease checks are enforced identically (issue #64 AC #2).
+    targets = client.get("/api/v1/targets").json()
+    target_id = next(t for t in targets if t["safety_class"] == "read-only")["id"]
+    suites = client.get("/api/v1/suites").json()
+    suite_id = suites[0]["id"]
+
+    r = client.post("/api/v1/assistant/run", json={
+        "target_ids": [target_id], "suite_ids": [suite_id],
+        "test_ids": [], "depth": "quick"})
+    assert r.status_code == 202
+    body = r.json()
+    # Returns the same RunRequestOut shape as POST /runs.
+    assert "run_id" in body
+    assert body["phase"] in ("running", "terminal", "queued")
+
+
+def _register_target(client, name, safety_class):
+    return client.post("/api/v1/targets", json={
+        "name": name, "workspace_name": name, "safety_class": safety_class,
+        "identity_handle": "kv/sp",
+    })
+
+
+def _run_submission_verdict(client, run_id: str) -> str:
+    verdict_resource = client.get(f"/api/v1/runs/{run_id}").json()
+    run_ids = verdict_resource.get("run_ids", [])
+    if not run_ids:
+        return verdict_resource.get("verdict", "")
+    return client.get(f"/api/v1/runs/{run_ids[0]}").json()["verdict"]
+
+
+def test_run_submission_blocked_target_matches_direct_runs_behavior(client):
+    # A run submitted via POST /assistant/run respects the same safety gate as
+    # POST /runs: a prod-for-us target with an R2 operation (delete) is blocked.
+    prod = _register_target(client, "prod-rss", "prod-for-us").json()["id"]
+    # An R2 destructive check — blocked on prod-for-us without an override.
+    chk = client.post("/api/v1/checks", json={
+        "display_name": "delete cluster", "handler_key": "databricks_sdk",
+        "operation": {"service": "clusters", "method": "delete"},
+        "assertion": "the cluster is deleted"}).json()["id"]
+    test_body = client.post("/api/v1/tests", json={"name": "cluster-rss-test",
+                                                    "check_ids": [chk]}).json()
+    test_id = test_body["id"]
+    client.post(f"/api/v1/tests/{test_id}/accept")
+
+    # Direct /runs call → BLOCKED_BY_SAFETY.
+    direct_run_id = client.post("/api/v1/runs", json={
+        "test_ids": [test_id], "target_ids": [prod], "depth": "quick"}).json()["run_id"]
+    direct_verdict = _run_submission_verdict(client, direct_run_id)
+    assert direct_verdict == "BLOCKED_BY_SAFETY"
+
+    # Assistant run confirmation → same BLOCKED_BY_SAFETY outcome (reuses the same gate).
+    r = client.post("/api/v1/assistant/run", json={
+        "target_ids": [prod], "test_ids": [test_id], "suite_ids": [], "depth": "quick"})
+    assert r.status_code == 202
+    assist_verdict = _run_submission_verdict(client, r.json()["run_id"])
+    assert assist_verdict == "BLOCKED_BY_SAFETY"
+
+
+def test_run_submission_readonly_target_allowed_matches_direct_runs(client):
+    # A read-only target (no mutation risk) is allowed by both paths and never locks.
+    targets = client.get("/api/v1/targets").json()
+    ro = next(t for t in targets if t["safety_class"] == "read-only")["id"]
+    suites = client.get("/api/v1/suites").json()
+    suite_id = suites[0]["id"]
+
+    # Direct /runs call.
+    direct_run_id = client.post("/api/v1/runs", json={
+        "target_ids": [ro], "suite_ids": [suite_id], "depth": "quick"}).json()["run_id"]
+    direct_phase = client.get(f"/api/v1/runs/{direct_run_id}").json()["phase"]
+
+    # Assistant confirmation.
+    r = client.post("/api/v1/assistant/run", json={
+        "target_ids": [ro], "suite_ids": [suite_id], "test_ids": [], "depth": "quick"})
+    assert r.status_code == 202
+    assist_run_id = r.json()["run_id"]
+    assist_phase = client.get(f"/api/v1/runs/{assist_run_id}").json()["phase"]
+
+    # Both routes reach a terminal phase (never permanently queued on a read-only target).
+    assert direct_phase == "terminal"
+    assert assist_phase == "terminal"
+
+
+def test_run_submission_unknown_target_returns_400(client):
+    # An unknown target is a hard error (ADR-0005 §3), same as the direct /runs path.
+    r = client.post("/api/v1/assistant/run", json={
+        "target_ids": ["tgt_does_not_exist"], "test_ids": [], "suite_ids": []})
+    assert r.status_code == 400
+
+
+def test_run_submission_queues_on_held_lease_matching_direct_runs(client):
+    # AC #2 — TargetLease parity: a run via POST /assistant/run queues (non-terminal)
+    # when the target's lease is held, exactly as POST /runs does (ADR-0011).
+    from app.db.session import session_scope
+    from app.services import locking
+
+    sandbox = _register_target(client, "sbx-lease-test", "sandbox").json()["id"]
+    suites = client.get("/api/v1/suites").json()
+    suite_id = suites[0]["id"]
+
+    # Simulate another run holding the lease.
+    with session_scope() as s:
+        assert locking.acquire(s, sandbox, holder="req-other") is True
+
+    r = client.post("/api/v1/assistant/run", json={
+        "target_ids": [sandbox], "suite_ids": [suite_id], "test_ids": [], "depth": "quick"})
+    assert r.status_code == 202
+    phase = client.get(f"/api/v1/runs/{r.json()['run_id']}").json()["phase"]
+    # Queued (a non-terminal phase) while the lease is held — never a PASS or refusal.
+    assert phase == "queued"
+
+    # Free the lease and drain: the queued run finishes.
+    with session_scope() as s:
+        locking.release(s, sandbox, holder="req-other")
+    from app.services import run_service
+    run_service.drain_queued()
+    done = client.get(f"/api/v1/runs/{r.json()['run_id']}").json()
+    assert done["phase"] == "terminal"
 
 
 # --------------------------- search_tests (#62) ---------------------------
