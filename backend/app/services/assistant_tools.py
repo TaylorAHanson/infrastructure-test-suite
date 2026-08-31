@@ -24,7 +24,7 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from app.core import sdk_surface
-from app.models import CheckRun, Target, WorkedExample
+from app.models import Check, CheckRun, RunRequest, Target, Test, TestCheck, WorkedExample
 from app.services.roles import normalize_roles
 
 
@@ -94,6 +94,41 @@ def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:
     } for ex in hits[:limit]]
 
 
+def search_tests(session: Session, query: str = "", status: Optional[str] = None,
+                 limit: int = 10) -> list[dict]:
+    """Search Tests (and their member Checks) by name, description, operation, tags, status."""
+    tests = session.exec(select(Test)).all()
+    q = (query or "").lower().strip()
+    terms = [t for t in q.replace(",", " ").split() if len(t) > 2] if q else []
+
+    results: list[dict] = []
+    for test in tests:
+        if status and status != "all" and test.status.value != status:
+            continue
+        tc_rows = session.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()
+        checks = [session.get(Check, tc.check_id) for tc in tc_rows]
+        checks = [c for c in checks if c]
+        ops_text = " ".join(
+            f"{c.operation.get('service', '')}.{c.operation.get('method', '')} "
+            f"{c.display_name} {c.description}"
+            for c in checks
+        )
+        hay = " ".join([test.name, test.description, " ".join(test.tags or []),
+                        ops_text]).lower()
+        if terms and not any(t in hay for t in terms):
+            continue
+        op_summary = None
+        if checks:
+            op = checks[0].operation or {}
+            op_summary = f"{op.get('service', '')}.{op.get('method', '')}".strip(".")
+        results.append({
+            "id": test.id, "name": test.name, "description": test.description,
+            "tags": test.tags or [], "status": test.status.value,
+            "operation_summary": op_summary, "check_count": len(checks),
+        })
+    return results[:limit]
+
+
 def operation_reference(service: str, method: str) -> Optional[dict]:
     """Look up one SDK-surface operation (verb, stages, hints) — read-only.
 
@@ -109,8 +144,15 @@ def operation_reference(service: str, method: str) -> Optional[dict]:
 # Read-path / RCA tools — strictly read-only, advisory
 # ---------------------------------------------------------------------------
 def run_history(session: Session, *, check_id: Optional[str] = None,
-                target_id: Optional[str] = None, limit: int = 20) -> list[dict]:
-    """Recent CheckRuns for a (check, target), newest first — read-only."""
+                target_id: Optional[str] = None,
+                limit: int = 20) -> "list[dict] | dict":
+    """Recent CheckRuns for a (check, target), newest first — read-only.
+
+    When called with no ``check_id`` or ``target_id``, returns a global summary
+    of the most recent RunRequest across all suites.
+    """
+    if not check_id and not target_id:
+        return _global_run_summary(session)
     stmt = select(CheckRun)
     if check_id:
         stmt = stmt.where(CheckRun.check_id == check_id)
@@ -119,6 +161,38 @@ def run_history(session: Session, *, check_id: Optional[str] = None,
     stmt = stmt.order_by(CheckRun.created_at.desc())  # type: ignore[attr-defined]
     rows = session.exec(stmt).all()[:limit]
     return [_run_summary(r) for r in rows]
+
+
+def _global_run_summary(session: Session) -> dict:
+    """Aggregate summary of the most recent RunRequest — no IDs required."""
+    req = session.exec(select(RunRequest).order_by(RunRequest.created_at.desc())).first()  # type: ignore[attr-defined]
+    if req is None:
+        return {"message": "No runs have been executed yet."}
+    runs = session.exec(select(CheckRun).where(CheckRun.request_id == req.id)).all()
+    counts: dict[str, int] = {"pass": 0, "fail": 0, "error": 0, "blocked": 0, "pending": 0}
+    for r in runs:
+        v = r.verdict.value.upper()
+        if v == "PASS":
+            counts["pass"] += 1
+        elif v == "FAIL":
+            counts["fail"] += 1
+        elif v == "ERROR":
+            counts["error"] += 1
+        elif "BLOCKED" in v:
+            counts["blocked"] += 1
+        else:
+            counts["pending"] += 1
+    top_failures = [_run_summary(r) for r in runs
+                    if r.verdict.value in ("FAIL", "ERROR", "BLOCKED_BY_SAFETY")][:5]
+    return {
+        "request_id": req.id,
+        "created_at": req.created_at.isoformat() if req.created_at else None,
+        "status": req.status.value,
+        "git_sha": req.git_sha,
+        "total": len(runs),
+        **counts,
+        "top_failures": top_failures,
+    }
 
 
 def commit_provenance_thread(session: Session, *, check_id: str,
