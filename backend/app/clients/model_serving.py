@@ -128,10 +128,7 @@ def chat_with_tools(
         )
 
     body: dict = {
-        "messages": [{"role": m.get("role", "user"), "content": m.get("content", ""),
-                      **({"tool_call_id": m["tool_call_id"]} if m.get("tool_call_id") else {}),
-                      **({"name": m["name"]} if m.get("name") else {})}
-                     for m in messages],
+        "messages": [_wire_message(m) for m in messages],
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
@@ -153,6 +150,16 @@ def chat_with_tools(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Model serving tool-call failed on '%s': %s", name, exc)
         raise ModelServingError(str(exc)) from exc
+
+
+def _wire_message(m: dict) -> dict:
+    """One chat message in OpenAI wire shape, carrying tool-reply fields if set."""
+    wire = {"role": m.get("role", "user"), "content": m.get("content", "")}
+    if m.get("tool_call_id"):
+        wire["tool_call_id"] = m["tool_call_id"]
+    if m.get("name"):
+        wire["name"] = m["name"]
+    return wire
 
 
 def _parse_reply(raw: Any, name: str) -> ModelReply:

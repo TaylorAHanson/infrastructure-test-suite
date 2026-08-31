@@ -101,7 +101,7 @@ TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
 }
 
 
-def _fn(name: str, description: str, properties: dict, required: Optional[list] = None) -> dict:
+def _function_schema(name: str, description: str, properties: dict, required: Optional[list] = None) -> dict:
     return {"type": "function", "function": {
         "name": name, "description": description,
         "parameters": {"type": "object", "properties": properties,
@@ -111,32 +111,32 @@ def _fn(name: str, description: str, properties: dict, required: Optional[list] 
 #: OpenAI-style function schemas the pinned model chooses from. This list is the
 #: whole surface the model can act through — see the module docstring on closure.
 TOOL_SCHEMAS: list[dict] = [
-    _fn("search_sdk_surface",
+    _function_schema("search_sdk_surface",
         "Search the live Databricks SDK/OpenAPI surface (minus the blocklist) for "
         "operations matching a plain-English query.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
-    _fn("search_targets",
+    _function_schema("search_targets",
         "Find registered targets by free-text over name/workspace/host/tags.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}),
-    _fn("search_roles",
+    _function_schema("search_roles",
         "List the assumable role-profiles a target has registered (never invents one).",
         {"target_ref": {"type": "string", "description": "target id or name"}},
         ["target_ref"]),
-    _fn("search_examples",
+    _function_schema("search_examples",
         "Rank the worked-example library against an authoring intent.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
-    _fn("run_history",
+    _function_schema("run_history",
         "Recent CheckRuns, newest first; callable with no ids for the latest runs.",
         {"check_id": {"type": "string"}, "target_id": {"type": "string"},
          "limit": {"type": "integer"}}),
-    _fn("commit_provenance_thread",
+    _function_schema("commit_provenance_thread",
         "The last-green → first-bad thread for a (check, target).",
         {"check_id": {"type": "string"}, "target_id": {"type": "string"}}, ["check_id"]),
-    _fn("failure_archive",
+    _function_schema("failure_archive",
         "Prior occurrences of a failure bucket @ stage across runs.",
         {"bucket": {"type": "string"}, "stage": {"type": "string"},
          "limit": {"type": "integer"}}),
-    _fn("operation_reference",
+    _function_schema("operation_reference",
         "Look up one SDK-surface operation (verb, stages, hints) by service.method.",
         {"service": {"type": "string"}, "method": {"type": "string"}},
         ["service", "method"]),
