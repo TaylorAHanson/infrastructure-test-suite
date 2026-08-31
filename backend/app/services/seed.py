@@ -1,10 +1,13 @@
 """Seed data: Check/Test/Suite exemplars so the app is useful on first boot.
 
 Idempotent: if any Check exists, seeding is skipped. The exemplars are a
-worked-example library (ADR-0006) covering the shapes the model must express:
-a deterministic connectivity Check, a functional (row-count) Check, an
-open-SDK mutating Check with a **counterfactual** pair, and an **agentic**
-(non-compilable → advisory) Check.
+**tutorial/worked-example library** (ADR-0006, demoted by Spec #91) covering
+the authoring shapes the model must express: a deterministic connectivity
+Check, a functional (row-count) Check, an open-SDK mutating Check with a
+**counterfactual** pair, and an **agentic** (non-compilable → advisory)
+Check. They carry :data:`TUTORIAL_TAGS` so they're distinguishable from the
+real posture catalog (:data:`CATALOG_CHECK_SPECS`) that later slices of
+Spec #91 add alongside them, without disturbing the exemplars.
 """
 from __future__ import annotations
 
@@ -28,7 +31,15 @@ from app.services.authoring import build_check_fields
 logger = logging.getLogger(__name__)
 
 
+# Applied (via ``hints["tags"]`` on Checks, ``tags`` on Tests) to every exemplar
+# below so a fresh boot's catalog is clearly labelled as tutorial content, not
+# the operator's real validation battery (Spec #91).
+TUTORIAL_TAGS: list[str] = ["tutorial", "example"]
+
+
 # (key, CheckCreate kwargs). ``key`` is a local handle used to wire Tests below.
+# Tutorial/worked-example Checks only — see CATALOG_CHECK_SPECS below for the
+# real posture catalog's home.
 CHECK_SPECS: list[tuple[str, dict]] = [
     ("sql_healthcheck", dict(
         display_name="SQL warehouse healthcheck",
@@ -102,6 +113,24 @@ CHECK_SPECS: list[tuple[str, dict]] = [
         # so asserting a non-empty result would false-fail a clean install.
         assertion="the call returns the warehouse list without error")),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Real posture catalog (Spec #91) — the distinct home later slices extend.
+#
+# Same shape as CHECK_SPECS above: (key, CheckCreate kwargs), seeded through
+# the identical build_check_fields() path (_make_check), so every entry a
+# future slice appends here inherits the same compiler-derived guarantees
+# (evaluator, risk tier, R3 refusal) as the tutorial exemplars — but WITHOUT
+# TUTORIAL_TAGS, since this becomes the headline catalog, not the worked
+# examples. Real-catalog Tests/Suites are wired the same way further down
+# (see the matching comment markers in seed_all): append to the ``tests``
+# dict / call make_suite() without passing ``tutorial=True``.
+#
+# Empty until the next slice (Security Posture + CI Gate rework, per #91's
+# suggested phasing). Adding entries here never touches CHECK_SPECS above.
+# ---------------------------------------------------------------------------
+CATALOG_CHECK_SPECS: list[tuple[str, dict]] = []
 
 
 # The repo-seeded worked-example library (ADR-0006 §9): gold Tests the Assistant
@@ -182,7 +211,15 @@ ONBOARDING_EXAMPLES: list[dict] = [
 ]
 
 
-def _make_check(spec: dict) -> Check:
+def _make_check(spec: dict, *, tags: list[str] | None = None) -> Check:
+    """Build a Check from a spec, optionally stamping ``hints["tags"]``.
+
+    Check has no dedicated tags column (unlike Test/Suite); ``hints`` is the
+    existing free-form grounding-metadata field, so tutorial/example tagging
+    rides there rather than adding a migration for this prefactor.
+    """
+    if tags:
+        spec = {**spec, "hints": {**spec.get("hints", {}), "tags": tags}}
     return Check(**build_check_fields(CheckCreate(**spec)))
 
 
@@ -225,6 +262,12 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     logger.info("Seeding Check/Test/Suite exemplars...")
     checks: dict[str, Check] = {}
     for key, spec in CHECK_SPECS:
+        check = _make_check(spec, tags=TUTORIAL_TAGS)
+        session.add(check)
+        checks[key] = check
+    # Real posture catalog (Spec #91) — empty today; a future slice's entries
+    # land here, in the same ``checks`` dict, minted without TUTORIAL_TAGS.
+    for key, spec in CATALOG_CHECK_SPECS:
         check = _make_check(spec)
         session.add(check)
         checks[key] = check
@@ -233,9 +276,12 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
         session.refresh(check)
 
     # Tests: target-agnostic bundles, one carrying a counterfactual pair.
+    # ``tutorial=True`` stamps TUTORIAL_TAGS; later slices adding real posture
+    # Tests to this same dict call make_test(..., tutorial=False) (the default).
     def make_test(name: str, description: str, members: list[tuple[str, str]],
-                  tags: list[str]) -> Test:
-        test = Test(name=name, description=description, tags=tags)
+                  tags: list[str], tutorial: bool = False) -> Test:
+        test = Test(name=name, description=description,
+                    tags=[*tags, *TUTORIAL_TAGS] if tutorial else tags)
         session.add(test)
         session.commit()
         session.refresh(test)
@@ -248,23 +294,29 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
 
     tests = {
         "sql": make_test("SQL Warehouse validation", "Warehouse reachable + returns rows.",
-                         [("sql_healthcheck", "assertion")], ["sql", "consumer", "connectivity"]),
+                         [("sql_healthcheck", "assertion")], ["sql", "consumer", "connectivity"],
+                         tutorial=True),
         "uc": make_test("Unity Catalog access", "UC access via the SQL warehouse.",
-                        [("uc_listing", "assertion")], ["uc", "consumer", "governance"]),
+                        [("uc_listing", "assertion")], ["uc", "consumer", "governance"],
+                        tutorial=True),
         "egress": make_test("Egress connectivity", "Outbound HTTPS egress works.",
-                            [("egress_example", "assertion")], ["consumer", "egress"]),
+                            [("egress_example", "assertion")], ["consumer", "egress"],
+                            tutorial=True),
         "policy": make_test("Cluster policy enforcement", "Compliant allowed; non-compliant denied.",
                             [("cluster_create_allowed", "assertion"),
-                             ("cluster_create_denied", "counterfactual")], ["processing", "policy", "safety"]),
+                             ("cluster_create_denied", "counterfactual")], ["processing", "policy", "safety"],
+                            tutorial=True),
         "self": make_test("Platform self-check", "The app's own store + a health read.",
                           [("lakebase_txn", "assertion"),
-                           ("warehouse_healthy_ish", "assertion")], ["platform"]),
+                           ("warehouse_healthy_ish", "assertion")], ["platform"],
+                          tutorial=True),
         # --- Producer-category tests ----------------------------------------
         "producer": make_test(
             "Producer ingestion access",
             "Databricks Jobs and DLT pipelines are reachable — the ingestion layer is up.",
             [("jobs_list", "assertion"), ("pipelines_list", "assertion")],
             ["producer", "ingestion", "connectivity"],
+            tutorial=True,
         ),
         # --- Processing-category tests --------------------------------------
         "processing": make_test(
@@ -272,7 +324,11 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
             "SQL warehouses can be enumerated — the compute processing tier is reachable.",
             [("warehouses_list", "assertion")],
             ["processing", "compute", "connectivity"],
+            tutorial=True,
         ),
+        # --- Real posture Tests (Spec #91) -----------------------------------
+        # Later slices add entries to this dict here, via make_test(...) without
+        # tutorial=True, wiring CATALOG_CHECK_SPECS checks into Suites below.
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -300,6 +356,11 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
                ["processing", "policy"], tags=["seeded", "processing"])
     make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
                ["sql", "uc", "egress"], tags=["seeded", "consumer"])
+    # Real posture Suites (Security Posture, Identity & Access, Governance/UC,
+    # a reworked CI Gate, Sandbox Functional — Spec #91) are added here by
+    # later slices via make_suite(), the same helper used above — the lane
+    # Suites above (Producer/Processing/Consumer) also grow in place as their
+    # slices land, without disturbing the tutorial Tests they already carry.
 
     if with_demo_targets:
         for t in [
