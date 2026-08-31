@@ -96,6 +96,63 @@ def test_turn_resolves_via_scripted_tool_call_sequence(client):
     assert calls["n"] >= 2  # looped: tool step, then the answering step
 
 
+# --------------------------- tool-call transparency + next actions (#65) --------
+def test_turn_next_actions_are_registry_keyed():
+    # The dynamic button set is driven generically by the tool registry — every
+    # next-action builder is keyed by a real tool name, never a per-capability
+    # hardcoded set. A builder for a non-tool would be dead weight.
+    from app.services.assistant_graph import NEXT_ACTION_BUILDERS, TOOL_REGISTRY
+
+    assert set(NEXT_ACTION_BUILDERS) <= set(TOOL_REGISTRY)
+
+
+def test_turn_surfaces_navigate_next_action_from_run_history(client):
+    # A turn that calls run_history surfaces a "view run history" navigate action,
+    # derived from the tool that ran — additive alongside mode/draft/tool_calls.
+    def script(messages):
+        return {"tool_calls": [{"name": "run_history", "arguments": {}}]} \
+            if messages[-1]["role"] != "tool" else SQL_PLAN
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "what happened last run?", "page_context": {"page": "test-studio"}})
+    assert r.status_code == 200
+    body = r.json()
+    # tool_calls is additive and does not break the mode/draft shape.
+    assert body["mode"] == "authoring" and "draft" in body
+    assert "run_history" in [t["name"] for t in body["tool_calls"]]
+    actions = body["next_actions"]
+    assert any(a["kind"] == "navigate" and a["href"] == "/runs" for a in actions)
+
+
+def test_empty_search_offers_author_next_action(client):
+    # When a grounding search comes back empty, the shelf offers "Author this
+    # test" (spec #56 story 7) — generic, from the search tool's empty result.
+    def script(messages):
+        return {"tool_calls": [{"name": "search_sdk_surface",
+                                "arguments": {"query": "zzzz nonexistent qqqq"}}]} \
+            if messages[-1]["role"] != "tool" else SQL_PLAN
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "do we have a test for zzzz nonexistent qqqq?",
+        "page_context": {"page": "test-studio"}})
+    body = r.json()
+    author = [a for a in body["next_actions"] if a["kind"] == "author"]
+    assert author and author[0]["seed"].startswith("Create a new test that")
+
+
+def test_next_actions_dedupe_across_repeated_tool_calls():
+    from app.services.assistant_graph import build_next_actions
+
+    executed = [
+        {"name": "run_history", "arguments": {}, "result": []},
+        {"name": "run_history", "arguments": {"check_id": "c1"}, "result": []},
+    ]
+    actions = build_next_actions(executed)
+    assert len([a for a in actions if a["href"] == "/runs"]) == 1
+
+
 # --------------------------- authoring turn ---------------------------
 def test_turn_authoring_returns_valid_draft(client):
     set_model(SQL_PLAN)
