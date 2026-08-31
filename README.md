@@ -1,90 +1,129 @@
 # Databricks Regression Validation Platform
 
-A Databricks-native **regression and connectivity validation platform** for AWS
-workspaces. It is **not** a unit-test project. For each test case it answers two
-questions:
+A Databricks-native **regression and connectivity validation platform**. It is
+**not** a unit-test project. For a given Check it answers two questions,
+derived from *where* a failure occurred rather than asserted directly:
 
-1. **Does it work?** (functional)
-2. **Is it connectable?** (auth + DNS + routing + handshake + permission precheck)
+1. **Is it connectable?** (resolve + connect + TLS + auth + authorize)
+2. **Does it work?** (the operation itself, and its result)
 
-It validates Terraform / AWS / Databricks changes - especially network and
-private-connectivity changes (PrivateLink, NCC, DNS, allowlists, auth, resource
-bindings) - across **Producer**, **Processing**, and **Consumer** test
-categories, using metadata-driven, plugin-based probes.
+The full vocabulary — Handler, Check, Test, Suite, Depth, Evaluator, and every
+other term used below — is defined once, precisely, in
+[`CONTEXT.md`](CONTEXT.md). That file is the source of truth; if this README
+ever seems to disagree with it, CONTEXT.md wins.
 
 ## Architecture
 
 A single **FastAPI** process is the control plane and result store. It serves
 the REST API and a built **React/Vite** bundle (Node is used only at build
-time). Operational state lives in **Lakebase** (Postgres); analytical rollups
-are **Unity Catalog views** queried via **Databricks SQL**; heavy/scheduled work
-runs on **Databricks Jobs**. A **remote-agent** protocol lets external vantage
-points (Power BI, Tableau, on-prem) report signed results back, because an
-in-app run cannot prove outside-in connectivity.
+time). Operational state — Targets, Checks, Tests, Suites, Runs, the audit
+log — lives in **Lakebase** (Postgres); analytical rollups are **Unity
+Catalog views** queried via **Databricks SQL**. Runs execute **in-app**, with
+bounded concurrency — there is no Databricks Job fan-out; the one Databricks
+**Job** in the system just triggers the nightly `full` Run through the same
+Run API everything else uses. There is no remote-agent subsystem — every Run
+executes from inside the app, against the Databricks control/data plane.
 
 ```
 React (Vite)  ->  build  ->  backend/static
                                   |
-Operator/Schedule -> FastAPI control plane (/api/v1)
-                       |-> Lakebase (definitions, runs, steps, audit, schedules)
-                       |-> poller/worker -> executors (APP_INLINE, SQL_WAREHOUSE, ...)
-                       |-> Databricks Jobs (scheduled / heavy fan-out)
-                       |-> UC views + Databricks SQL (charts)
+CI / GUI / nightly Job -> POST/GET /api/v1/runs (Run API) -> FastAPI control plane
+                       |-> Lakebase (targets, checks, tests, suites,
+                       |             runs, leases, audit, branding)
+                       |-> in-app poller/run engine -> Handlers
+                       |      (databricks_sdk, sql_warehouse,
+                       |       outbound_http, lakebase)
+                       |      -> Databricks resources
+                       |-> Databricks Job (nightly trigger only,
+                       |      databricks/jobs/run_suite.py, calls same Run API)
+                       |-> Assistant (single agent, authoring + triage)
+                       |-> completed run w/ findings -> webhook POST
+                       |-> UC views + Databricks SQL (analytical rollups)
                        |-> App telemetry -> UC otel_logs/otel_spans/otel_metrics
-Remote agents (BI / on-prem) -> signed results -> /api/v1/agents/results
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for detail.
 
 ### Key design principles
 
-- **Two questions, not assertions**: every probe separates `connectable` from
-  `functional`, across three modes: `PREFLIGHT`, `SMOKE`, `FULL`.
-- **Metadata-driven**: a new test is mostly a definition row + a small executor
-  plugin registered under an `executor_key`. See
-  [`backend/app/executors`](backend/app/executors).
-- **Durable history**: app logs are ephemeral on Databricks Apps; durable run
-  history and audit live in Lakebase / Unity Catalog.
-- **Databricks-native auth**: OAuth service-principal identity injected by the
-  platform. **No PATs** for app-to-Databricks auth.
-- **Orchestrate, don't block**: the web process submits/queries; the poller and
-  Databricks Jobs do heavy validation.
+- **Connectable vs. functional, derived, not asserted**: every Check's result
+  maps onto the canonical stage spine `RESOLVE -> CONNECT -> TLS ->
+  AUTHENTICATE -> AUTHORIZE -> OPERATE -> VERIFY`; connectable/functional is a
+  derived view over the stage reached, not a stored primitive.
+- **Deterministic gates, agentic advises**: a Check's assertion is judged by a
+  `deterministic` evaluator (structured predicate, same evidence -> same
+  verdict — the only kind that can gate CI) or an `agentic` one (a pinned LLM
+  judge, always advisory, never a fail-closed gate input).
+- **One dial, one Run, one verdict**: `Depth` (`quick`/`full`) is the only
+  knob for how far up the stage spine a Run goes. Defaults to `quick`; `full`
+  is always an explicit opt-in.
+- **Open-SDK authoring, identity-bounded safety**: a Test's operation is any
+  Databricks SDK/API call, not a curated manifest entry. The primary blast
+  radius bound is the least-privilege per-target service principal; a coarse
+  risk tier checked against the target's safety class is the secondary cap; a
+  global blocklist is the R3-never floor.
+- **Handler = the pluggable unit**: a Handler performs one kind of operation
+  against a bound Target. Four ship today —
+  [`backend/app/executors/builtin`](backend/app/executors/builtin).
+- **Durable history**: app logs are ephemeral on Databricks Apps; run history
+  and the audit log live in Lakebase.
+- **Databricks-native auth**: the injected App service-principal OAuth
+  identity (or a locally-configured CLI profile). No PATs for app-to-Databricks
+  auth.
+- **Orchestrate, don't block**: the web process submits/queries; the in-app
+  poller executes Runs with bounded concurrency. CI, the GUI, and the nightly
+  Databricks Job are all just callers of the same Run API — none of them
+  execute Runs themselves.
 
 ## Repository layout
 
 ```
-backend/            FastAPI app, executors, services, poller, migrations
-  app/core          enums, config (dual-mode auth), logging, ids
-  app/models        SQLModel tables (operational system of record)
-  app/executors     Executor ABC + registry + built-in probes + stubs
-  app/services      run engine, scheduling, audit, analytics, seed
-  app/workers       async poller
+backend/            FastAPI app, handlers, services, poller, migrations
+  app/core          enums, canonical stage spine + failure taxonomy (data,
+                    not enums), open-SDK operation model + blocklist, config
+  app/models        SQLModel tables (Check, Test, Suite, Target, RunRequest,
+                    CheckRun, StageOutcome, TargetLease, AuditEvent, ...)
+  app/executors     Handler ABC + registry (keyed by handler_key) + builtins
+  app/services      run engine, target locking, safety gate, risk tiering,
+                     authoring, assertion compiler, agentic evaluator,
+                     findings, flaky detection, retention, audit, versioning,
+                     the Assistant (graph + tools), webhook, branding, seed
+  app/workers       async poller (claims + dispatches Run requests)
   app/api/v1        REST routers
-  migrations        Alembic (0001_init)
+  migrations        Alembic
   run.py            entrypoint (uvicorn, binds 0.0.0.0:$PORT)
 src/                React + TypeScript + Vite frontend (builds to backend/static)
-shared/             cross-cutting contracts (enums.json, remote-agent protocol)
-databricks/jobs     run_suite.py (scheduled/heavy Databricks Job entrypoint)
+shared/             cross-cutting contracts (enums.json mirrors core/enums.py)
+databricks/jobs     run_suite.py (the nightly suite-runner Job entrypoint;
+                    just another caller of the shared Run API)
 infra/sql           Unity Catalog / Databricks SQL analytical views
-docs/               architecture, deployment, PrivateLink/NCC troubleshooting
-tests/              backend tests (registry, executors, run lifecycle)
+docs/               architecture, deployment, ADRs, PrivateLink/NCC troubleshooting
+tests/              backend tests (registry, safety gate, locking, run
+                    lifecycle, authoring, the Assistant, ...)
 databricks.yml      Databricks Asset Bundle (Lakebase, App, Job, targets)
 app.yaml            direct-deploy app config (bundle config.command supersedes)
-dev.sh              local dev (backend :8000 + vite :5173)
+dev.sh              local dev (backend + Vite, auto-selecting free ports)
 ```
 
 ## Local development
 
 ```bash
 ./dev.sh
-# backend  -> http://localhost:8000  (OpenAPI at /docs)
-# frontend -> http://localhost:5173  (proxies /api to :8000)
 ```
 
-`dev.sh` creates the Python venv, installs deps, and runs both processes. With
-no Databricks binding the app runs in **demo mode**: SQLite + simulated
-executors, seeded with the full test catalog and synthetic history so the
-dashboard renders immediately.
+`dev.sh` creates the Python venv, installs deps, and runs the FastAPI backend
+and the Vite dev server concurrently (auto-selecting a free port pair per
+worktree; see the script for the offset/override knobs).
+
+By default `dev.sh` points the app at a **real Databricks workspace** using
+your CLI profile (`DATABRICKS_PROFILE`, default `myenv`) so Checks run for
+real, not simulated. Set `RV_LOCAL_DEMO=1` to force offline/simulated mode
+instead. Either way, on first boot the app seeds a worked-example library —
+a handful of Checks/Tests/Suites covering SQL warehouse access, Unity
+Catalog listing, outbound egress, a cluster-policy counterfactual pair, and a
+Lakebase self-check — so the catalog and the Assistant have something to
+ground on immediately. **It does not seed any Runs**: a fresh boot's "What's
+Interesting" view is genuinely empty until you trigger a Run yourself.
 
 Run the backend tests:
 
@@ -114,9 +153,10 @@ databricks bundle run regression-validation -t dev   # open the app
 The bundle ([`databricks.yml`](databricks.yml)) provisions:
 
 - a **Lakebase** database instance (`prevent_destroy`),
-- the **App** with `postgres` + `sql-warehouse` resources and minimal
-  `user_api_scopes`, running `python backend/run.py`,
-- a **suite-runner Job** (nightly cron) that executes scheduled fan-out.
+- the **App** with `postgres`, `sql-warehouse`, and `serving-endpoint`
+  resources and minimal `user_api_scopes`, running `python backend/run.py`,
+- a **suite-runner Job** (nightly cron) that calls the same Run API at
+  `depth=full`.
 
 Then create the analytical views (replace the placeholders - see
 [`infra/sql/README.md`](infra/sql/README.md)) and enable **App telemetry to
@@ -127,22 +167,17 @@ See [`docs/deployment.md`](docs/deployment.md) for the full flow, including the
 
 ## PrivateLink / NCC troubleshooting
 
-Network failures are normalized into a root-cause taxonomy and surfaced in the
-UI (PrivateLink-specific failure views) and in
+Network failures are normalized into the failure taxonomy and surfaced in the
+UI. See
 [`docs/privatelink-ncc-troubleshooting.md`](docs/privatelink-ncc-troubleshooting.md),
 which maps each bucket (DNS, NCC, network-policy deny, endpoint-not-established,
 TLS handshake, OAuth scope, ...) to a concrete remediation.
 
-## What it validates (seeded catalog)
+## What it validates
 
-- **Producer**: Fivetran / IICS -> `sales_dev.temp`, Auto Loader smoke, Oracle
-  Federation, other inbound.
-- **Processing**: all-purpose / job / serverless compute, SQL Warehouse Pro &
-  Serverless, Model Serving, Databricks Apps, Lakebase, GitHub, external
-  catalog, Genie, Agent (enterprise-only).
-- **Consumer**: Power BI, Tableau, Salesforce, TM1, Oracle outbound, N8N, other
-  outbound.
-
-Four executors ship live (`sql_warehouse_smoke`, `lakebase_smoke`,
-`outbound_http`, `remote_agent`); the rest are seeded as metadata with
-capability-gated stubs that SKIP cleanly until a real plugin is registered.
+Four Handlers ship live — `databricks_sdk` (open-SDK: any Databricks SDK/API
+call, bounded by the blocklist), `sql_warehouse`, `outbound_http`, and
+`lakebase` (see [`backend/app/executors/builtin`](backend/app/executors/builtin)).
+The repo ships a worked-example library of Checks, Tests, and Suites built on
+those four Handlers — Test Studio and the Assistant are how you grow the
+catalog from there; a new Test does not require a new Handler.
