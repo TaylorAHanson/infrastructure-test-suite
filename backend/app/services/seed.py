@@ -98,7 +98,9 @@ CHECK_SPECS: list[tuple[str, dict]] = [
         description="List all SQL warehouses to confirm the compute processing tier can be enumerated.",
         operation=OperationIn(service="warehouses", method="list", verb="GET", params={}),
         handler_key="databricks_sdk",
-        assertion="the call returns at least one warehouse")),
+        # Reachability assertion only — a fresh workspace may have zero warehouses,
+        # so asserting a non-empty result would false-fail a clean install.
+        assertion="the call returns the warehouse list without error")),
 ]
 
 
@@ -286,8 +288,8 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
         session.commit()
         return suite
 
-    make_suite("Connectivity Suite", "Reachability across producer, processing, and consumer paths.",
-               ["producer", "processing", "egress", "sql", "uc"])
+    make_suite("Connectivity Suite", "Reachability across producer/consumer paths.",
+               ["egress", "sql", "uc"])
     make_suite("Full Regression", "Every seeded Test.", list(tests.keys()))
     make_suite("CI Gate", "Deterministic-only gate for the CI trigger.",
                ["sql", "policy"], deterministic_only=True, tags=["seeded", "ci"])
@@ -295,11 +297,10 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
     make_suite("Producer Suite", "Ingestion and pipeline layer reachability.",
                ["producer"], tags=["seeded", "producer"])
     make_suite("Processing Suite", "Compute and policy layer validation.",
-               ["processing", "policy", "self"], tags=["seeded", "processing"])
+               ["processing", "policy"], tags=["seeded", "processing"])
     make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
                ["sql", "uc", "egress"], tags=["seeded", "consumer"])
 
-    _suite_count = 6
     if with_demo_targets:
         for t in [
             Target(name="aws-prod (read-only)", workspace_name="aws-prod-workspace",
@@ -312,5 +313,7 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
             session.add(t)
         session.commit()
 
+    from sqlmodel import select as _select
+    suite_count = len(session.exec(_select(Suite)).all())
     logger.info("Seed complete: %d checks, %d tests, %d suites.",
-                len(checks), len(tests), _suite_count)
+                len(checks), len(tests), suite_count)

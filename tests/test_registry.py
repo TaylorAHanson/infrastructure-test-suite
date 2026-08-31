@@ -45,9 +45,10 @@ def test_every_seeded_check_resolves_a_handler(seeded_session):
     from sqlmodel import select
 
     from app.models import Check
+    from app.services.seed import CHECK_SPECS
 
     checks = seeded_session.exec(select(Check)).all()
-    assert len(checks) >= 10
+    assert len(checks) >= len(CHECK_SPECS)
     for c in checks:
         assert get_handler(c.handler_key) is not None
 
