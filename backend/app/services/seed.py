@@ -12,6 +12,7 @@ Spec #91 add alongside them, without disturbing the exemplars.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from sqlmodel import Session, select
 
@@ -127,17 +128,19 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # (see the matching comment markers in seed_all): append to the ``tests``
 # dict / call make_suite() without passing ``tutorial=True``.
 #
-# First slice (issue #96): read-only reachability/posture Checks extending the
-# Producer/Processing/Consumer lanes beyond their tutorial exemplars. Every
-# entry declares ``verb="GET"`` explicitly (R0) and phrases its assertion as
-# "... without error" — the reachability form for a resource that can
-# legitimately be empty on a clean workspace (a fresh install has zero DLT
-# pipelines, cluster policies, secret scopes, or serving endpoints; asserting
-# non-emptiness there would false-fail). That phrase compiles deterministically
-# via ``compile_assertion`` (a bare "ok" predicate), so every Check here still
-# gates CI. Security Posture / Identity & Access / Governance / a reworked CI
-# Gate / Sandbox Functional (#91's remaining suggested phasing) are later
-# slices, appended here without disturbing this one.
+# Slices landed so far: Producer/Processing/Consumer posture reads (#96),
+# Identity & Access (#94, including one deliberately agentic/advisory
+# least-privilege Check), and Governance/Unity Catalog (#95, including its
+# grant-denied counterfactual pair). Every read-only entry declares
+# ``verb="GET"`` explicitly (R0) and phrases its assertion as bare success
+# ("... succeeds" / "... completes without error") — the reachability form for
+# a resource that can legitimately be empty on a clean workspace (a fresh
+# install has zero DLT pipelines, cluster policies, secret scopes, external
+# locations, ...; asserting non-emptiness there would false-fail). That phrase
+# compiles deterministically via ``compile_assertion`` (a bare "ok" predicate),
+# so every non-advisory Check here still gates CI. Security Posture, a
+# reworked CI Gate, and Sandbox Functional (#91's remaining suggested phasing)
+# are later slices, appended here without disturbing these.
 # ---------------------------------------------------------------------------
 CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
     # --- Producer: ingestion layer -------------------------------------------
@@ -223,6 +226,55 @@ CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
         operation=OperationIn(service="service_principals", method="list", verb="GET", params={}),
         handler_key="databricks_sdk",
         assertion="the service principals' admin-group footprint looks reasonable, not blanket")),
+    # --- Governance / Unity Catalog posture (#95) -----------------------
+    ("gov_metastore_assigned", dict(
+        display_name="Unity Catalog metastore is assigned",
+        description="Confirm a Unity Catalog metastore is assigned to the workspace — governance is in force.",
+        operation=OperationIn(service="metastores", method="current", verb="GET",
+                              params={"demo_evidence": {"metastore_id": "demo-metastore-001"}}),
+        handler_key="databricks_sdk",
+        assertion="the workspace's metastore-assignment lookup succeeds")),
+    ("gov_catalog_isolated", dict(
+        display_name="Production catalog is bound ISOLATED",
+        description="Confirm the production catalog is bound in ISOLATED mode — no cross-environment access.",
+        operation=OperationIn(service="catalogs", method="get", verb="GET",
+                              params={"name": "prod",
+                                      "demo_evidence": {"isolation_mode": "ISOLATED"}}),
+        handler_key="databricks_sdk",
+        assertion="the production catalog lookup succeeds and reports ISOLATED isolation mode")),
+    ("gov_external_locations", dict(
+        display_name="External locations enumerate without error",
+        description=("Confirm data access routes through UC external locations rather than the DBFS root "
+                     "by enumerating them. Reachability-only: a clean workspace may have none."),
+        operation=OperationIn(service="external_locations", method="list", verb="GET",
+                              params={"demo_evidence": {"count": 2}}),
+        handler_key="databricks_sdk",
+        assertion="the external-locations list call completes without error")),
+    ("gov_storage_credentials", dict(
+        display_name="Storage credentials enumerate without error",
+        description=("Confirm UC storage credentials are reachable. Reachability-only: a clean workspace "
+                     "may have none, so this never asserts a non-empty result."),
+        operation=OperationIn(service="storage_credentials", method="list", verb="GET",
+                              params={"demo_evidence": {"count": 1}}),
+        handler_key="databricks_sdk",
+        assertion="the storage-credentials list call completes without error")),
+    ("gov_grant_read_allowed", dict(
+        display_name="Effective grant read is allowed",
+        description="The effective identity can read its own grants on the production catalog.",
+        operation=OperationIn(service="grants", method="get", verb="GET",
+                              params={"securable_type": "catalog", "full_name": "prod",
+                                      "demo_evidence": {"privileges": ["SELECT"]}}),
+        handler_key="databricks_sdk",
+        assertion="the effective identity's grant read succeeds")),
+    ("gov_grant_read_denied", dict(
+        display_name="Ungranted read is denied (fails closed)",
+        description=("Counterfactual: a read the effective identity lacks is denied — UC enforcement is "
+                     "proven, not assumed."),
+        operation=OperationIn(service="grants", method="get", verb="GET",
+                              params={"securable_type": "catalog", "full_name": "prod",
+                                      "demo_outcome": "deny"}),
+        handler_key="databricks_sdk",
+        assertion="a read the effective identity lacks is denied and fails closed")),
 ]
 
 
@@ -378,10 +430,15 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
         session.add(test)
         session.commit()
         session.refresh(test)
+        # A counterfactual's counterpart is the nearest preceding assertion-kind
+        # member in this same members list — the positive Check it negates.
+        last_assertion_key: Optional[str] = None
         for i, (check_key, kind) in enumerate(members):
-            counterpart = checks["cluster_create_allowed"].id if kind == "counterfactual" else None
+            counterpart = checks[last_assertion_key].id if kind == "counterfactual" and last_assertion_key else None
             session.add(TestCheck(test_id=test.id, check_id=checks[check_key].id, sort_order=i,
                                   kind=kind, counterpart_check_id=counterpart))
+            if kind == "assertion":
+                last_assertion_key = check_key
         session.commit()
         return test
 
@@ -455,8 +512,19 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
              ("ip_access_list_active", "assertion"), ("sp_least_privilege", "assertion")],
             ["identity", "access", "security"],
         ),
-        # Later slices add further entries to this dict here, via make_test(...)
-        # without tutorial=True, wiring more CATALOG_CHECK_SPECS checks in.
+        # --- Real posture Tests (Spec #91, issue #95) -------------------------
+        "governance": make_test(
+            "Governance / Unity Catalog posture",
+            ("A metastore is assigned, the production catalog is ISOLATED, storage credentials "
+             "and external locations are reachable, and an ungranted read fails closed."),
+            [("gov_metastore_assigned", "assertion"),
+             ("gov_catalog_isolated", "assertion"),
+             ("gov_external_locations", "assertion"),
+             ("gov_storage_credentials", "assertion"),
+             ("gov_grant_read_allowed", "assertion"),
+             ("gov_grant_read_denied", "counterfactual")],
+            ["governance", "uc", "policy", "safety"],
+        ),
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -490,11 +558,15 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
                "Effective identity, SCIM-managed groups, and IP access-list posture, plus "
                "an advisory service-principal least-privilege read.",
                ["identity_access"], tags=["seeded", "identity", "security"])
-    # Remaining real posture Suites (Security Posture, Governance/UC, a
-    # reworked CI Gate, Sandbox Functional — Spec #91) are added here by later
-    # slices via make_suite(), the same helper used above — the lane Suites
-    # above (Producer/Processing/Consumer) also grow in place as their slices
-    # land, without disturbing the tutorial Tests they already carry.
+    make_suite("Governance / Unity Catalog Suite",
+               "UC governance posture: metastore, ISOLATED catalog binding, external-location/"
+               "storage-credential reachability, and a grant-denied counterfactual.",
+               ["governance"], tags=["seeded", "governance", "uc"])
+    # Remaining real posture Suites (Security Posture, a reworked CI Gate,
+    # Sandbox Functional — Spec #91) are added here by later slices via
+    # make_suite(), the same helper used above — the lane Suites above
+    # (Producer/Processing/Consumer) also grow in place as their slices land,
+    # without disturbing the tutorial Tests they already carry.
 
     if with_demo_targets:
         for t in [
