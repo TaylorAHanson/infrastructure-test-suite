@@ -37,13 +37,6 @@ The bundle ([`../databricks.yml`](../databricks.yml)) creates:
 
 - Lakebase injects `PGHOST/PGPORT/PGDATABASE/PGUSER`; the password is a rotating
   OAuth token injected per connection. **Do not** put a PG password anywhere.
-- `REMOTE_AGENT_SIGNING_SECRET` is sourced from a secret scope via `valueFrom` -
-  create the secret before enabling signed remote-agent verification:
-
-  ```bash
-  databricks secrets create-scope regression-validation
-  databricks secrets put-secret regression-validation remote-agent-signing-secret
-  ```
 
 ## Analytical views + telemetry
 
