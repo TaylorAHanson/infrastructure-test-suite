@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from app.db.session import get_session
-from app.executors.registry import OperationBlocked
+from app.handlers.registry import OperationBlocked
 from app.models import Suite, SuiteMember, Test, WorkedExample
 from app.schemas.schemas import (
     AgenticEvalIn,

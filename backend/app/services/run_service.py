@@ -37,7 +37,7 @@ from app.core.enums import (
 )
 from app.core.ids import utcnow
 from app.core.operations import Operation
-from app.executors import HandlerContext, get_handler
+from app.handlers import HandlerContext, get_handler
 from app.models import (
     Check,
     CheckRun,

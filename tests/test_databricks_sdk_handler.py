@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from databricks.sdk.errors import PermissionDenied
 
-from app.core.enums import Depth, ProbeOutcome
+from app.core.enums import Depth, StageStatus
 from app.core.operations import Operation
-from app.executors.base import HandlerContext
-from app.executors.builtin import generic
-from app.executors.builtin.generic import DatabricksSdkHandler
+from app.handlers.base import HandlerContext
+from app.handlers.builtin import generic
+from app.handlers.builtin.generic import DatabricksSdkHandler
 from app.models import Target
 from app.services.assertion_compiler import evaluate_predicate
 
@@ -78,7 +78,7 @@ def test_real_operate_dispatches_the_call_as_the_resolved_identity(monkeypatch):
 
     assert seen == {"host": "https://ws.example.com", "token": "secret-token"}
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.PASS
+    assert operate.outcome == StageStatus.PASS
     assert operate.evidence["response"] == [{"cluster_id": "c-1"}]
     assert operate.evidence["row_count"] == 1
 
@@ -95,7 +95,7 @@ def test_real_operate_falls_back_to_ambient_factory_without_a_token(monkeypatch)
     steps = DatabricksSdkHandler().run(ctx)
 
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.PASS
+    assert operate.outcome == StageStatus.PASS
     assert operate.evidence["row_count"] == 1
 
 
@@ -112,7 +112,7 @@ def test_permission_denied_fails_operate_with_the_permission_denied_bucket(monke
     steps = DatabricksSdkHandler().run(ctx)
 
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.FAIL
+    assert operate.outcome == StageStatus.FAIL
     assert operate.failure_bucket == "PERMISSION_DENIED"
 
 
@@ -147,7 +147,7 @@ def test_unknown_sdk_operation_is_service_unsupported(monkeypatch):
     steps = DatabricksSdkHandler().run(ctx)
 
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.FAIL
+    assert operate.outcome == StageStatus.FAIL
     assert operate.failure_bucket == "SERVICE_UNSUPPORTED"
 
 
@@ -168,7 +168,7 @@ def test_demo_mode_still_simulates_and_never_touches_the_sdk(monkeypatch):
     steps = DatabricksSdkHandler().run(ctx)
 
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.PASS
+    assert operate.outcome == StageStatus.PASS
     assert operate.evidence["row_count"] == 3
 
 
@@ -197,7 +197,7 @@ def test_cleanup_tears_down_the_created_artifact_via_the_cleanup_param(monkeypat
 
     assert calls == [{"cluster_id": "c-99"}]
     cleanup_result = steps[-1]
-    assert cleanup_result.outcome == ProbeOutcome.PASS
+    assert cleanup_result.outcome == StageStatus.PASS
 
 
 def test_cleanup_is_skipped_in_demo_mode(monkeypatch):

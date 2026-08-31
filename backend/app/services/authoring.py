@@ -33,7 +33,7 @@ from sqlmodel import Session, select
 
 from app.core.enums import Expectation, RiskTier, SafetyClass
 from app.core.operations import Operation
-from app.executors.registry import OperationBlocked, validate_operation
+from app.handlers.registry import OperationBlocked, validate_operation
 from app.models import Suite, Target
 from app.schemas.schemas import CheckCreate, CheckUpdate, OperationIn
 from app.services import assistant_tools
@@ -46,7 +46,7 @@ ModelCall = Callable[[list[dict]], str]
 def build_check_fields(payload: CheckCreate) -> dict:
     """Compile + derive + validate a CheckCreate into Check column values.
 
-    Raises :class:`app.executors.registry.OperationBlocked` if the operation is
+    Raises :class:`app.handlers.registry.OperationBlocked` if the operation is
     on the blocklist.
     """
     operation = Operation.from_dict(payload.operation.model_dump()).to_dict()

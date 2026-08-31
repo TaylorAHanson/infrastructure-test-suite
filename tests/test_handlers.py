@@ -1,11 +1,11 @@
 """Handler contract: stage-spine execution, depth, short-circuit, cleanup."""
 from __future__ import annotations
 
-from app.core.enums import Depth, ProbeOutcome
+from app.core.enums import Depth, StageStatus
 from app.core.operations import Operation
 from app.core.stages import connectivity_stage_ids, ordered_stages
-from app.executors.base import Handler, HandlerContext, HandlerError, StageResult
-from app.executors.builtin.sql_warehouse import SqlWarehouseHandler
+from app.handlers.base import Handler, HandlerContext, HandlerError, StageResult
+from app.handlers.builtin.sql_warehouse import SqlWarehouseHandler
 
 
 def _ctx(depth, params=None):
@@ -30,7 +30,7 @@ def test_full_runs_operate_and_verify():
     ids = [s.stage for s in steps]
     assert "OPERATE" in ids and "VERIFY" in ids
     operate = next(s for s in steps if s.stage == "OPERATE")
-    assert operate.outcome == ProbeOutcome.PASS
+    assert operate.outcome == StageStatus.PASS
     assert operate.evidence.get("row_count") == 2
 
 
@@ -52,7 +52,7 @@ def test_failed_connectivity_stage_short_circuits():
             raise AssertionError("operate ran despite a failed authenticate")
 
     steps = _Failing().run(_ctx(Depth.FULL))
-    assert steps[0].stage == "AUTHENTICATE" and steps[0].outcome == ProbeOutcome.FAIL
+    assert steps[0].stage == "AUTHENTICATE" and steps[0].outcome == StageStatus.FAIL
     assert steps[0].failure_bucket == "AUTHENTICATION_FAILURE"
     assert all(s.stage != "OPERATE" for s in steps)
 
@@ -68,7 +68,7 @@ def test_cleanup_runs_even_when_a_stage_fails():
 
         def cleanup(self, ctx):
             seen["cleaned"] = True
-            return StageResult("VERIFY", ProbeOutcome.PASS, message="cleaned up")
+            return StageResult("VERIFY", StageStatus.PASS, message="cleaned up")
 
     _Handler().run(_ctx(Depth.FULL))
     assert seen.get("cleaned") is True

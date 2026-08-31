@@ -14,7 +14,7 @@ import logging
 from typing import Optional, Type
 
 from app.core.operations import Operation, is_blocklisted
-from app.executors.base import Handler
+from app.handlers.base import Handler
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def get_handler(handler_key: str) -> Handler:
     """Instantiate the handler for ``handler_key`` (falls back to a clean stub)."""
     cls = registry.get(handler_key)
     if cls is None:
-        from app.executors.builtin.generic import UnsupportedHandler
+        from app.handlers.builtin.generic import UnsupportedHandler
 
         logger.info("No handler registered for '%s'; using unsupported stub", handler_key)
         return UnsupportedHandler()

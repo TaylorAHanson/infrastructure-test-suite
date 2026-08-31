@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from app.core.ids import utcnow
 from app.db.session import get_session
-from app.executors.registry import OperationBlocked
+from app.handlers.registry import OperationBlocked
 from app.models import Check
 from app.schemas.schemas import CheckCreate, CheckUpdate, CompileRequest
 from app.services import versioning

@@ -4,14 +4,14 @@ from __future__ import annotations
 import pytest
 
 from app.core.operations import Operation
-from app.executors import (
+from app.handlers import (
     OperationBlocked,
     get_handler,
     is_operation_allowed,
     registry,
     validate_operation,
 )
-from app.executors.builtin.generic import UnsupportedHandler
+from app.handlers.builtin.generic import UnsupportedHandler
 
 
 def test_builtin_handlers_registered():

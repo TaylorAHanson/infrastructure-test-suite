@@ -1,11 +1,11 @@
 """Handler framework: metadata-driven, spine-based, plugin handlers."""
-from app.executors.base import (  # noqa: F401
+from app.handlers.base import (  # noqa: F401
     Handler,
     HandlerContext,
     HandlerError,
     StageResult,
 )
-from app.executors.registry import (  # noqa: F401
+from app.handlers.registry import (  # noqa: F401
     OperationBlocked,
     get_handler,
     is_operation_allowed,
@@ -15,7 +15,7 @@ from app.executors.registry import (  # noqa: F401
 )
 
 # Import built-ins for their registration side effects.
-from app.executors import builtin  # noqa: F401,E402
+from app.handlers import builtin  # noqa: F401,E402
 
 __all__ = [
     "Handler",

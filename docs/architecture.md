@@ -53,8 +53,7 @@ flowchart TD
   `Suite`, `SuiteMember`, `Target`, `EntityVersion`, `WorkedExample`,
   `RunRequest`, `CheckRun`, `StageOutcome`, `TargetLease`, `AuditEvent`,
   `Branding`, `WebhookConfig`.
-- `executors/` - the Handler framework (see below; the package predates the
-  CONTEXT.md rename to "Handler" but the concept is the same).
+- `handlers/` - the Handler framework (see below).
 - `services/` - `run_service` (submit/dispatch/execute/aggregate),
   `locking` (target leases), `safety` + `risk` (the safety gate), `authoring`
   + `assertion_compiler` (plain-English -> deterministic where possible),
@@ -69,9 +68,9 @@ flowchart TD
 
 ### Handler framework
 
-Handlers register under a `handler_key` (`executors/registry.py`); a Check
+Handlers register under a `handler_key` (`handlers/registry.py`); a Check
 names the `handler_key` of the Handler that performs its operation. Four ship
-today, all in `executors/builtin/`:
+today, all in `handlers/builtin/`:
 
 | `handler_key`    | File                | Handles                                    |
 |-------------------|----------------------|---------------------------------------------|

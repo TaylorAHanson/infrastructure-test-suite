@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from app.core.stages import ordered_stages
 from app.core.taxonomy import all_buckets
 from app.db.session import get_session
-from app.executors.registry import registry
+from app.handlers.registry import registry
 from app.models import (
     Check,
     CheckRun,
