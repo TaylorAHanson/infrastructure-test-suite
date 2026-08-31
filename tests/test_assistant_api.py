@@ -44,6 +44,53 @@ SQL_PLAN = {
 }
 
 
+# --------------------------- tool-calling plumbing (#57) ---------------------------
+def test_tool_inventory_is_closed_by_omission():
+    # The registered tool schemas are exactly the 8 read/grounding tools — and no
+    # schema exists for a Target write, /admin/*, Branding, or Webhook action.
+    # Closed by omission at design time (a missing schema, not a runtime refusal).
+    from app.services.assistant_graph import TOOL_REGISTRY, TOOL_SCHEMAS
+
+    names = {t["function"]["name"] for t in TOOL_SCHEMAS}
+    assert names == {
+        "search_sdk_surface", "search_targets", "search_roles", "search_examples",
+        "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
+    }
+    assert set(TOOL_REGISTRY) == names
+    for forbidden in ("register_target", "edit_target", "delete_target", "target_register",
+                      "admin_seed", "purge_runs", "purge_all", "seed", "set_branding",
+                      "branding", "configure_webhook", "webhook", "submit_run", "create_run",
+                      "add_suite_member", "toggle_deterministic_only"):
+        assert forbidden not in names
+
+
+def test_turn_resolves_via_scripted_tool_call_sequence(client):
+    # The turn is a loop: the model first calls a grounding tool, then answers.
+    # The stub scripts that sequence (a tool_calls step, then the final plan).
+    calls = {"n": 0}
+
+    def script(messages):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tool_calls": [{"name": "search_sdk_surface",
+                                    "arguments": {"query": "sql warehouse"}}]}
+        return SQL_PLAN
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "run a SQL query and confirm it returns rows",
+        "page_context": {"page": "test-studio"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "authoring"
+    assert body["draft"]["checks"][0]["compilable"] is True
+    # Tool-call transparency (additive): the executed tool is surfaced with a result.
+    executed = body.get("tool_calls") or []
+    names = [t["name"] for t in executed]
+    assert "search_sdk_surface" in names
+    assert calls["n"] >= 2  # looped: tool step, then the answering step
+
+
 # --------------------------- authoring turn ---------------------------
 def test_turn_authoring_returns_valid_draft(client):
     set_model(SQL_PLAN)

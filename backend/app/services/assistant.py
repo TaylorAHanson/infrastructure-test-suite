@@ -5,7 +5,9 @@ tool-dispatch layer. Its two capability areas — **Authoring** (write-path,
 :mod:`app.services.authoring`) and **Triage/RCA** (read-path,
 :mod:`app.services.rca`) — are chosen by the **tools** a turn is routed to, not
 by standing up a second agent. Every surface hands the Assistant a **page
-context**; :func:`run_turn` routes on it.
+context**; :func:`run_turn` delegates the turn to the LangGraph tool-calling
+loop (:mod:`app.services.assistant_graph`, ADR-0019), which picks the capability
+from that context and lets the model choose which tools to call.
 
 Guardrails ride on the tools (ADR-0012 §3): the write-path always runs the
 GUI's validator, refuses R3, and is suggest-then-human-confirms (a turn only
@@ -18,6 +20,7 @@ when no endpoint is configured.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Callable, Optional
 
@@ -25,26 +28,37 @@ from sqlmodel import Session, select
 
 from app.core.enums import Expectation, TestStatus
 from app.core.ids import utcnow
-from app.models import Check, Suite, SuiteMember, Target, Test, TestCheck, WorkedExample
+from app.models import Check, Suite, SuiteMember, Test, TestCheck, WorkedExample
 from app.schemas.schemas import AssistantTurnIn, DraftCommitIn
-from app.services import authoring, rca, versioning
+from app.services import authoring, versioning
 from app.services.audit import record_audit
 
 logger = logging.getLogger(__name__)
 
 ModelCall = Callable[[list[dict]], str]
 
-_RCA_WORDS = ("why", "regress", "failing", "failed", "broke", "root cause", "started failing")
-
 
 # ---------------------------------------------------------------------------
 # Model-call seam (pinned Model-Serving endpoint; stubbable / degradable)
 # ---------------------------------------------------------------------------
 def default_model_call(messages: list[dict]) -> str:
-    """Call the pinned Model-Serving endpoint (the one grounding harness)."""
-    from app.clients import model_serving
+    """Call the pinned Model-Serving endpoint with the Assistant's tool schemas.
 
-    return model_serving.chat(messages)
+    Returns a JSON string the tool-calling loop understands: a ``{"tool_calls":
+    [...]}`` envelope when the model chose to call tools, otherwise the model's
+    final answer text (which the read/authoring services parse as before). The
+    tool schemas are always offered (``tool_choice="auto"``); callers that want a
+    plain answer — RCA, the agentic judge — simply parse the object and ignore
+    any envelope, so they degrade cleanly if the model reaches for a tool.
+    """
+    from app.clients import model_serving
+    from app.services.assistant_graph import TOOL_SCHEMAS
+
+    reply = model_serving.chat_with_tools(messages, tools=TOOL_SCHEMAS, tool_choice="auto")
+    if reply.tool_calls:
+        return json.dumps({"tool_calls": [tc.to_dict() for tc in reply.tool_calls],
+                           "content": reply.content})
+    return reply.content or ""
 
 
 def get_model_call() -> Optional[ModelCall]:
@@ -62,47 +76,21 @@ def get_model_call() -> Optional[ModelCall]:
 
 
 # ---------------------------------------------------------------------------
-# Turn routing (authoring vs RCA), page-aware
+# Turn routing — a LangGraph tool-calling loop (ADR-0019)
 # ---------------------------------------------------------------------------
-def _resolve_mode(payload: AssistantTurnIn) -> str:
-    if payload.mode in ("authoring", "rca"):
-        return payload.mode
-    if payload.page_context.finding:
-        return "rca"
-    if any(w in (payload.turn or "").lower() for w in _RCA_WORDS):
-        return "rca"
-    return "authoring"
-
-
 def run_turn(session: Session, payload: AssistantTurnIn,
              model_call: Optional[ModelCall] = None) -> dict:
-    """Route one Assistant turn to the authoring or RCA capability (ADR-0012)."""
-    mode = _resolve_mode(payload)
-    ctx = payload.page_context
+    """Run one Assistant turn through the tool-calling graph (ADR-0019/0012).
 
-    if mode == "rca":
-        finding = ctx.finding or {}
-        check_id = finding.get("check_id")
-        if not check_id:
-            return {"mode": "rca", "page": ctx.page,
-                    "clarifying_question": "Which finding should I look at? "
-                                           "Open a failing check to give me its context."}
-        suggestion = rca.suggest(
-            session, check_id=check_id,
-            target_id=finding.get("target_id") or ctx.target_id,
-            turn=payload.turn, model_call=model_call)
-        return {"mode": "rca", "page": ctx.page, "rca": suggestion.to_dict()}
+    The graph selects the capability from context (a finding under triage is an
+    RCA context; an explicit ``mode`` wins) and — for authoring — lets the model
+    choose which grounding tools to call before it drafts. Delegated to
+    :mod:`app.services.assistant_graph` to keep the write-path persistence below
+    separate from the turn orchestration.
+    """
+    from app.services import assistant_graph
 
-    # Authoring: ground on the page's target (if any) and draft a proposal.
-    target = _page_target(session, ctx)
-    proposal = authoring.draft_from_intent(session, payload.turn, target=target,
-                                           model_call=model_call)
-    return {"mode": "authoring", "page": ctx.page, "draft": proposal.to_dict()}
-
-
-def _page_target(session: Session, ctx) -> Optional[Target]:
-    tid = ctx.target_id or (ctx.target_ids[0] if ctx.target_ids else None)
-    return session.get(Target, tid) if tid else None
+    return assistant_graph.run_agent_turn(session, payload, model_call=model_call)
 
 
 # ---------------------------------------------------------------------------

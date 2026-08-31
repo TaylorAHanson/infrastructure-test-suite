@@ -344,9 +344,26 @@ def draft_from_intent(session: Session, intent: str,
     derives the risk tier, and attaches guided-authoring suggestions. Nothing is
     persisted or run — this is the *suggest* half of suggest-then-confirm.
     """
-    safety_class = target.safety_class if target else None
     grounding = _grounding(session, intent, target)
     plan, model_available = _ask_model(model_call, intent, grounding)
+    return build_draft(session, intent, plan, model_available, target, grounding=grounding)
+
+
+def build_draft(session: Session, intent: str, plan: dict, model_available: bool,
+                target: Optional[Target] = None,
+                grounding: Optional[dict] = None) -> DraftProposal:
+    """Validate a model ``plan`` into a Draft proposal — the post-model half.
+
+    Extracted so the tool-calling loop (ADR-0019) can drive the model itself and
+    hand the resulting ``plan`` here. Grounding is still done deterministically
+    (over the SDK surface + target/example catalogs) so a suggested run-as-role
+    stays bounded to the target's registered roles even when the model didn't
+    call the grounding tools. The model's output is never trusted raw: the
+    operation is re-validated, R3 refused, and the risk tier derived here.
+    """
+    if grounding is None:
+        grounding = _grounding(session, intent, target)
+    safety_class = target.safety_class if target else None
 
     operation, source, name_hint = _resolve_operation(plan, grounding)
     if operation is None:
