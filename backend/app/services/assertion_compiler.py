@@ -128,7 +128,18 @@ def compile_assertion(text: str) -> CompiledAssertion:
             reason="Compiled to a non-empty row_count predicate.",
         )
 
-    # 6. Generic "<field> <op> <number>" comparison.
+    # 6. Reachability: "returns ... without error" — the safe form for a
+    # resource that can legitimately be empty (e.g. a clean workspace with zero
+    # pipelines/policies/scopes). Compiles to a bare success predicate so it
+    # can still gate CI; it never asserts non-emptiness.
+    if "without error" in lowered:
+        return CompiledAssertion(
+            raw, True, Evaluator.DETERMINISTIC,
+            predicate={"kind": "ok"},
+            reason="Compiled to a bare success predicate (reachability: returns without error).",
+        )
+
+    # 7. Generic "<field> <op> <number>" comparison.
     m = _COMPARE_RE.search(raw)
     if m:
         field_name, op_raw, value = m.group(1), m.group(2).lower(), int(m.group(3))
@@ -139,7 +150,7 @@ def compile_assertion(text: str) -> CompiledAssertion:
             reason=f"Compiled to a comparison predicate on '{field_name}'.",
         )
 
-    # 7. Bare success language ("the query succeeds", "egress is allowed").
+    # 8. Bare success language ("the query succeeds", "egress is allowed").
     if any(marker in lowered for marker in _SUCCESS_MARKERS):
         return CompiledAssertion(
             raw, True, Evaluator.DETERMINISTIC,
@@ -147,7 +158,7 @@ def compile_assertion(text: str) -> CompiledAssertion:
             reason="Compiled to a bare success predicate (operation completed without failure).",
         )
 
-    # 8. Otherwise: flag it. Never silently accept an uncompilable assertion.
+    # 9. Otherwise: flag it. Never silently accept an uncompilable assertion.
     return CompiledAssertion(
         raw, False, Evaluator.AGENTIC,
         reason="No deterministic predicate matched; will run as agentic-advisory (never gates).",

@@ -1,8 +1,9 @@
-"""seed_all() seam tests (issues #92, #94): exemplars are tagged tutorial/
-example, the worked-example + onboarding libraries still seed, seeding stays
-idempotent, and the real posture catalog's Identity & Access slice compiles
-with the guarantees Spec #91 promises (read-only/R0/deterministic for the
-objective reads, agentic/advisory for the least-privilege judgment read).
+"""seed_all() seam tests (issues #92, #94, #96): exemplars are tagged
+tutorial/example, the worked-example + onboarding libraries still seed,
+seeding stays idempotent, and the real posture catalog's Producer/Processing/
+Consumer (#96) and Identity & Access (#94) slices compile with the guarantees
+Spec #91 promises (read-only/R0/deterministic for the objective reads,
+agentic/advisory for the least-privilege judgment read).
 
 Mirrors the seam decision on spec #91: assert the observable shape of the
 catalog seed_all() produces, not seed-internal structure.
@@ -72,6 +73,66 @@ def test_onboarding_examples_still_present_and_tagged(seeded_session):
     examples = seeded_session.exec(select(WorkedExample)).all()
     onboarding = [e for e in examples if "onboarding" in (e.tags or [])]
     assert len(onboarding) == len(ONBOARDING_EXAMPLES)
+
+
+def test_posture_catalog_checks_are_readonly_r0_deterministic(seeded_session):
+    """issue #96: every Producer/Processing/Consumer posture Check is a GET,
+    R0, deterministic Check — and is not mistaken for a tutorial exemplar.
+
+    Excludes the Identity & Access advisory Check (issue #94), which is a
+    deliberate exception to "every posture Check is deterministic": it's an
+    agentic/advisory least-privilege judgment, asserted separately below.
+    """
+    catalog_names = {spec["display_name"] for _, spec in CATALOG_CHECK_SPECS}
+    checks = seeded_session.exec(select(Check)).all()
+    catalog_checks = [c for c in checks if c.display_name in catalog_names]
+    assert len(catalog_checks) == len(CATALOG_CHECK_SPECS), (
+        "expected every CATALOG_CHECK_SPECS entry to be seeded")
+    for check in catalog_checks:
+        if check.display_name == _IDENTITY_ACCESS_ADVISORY_CHECK:
+            continue
+        assert check.operation.get("verb") == "GET", check.display_name
+        assert check.risk_tier == RiskTier.R0.value, check.display_name
+        assert check.evaluator == Evaluator.DETERMINISTIC, check.display_name
+        assert check.compilable, check.display_name
+        assert not (set(check.hints.get("tags") or []) & set(TUTORIAL_TAGS)), (
+            f"{check.display_name!r} should not carry the tutorial/example tag")
+
+
+def test_lane_suites_gain_the_posture_tests(seeded_session):
+    """issue #96: Producer/Processing/Consumer Suites each grow their real
+    posture Test alongside (not instead of) the tutorial Test they already had."""
+    suites_by_name = {s.name: s for s in seeded_session.exec(select(Suite)).all()}
+    tests_by_id = {t.id: t for t in seeded_session.exec(select(Test)).all()}
+
+    def member_test_names(suite_name: str) -> set[str]:
+        suite = suites_by_name[suite_name]
+        members = seeded_session.exec(
+            select(SuiteMember).where(SuiteMember.suite_id == suite.id)
+        ).all()
+        return {tests_by_id[m.test_id].name for m in members}
+
+    producer_names = member_test_names("Producer Suite")
+    assert "Producer ingestion access" in producer_names  # tutorial Test retained
+    assert "Producer ingestion posture" in producer_names
+
+    processing_names = member_test_names("Processing Suite")
+    assert "Processing layer access" in processing_names  # tutorial Test retained
+    assert "Processing compute posture" in processing_names
+
+    consumer_names = member_test_names("Consumer Suite")
+    assert "Consumer security posture" in consumer_names
+
+
+def test_posture_tests_are_not_tagged_tutorial(seeded_session):
+    tests = seeded_session.exec(select(Test)).all()
+    posture_names = {"Producer ingestion posture", "Processing compute posture",
+                     "Consumer security posture"}
+    posture_tests = [t for t in tests if t.name in posture_names]
+    assert len(posture_tests) == len(posture_names)
+    for test in posture_tests:
+        assert not (set(test.tags or []) & set(TUTORIAL_TAGS)), (
+            f"{test.name!r} should not carry the tutorial/example tag")
 
 
 def test_identity_access_suite_is_seeded_and_nonempty(seeded_session):

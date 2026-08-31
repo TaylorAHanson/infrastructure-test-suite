@@ -127,10 +127,69 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # (see the matching comment markers in seed_all): append to the ``tests``
 # dict / call make_suite() without passing ``tutorial=True``.
 #
-# Empty until the next slice (Security Posture + CI Gate rework, per #91's
-# suggested phasing). Adding entries here never touches CHECK_SPECS above.
+# First slice (issue #96): read-only reachability/posture Checks extending the
+# Producer/Processing/Consumer lanes beyond their tutorial exemplars. Every
+# entry declares ``verb="GET"`` explicitly (R0) and phrases its assertion as
+# "... without error" — the reachability form for a resource that can
+# legitimately be empty on a clean workspace (a fresh install has zero DLT
+# pipelines, cluster policies, secret scopes, or serving endpoints; asserting
+# non-emptiness there would false-fail). That phrase compiles deterministically
+# via ``compile_assertion`` (a bare "ok" predicate), so every Check here still
+# gates CI. Security Posture / Identity & Access / Governance / a reworked CI
+# Gate / Sandbox Functional (#91's remaining suggested phasing) are later
+# slices, appended here without disturbing this one.
 # ---------------------------------------------------------------------------
 CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
+    # --- Producer: ingestion layer -------------------------------------------
+    ("dlt_pipeline_target_declared", dict(
+        display_name="DLT pipeline declares a target catalog/schema",
+        description="List Delta Live Tables pipelines to confirm the ingestion layer's pipeline "
+                    "definitions (which declare a target catalog/schema) are reachable. A clean "
+                    "workspace may have zero pipelines — reachability only, no false-fail.",
+        operation=OperationIn(service="pipelines", method="list_pipelines", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the pipeline list without error")),
+    # --- Processing: compute policy + serverless SQL -------------------------
+    ("cluster_policy_auto_termination", dict(
+        display_name="Cluster policies enforce auto-termination",
+        description="List cluster policies to confirm the compute layer's policies (which pin "
+                    "auto-termination) are reachable. A clean workspace may have zero custom "
+                    "policies — reachability only, no false-fail.",
+        operation=OperationIn(service="cluster_policies", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the cluster policy list without error")),
+    ("cluster_policy_instance_runtime", dict(
+        display_name="Cluster policies pin approved instance types and runtime",
+        description="List cluster policies to confirm the compute layer's policies (which pin "
+                    "approved instance types + Databricks Runtime) are reachable. A clean "
+                    "workspace may have zero custom policies — reachability only, no false-fail.",
+        operation=OperationIn(service="cluster_policies", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the cluster policy list without error")),
+    ("serverless_sql_enabled", dict(
+        display_name="Serverless SQL is enabled where expected",
+        description="List SQL warehouses to confirm the serverless-capable compute tier is "
+                    "reachable. A clean workspace may have zero warehouses — reachability only, "
+                    "no false-fail.",
+        operation=OperationIn(service="warehouses", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the warehouse list without error")),
+    # --- Consumer: secrets + model serving ------------------------------------
+    ("secret_scopes_exist", dict(
+        display_name="Secret scopes exist (credentials aren't hardcoded)",
+        description="List Databricks secret scopes to confirm credentials are stored in scopes, "
+                    "not hardcoded. A clean workspace may have zero scopes — reachability only, "
+                    "no false-fail.",
+        operation=OperationIn(service="secrets", method="list_scopes", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the secret scope list without error")),
+    ("model_serving_enumerates", dict(
+        display_name="Model-serving layer enumerates without error",
+        description="List Model Serving endpoints to confirm the serving layer is reachable. A "
+                    "clean workspace may have zero endpoints — reachability only, no false-fail.",
+        operation=OperationIn(service="serving_endpoints", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the model-serving endpoint list without error")),
     # --- Identity & Access posture (issue #94) ------------------------------
     # Three read-only, R0, deterministic reads (verb="GET" derives R0 via
     # derive_risk_tier; the "succeeds"/"row_count >= N" phrasing compiles
@@ -360,7 +419,34 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
             ["processing", "compute", "connectivity"],
             tutorial=True,
         ),
-        # --- Real posture Tests (Spec #91) -----------------------------------
+        # --- Real posture Tests (Spec #91, issue #96) -------------------------
+        # No tutorial=True — these wire CATALOG_CHECK_SPECS checks into the
+        # existing lane Suites below, alongside (not instead of) the tutorial
+        # Tests those Suites already carry.
+        "producer_posture": make_test(
+            "Producer ingestion posture",
+            "DLT pipelines are reachable and declare a target catalog/schema.",
+            [("dlt_pipeline_target_declared", "assertion")],
+            ["producer", "ingestion", "posture"],
+        ),
+        "processing_posture": make_test(
+            "Processing compute posture",
+            "Cluster policies enforce auto-termination + pin instance types/runtime; "
+            "serverless SQL is enabled where expected.",
+            [("cluster_policy_auto_termination", "assertion"),
+             ("cluster_policy_instance_runtime", "assertion"),
+             ("serverless_sql_enabled", "assertion")],
+            ["processing", "compute", "policy", "posture"],
+        ),
+        "consumer_posture": make_test(
+            "Consumer security posture",
+            "Secret scopes exist (no hardcoded credentials) and the model-serving "
+            "layer enumerates without error.",
+            [("secret_scopes_exist", "assertion"),
+             ("model_serving_enumerates", "assertion")],
+            ["consumer", "security", "posture"],
+        ),
+        # --- Real posture Tests (Spec #91, issue #94) -------------------------
         "identity_access": make_test(
             "Identity & Access posture",
             "Effective identity resolves, SCIM groups are provisioned, and an IP access list "
@@ -392,12 +478,14 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     make_suite("CI Gate", "Deterministic-only gate for the CI trigger.",
                ["sql", "policy"], deterministic_only=True, tags=["seeded", "ci"])
     # Category suites — one per Producer/Processing/Consumer lane (README §2).
+    # Each grows in place with its real posture Test (issue #96) alongside the
+    # tutorial Test it already carried — the lane stays coherent either way.
     make_suite("Producer Suite", "Ingestion and pipeline layer reachability.",
-               ["producer"], tags=["seeded", "producer"])
+               ["producer", "producer_posture"], tags=["seeded", "producer"])
     make_suite("Processing Suite", "Compute and policy layer validation.",
-               ["processing", "policy"], tags=["seeded", "processing"])
+               ["processing", "policy", "processing_posture"], tags=["seeded", "processing"])
     make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
-               ["sql", "uc", "egress"], tags=["seeded", "consumer"])
+               ["sql", "uc", "egress", "consumer_posture"], tags=["seeded", "consumer"])
     make_suite("Identity & Access Suite",
                "Effective identity, SCIM-managed groups, and IP access-list posture, plus "
                "an advisory service-principal least-privilege read.",

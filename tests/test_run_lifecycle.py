@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from app.core.stages import stage_ids
 
+from helpers import suite_id as _suite_id
 from helpers import target_id as _target_id
 from helpers import test_id as _test_id
 
@@ -80,6 +81,23 @@ def test_run_over_seeded_test_emits_stage_outcomes(client):
     assert "PRECHECK" not in stages and "AUTH" not in stages  # no hardcoded StepKind
     assert detail["connectable"] is True                # derived, not stored
     assert detail["functional"] is True
+
+
+def test_lane_suites_pass_in_demo_mode_without_a_workspace(client):
+    """issue #96: the extended Producer/Processing/Consumer posture Checks are
+    fully exercisable in demo mode — no live workspace required, and an empty
+    (demo) resource list is not a false-fail.
+
+    Processing Suite also carries the tutorial cluster-create Test (R1), so it
+    needs a mutating target; the posture Checks themselves are all R0 and would
+    pass on a read-only target too.
+    """
+    for name, safety_class in (("Producer Suite", "read-only"),
+                               ("Processing Suite", "sandbox"),
+                               ("Consumer Suite", "read-only")):
+        run_id, resource = submit(client, suite_ids=[_suite_id(client, name)],
+                                  target_ids=[_target_id(client, safety_class)], depth="full")
+        assert resource["verdict"] == "PASS", f"{name}: {resource}"
 
 
 def test_depth_defaults_to_quick_and_full_is_opt_in(client):
