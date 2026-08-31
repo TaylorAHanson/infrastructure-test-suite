@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { CheckCircle2, History, Sparkles, Star, Undo2 } from 'lucide-react'
+import { CheckCircle2, History, MessageSquarePlus, Sparkles, Star, Undo2 } from 'lucide-react'
 
 import { PageHeader } from '../components/PageHeader'
-import { useDeclarePageContext } from '../lib/assistantContext'
+import { useAssistantContext, useDeclarePageContext } from '../lib/assistantContext'
 import {
   useAcceptTest,
   usePromoteExample,
@@ -19,6 +19,7 @@ import type { StudioTest } from '../types'
 // the app-wide Assistant shelf; this page manages what the shelf produced.
 export default function TestStudio() {
   const { data: tests } = useStudioTests()
+  const { openWithPrompt } = useAssistantContext()
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const selected = useMemo(
@@ -35,6 +36,17 @@ export default function TestStudio() {
       <PageHeader
         title="Test Studio"
         subtitle="Draft → accept → Active. Author in one sentence via the Assistant shelf; review, version, and promote here."
+        actions={
+          // Persistent entry point, shown whether or not the catalog is empty.
+          // The chat icon + "Describe a new test" label signal it opens a
+          // conversation with the Assistant, not a blank create form.
+          <button
+            className="btn btn-accent"
+            onClick={() => openWithPrompt('Create a new test that ')}
+          >
+            <MessageSquarePlus size="15" /> Describe a new test
+          </button>
+        }
       />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">

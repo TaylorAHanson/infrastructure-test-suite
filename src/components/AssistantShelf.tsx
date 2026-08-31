@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical } from 'lucide-react'
 
@@ -22,7 +22,11 @@ interface AssistantShelfProps {
 // It hands the harness the page's declared context, then shows an authoring
 // Draft (suggest-then-human-confirms) or an advisory RCA suggestion.
 export default function AssistantShelf({ open, onOpen, onClose, width, onResizeStart }: AssistantShelfProps) {
-  const { pageContext } = useAssistantContext()
+  const { pageContext, seedPrompt } = useAssistantContext()
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  // Set when a seed request arrives while the input isn't mounted yet; the
+  // focus effect below consumes it once the shelf has opened and rendered.
+  const pendingFocus = useRef(false)
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
   const { data: starters } = useStarterPrompts()
@@ -40,6 +44,38 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const [applyCf, setApplyCf] = useState(false)
   const [applyRole, setApplyRole] = useState(false)
   const [applySuite, setApplySuite] = useState(false)
+
+  // A seed request from any entry point (e.g. Test Studio's "New" button) opens
+  // the shelf and pre-fills the input with an editable starting sentence — not
+  // gated on the conversation being empty, so it works mid-session too. Prior
+  // results are cleared so the seeded turn starts clean; we never auto-send, so
+  // the human still decides when to ask.
+  useEffect(() => {
+    if (!seedPrompt) return
+    onOpen()
+    setText(seedPrompt.text)
+    setDraft(null)
+    setRca(null)
+    setSavedId(null)
+    setError(null)
+    pendingFocus.current = true
+    // Re-run on every request (nonce changes even when text repeats).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedPrompt])
+
+  // Focus + place the caret at the end once the shelf has opened and the input
+  // is actually mounted (it only renders while `open`), so a seed opening a
+  // closed shelf still lands the cursor in the pre-filled prompt.
+  useEffect(() => {
+    if (!open || !pendingFocus.current) return
+    pendingFocus.current = false
+    const el = inputRef.current
+    if (el) {
+      el.focus()
+      const end = el.value.length
+      el.setSelectionRange(end, end)
+    }
+  }, [open])
 
   async function ask() {
     if (!text.trim()) return
@@ -177,6 +213,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
           <div className="border-t border-edge p-3">
             <div className="flex items-end gap-2">
               <textarea
+                ref={inputRef}
                 className="input min-h-[64px] flex-1"
                 placeholder="e.g. start a cluster under compute-policy P and confirm it's allowed"
                 value={text}
