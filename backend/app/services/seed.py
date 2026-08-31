@@ -208,7 +208,7 @@ def _seed_examples(session: Session) -> int:
     return len(specs)
 
 
-def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> None:
+def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     """Seed Check/Test/Suite exemplars (idempotent)."""
     # Branding is seeded independently of the catalog so an un-branded install
     # always has the finished default record (ADR-0013 §5), even once the catalog

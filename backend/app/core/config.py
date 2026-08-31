@@ -144,8 +144,9 @@ class Settings(BaseSettings):
     # mock/demo data. Real targets/tests are added via the UI/API. The built-in
     # test-definition catalog can still be seeded on demand via POST /admin/seed.
     SEED_ON_STARTUP: bool = False
-    # Demo-only data (placeholder targets + synthetic historical runs). Never
-    # enabled implicitly; opt in explicitly for screenshots/local dev only.
+    # Demo-only placeholder targets (no synthetic run history — there is no
+    # such seeding path). Never enabled implicitly; opt in explicitly for
+    # screenshots/local dev only.
     SEED_DEMO_DATA: bool = False
 
     # ---------------- Derived helpers ----------------------------------

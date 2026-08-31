@@ -47,7 +47,7 @@ def session(db_path):
 def seeded_session(session):
     from app.services.seed import seed_all
 
-    seed_all(session, with_sample_runs=False)
+    seed_all(session)
     return session
 
 
@@ -61,6 +61,6 @@ def client(db_path):
 
     create_all()
     with session_scope() as s:
-        seed_all(s, with_sample_runs=False)
+        seed_all(s)
     with TestClient(app) as c:
         yield c

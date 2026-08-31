@@ -214,7 +214,7 @@ variables:
     description: "Model Serving endpoint for serving probes"
     default: "databricks-claude-sonnet-4-6"
   seed_on_startup:
-    description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets + synthetic runs stay off."
+    description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets stay off."
     default: "true"
   otel_enabled:
     description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
