@@ -130,7 +130,41 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 # Empty until the next slice (Security Posture + CI Gate rework, per #91's
 # suggested phasing). Adding entries here never touches CHECK_SPECS above.
 # ---------------------------------------------------------------------------
-CATALOG_CHECK_SPECS: list[tuple[str, dict]] = []
+CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
+    # --- Identity & Access posture (issue #94) ------------------------------
+    # Three read-only, R0, deterministic reads (verb="GET" derives R0 via
+    # derive_risk_tier; the "succeeds"/"row_count >= N" phrasing compiles
+    # deterministic via compile_assertion) plus one agentic advisory Check —
+    # least-privilege drift is judgment, not a hard fail, so its assertion is
+    # deliberately fuzzy ("look reasonable") to route it agentic/advisory.
+    ("whoami", dict(
+        display_name="Effective identity resolves (who-am-I)",
+        description="The platform resolves an effective identity as the calling principal.",
+        operation=OperationIn(service="current_user", method="me", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the platform resolves an effective identity: the call succeeds")),
+    ("scim_groups_present", dict(
+        display_name="SCIM-provisioned groups exist",
+        description="Groups are provisioned via SCIM, so access is managed by groups, not ad-hoc users.",
+        operation=OperationIn(service="groups", method="list", verb="GET",
+                              params={"demo_evidence": {"row_count": 3}}),
+        handler_key="databricks_sdk",
+        assertion="SCIM-provisioned groups exist (row_count >= 1)")),
+    ("ip_access_list_active", dict(
+        display_name="IP access list is configured and enabled",
+        description="An IP access list is configured and enabled, enforcing network-level access control.",
+        operation=OperationIn(service="ip_access_lists", method="list", verb="GET",
+                              params={"demo_evidence": {"row_count": 1}}),
+        handler_key="databricks_sdk",
+        assertion="an IP access list is configured and enabled (row_count >= 1)")),
+    ("sp_least_privilege", dict(
+        display_name="Service principals are not blanket workspace-admins",
+        description="Advisory read of least-privilege drift: service principals should not hold "
+                    "blanket workspace-admin membership.",
+        operation=OperationIn(service="service_principals", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the service principals' admin-group footprint looks reasonable, not blanket")),
+]
 
 
 # The repo-seeded worked-example library (ADR-0006 §9): gold Tests the Assistant
@@ -327,8 +361,16 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
             tutorial=True,
         ),
         # --- Real posture Tests (Spec #91) -----------------------------------
-        # Later slices add entries to this dict here, via make_test(...) without
-        # tutorial=True, wiring CATALOG_CHECK_SPECS checks into Suites below.
+        "identity_access": make_test(
+            "Identity & Access posture",
+            "Effective identity resolves, SCIM groups are provisioned, and an IP access list "
+            "is active — plus an advisory read on service-principal least privilege.",
+            [("whoami", "assertion"), ("scim_groups_present", "assertion"),
+             ("ip_access_list_active", "assertion"), ("sp_least_privilege", "assertion")],
+            ["identity", "access", "security"],
+        ),
+        # Later slices add further entries to this dict here, via make_test(...)
+        # without tutorial=True, wiring more CATALOG_CHECK_SPECS checks in.
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -356,11 +398,15 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
                ["processing", "policy"], tags=["seeded", "processing"])
     make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
                ["sql", "uc", "egress"], tags=["seeded", "consumer"])
-    # Real posture Suites (Security Posture, Identity & Access, Governance/UC,
-    # a reworked CI Gate, Sandbox Functional — Spec #91) are added here by
-    # later slices via make_suite(), the same helper used above — the lane
-    # Suites above (Producer/Processing/Consumer) also grow in place as their
-    # slices land, without disturbing the tutorial Tests they already carry.
+    make_suite("Identity & Access Suite",
+               "Effective identity, SCIM-managed groups, and IP access-list posture, plus "
+               "an advisory service-principal least-privilege read.",
+               ["identity_access"], tags=["seeded", "identity", "security"])
+    # Remaining real posture Suites (Security Posture, Governance/UC, a
+    # reworked CI Gate, Sandbox Functional — Spec #91) are added here by later
+    # slices via make_suite(), the same helper used above — the lane Suites
+    # above (Producer/Processing/Consumer) also grow in place as their slices
+    # land, without disturbing the tutorial Tests they already carry.
 
     if with_demo_targets:
         for t in [
