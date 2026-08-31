@@ -46,9 +46,10 @@ SQL_PLAN = {
 
 # --------------------------- tool-calling plumbing (#57) ---------------------------
 def test_tool_inventory_is_closed_by_omission():
-    # The registered tool schemas are the read/grounding tools plus search_suites (#64)
-    # and 4 suite-composition proposal tools (#63). No schema exists for a Target write,
-    # /admin/*, Branding, or Webhook action — closed by omission at design time.
+    # The registered tool schemas are the read/grounding tools plus search_suites (#64),
+    # suite creation (#66), and 4 suite-composition proposal tools (#63). No schema
+    # exists for a Target write, /admin/*, Branding, or Webhook action — closed by
+    # omission at design time.
     from app.services.assistant_graph import TOOL_REGISTRY, TOOL_SCHEMAS
 
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
@@ -57,6 +58,8 @@ def test_tool_inventory_is_closed_by_omission():
         "search_tests",
         "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
         "search_suites",
+        # Suite creation (issue #66)
+        "create_suite",
         # Suite composition tools (issue #63)
         "compose_suite_add_test", "compose_suite_remove_test",
         "compose_suite_reorder", "compose_suite_toggle_det_only",
@@ -753,3 +756,115 @@ def test_suite_compose_job_scheduled_warning_surfaced(client):
     result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
     assert result is not None
     assert result["job_scheduled"] is True
+
+
+# ----------------------- suite creation (issue #66) -----------------------
+# The composition tools above (#63) all require an existing suite_id — they
+# cannot get a first-time user from "Suites page, nothing exists" to "a Suite
+# created via the assistant" on their own. `create_suite` is the missing
+# counterpart; these tests cover the turn (proposal) and confirm (apply) halves.
+
+def test_suite_turn_routes_to_suite_capability_not_test_authoring(client):
+    # A turn on the Suites page (no suite_id — nothing exists yet) must not be
+    # routed through the Test-authoring compiler; it gets mode="suite_authoring"
+    # (or "query") from the dedicated Suite capability, never mode="authoring".
+    all_tests = client.get("/api/v1/tests").json()
+    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
+
+    calls = {"n": 0}
+
+    def script(messages):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tool_calls": [{"name": "create_suite",
+                                    "arguments": {"name": "Smoke suite", "test_ids": [test_id]}}]}
+        return {"answer": "Proposal ready — confirm to create the Suite."}
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "Create a new suite that runs the smoke test",
+        "page_context": {"page": "suites"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "suite_authoring"
+    assert "draft" not in body
+
+
+def test_suite_turn_create_proposal_is_never_auto_applied(client):
+    before = client.get("/api/v1/suites").json()
+    all_tests = client.get("/api/v1/tests").json()
+    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
+
+    calls = {"n": 0}
+
+    def script(messages):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"tool_calls": [{"name": "create_suite",
+                                    "arguments": {"name": "Smoke suite",
+                                                 "description": "Runs the smoke test.",
+                                                 "test_ids": [test_id]}}]}
+        return {"answer": "Proposal ready — confirm to create the Suite."}
+
+    set_model(script)
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "Create a new suite that runs the smoke test",
+        "page_context": {"page": "suites"}})
+    assert r.status_code == 200
+    proposal = r.json().get("suite_proposal")
+    assert proposal is not None
+    assert proposal["action"] == "create"
+    assert proposal["name"] == "Smoke suite"
+    assert proposal["proposed_test_ids"] == [test_id]
+    assert proposal["deterministic_violation"] is None
+    assert proposal["requires_confirmation"] is True
+    # Nothing is created until the human confirms.
+    after = client.get("/api/v1/suites").json()
+    assert len(after) == len(before)
+
+
+def test_suite_create_confirm_creates_suite_end_to_end(client):
+    # The confirm half: a first-time user goes from "nothing exists" to "a Suite
+    # created via the assistant" (issue #66 AC #3).
+    all_tests = client.get("/api/v1/tests").json()
+    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
+
+    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
+        "action": "create", "name": "Assistant-created suite",
+        "description": "Created end-to-end via the Assistant.",
+        "test_ids": [test_id], "deterministic_only": False,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "Assistant-created suite"
+    assert body["test_ids"] == [test_id]
+
+    listed = client.get("/api/v1/suites").json()
+    assert any(s["id"] == body["id"] for s in listed)
+
+
+def test_suite_create_confirm_requires_name(client):
+    r = client.post("/api/v1/assistant/suite-compose/confirm",
+                    json={"action": "create", "test_ids": []})
+    assert r.status_code == 422
+
+
+def test_suite_create_confirm_det_only_violation_refused(client):
+    # Creating a deterministic_only Suite whose member Test has an agentic Check
+    # is refused at confirm time — the safety gate applies to creation too.
+    all_tests = client.get("/api/v1/tests").json()
+    agentic_test = next(
+        (t for t in all_tests if "platform" in t["name"].lower() or "self" in t["name"].lower()),
+        None,
+    )
+    if agentic_test is None:
+        pytest.skip("no agentic test available in the seeded catalog")
+
+    before = client.get("/api/v1/suites").json()
+    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
+        "action": "create", "name": "Bad CI gate",
+        "test_ids": [agentic_test["id"]], "deterministic_only": True,
+    })
+    assert r.status_code == 422
+    after = client.get("/api/v1/suites").json()
+    assert len(after) == len(before)

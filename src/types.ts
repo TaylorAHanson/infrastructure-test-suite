@@ -369,6 +369,21 @@ export interface RcaSuggestion {
   advisory: boolean
 }
 
+/** A proposed Suite creation/composition (issue #66/#63) — never applied until
+ *  the human confirms via `POST /assistant/suite-compose/confirm`. */
+export interface SuiteProposal {
+  action: 'create' | 'add_test' | 'remove_test' | 'reorder' | 'toggle_det_only'
+  suite_id?: string
+  name?: string
+  description?: string
+  tags?: string[]
+  proposed_test_ids: string[]
+  proposed_deterministic_only: boolean
+  deterministic_violation: string | null
+  job_scheduled: boolean
+  requires_confirmation: boolean
+}
+
 /** One tool the Assistant called this turn, surfaced for transparency (#65): the
  *  tool name, the args it was invoked with, and its result. Rendered as a
  *  collapsed one-line indicator, expandable to show args/result. */
@@ -392,10 +407,12 @@ export interface NextAction {
 }
 
 export interface AssistantTurnResponse {
-  mode: 'authoring' | 'rca'
+  mode: 'authoring' | 'rca' | 'suite_authoring' | 'query'
   page: string
   draft?: DraftProposal
   rca?: RcaSuggestion
+  suite_proposal?: SuiteProposal | null
+  answer?: string | null
   clarifying_question?: string
   /** Which tools the agent called this turn, with args/result (additive, #65). */
   tool_calls?: ToolCall[]

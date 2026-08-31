@@ -7,9 +7,22 @@ import {
 } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
-import { useAssistantTurn, useBranding, useCommitDraft, useStarterPrompts } from '../hooks/queries'
+import {
+  useAssistantTurn,
+  useBranding,
+  useCommitDraft,
+  useConfirmCreateSuite,
+  useStarterPrompts,
+} from '../hooks/queries'
 import type { DraftCheckBody } from '../hooks/queries'
-import type { DraftProposal, NextAction, RcaSuggestion, ToolCall, WorkedExample } from '../types'
+import type {
+  DraftProposal,
+  NextAction,
+  RcaSuggestion,
+  SuiteProposal,
+  ToolCall,
+  WorkedExample,
+} from '../types'
 
 interface AssistantShelfProps {
   open: boolean
@@ -34,6 +47,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const pendingFocus = useRef(false)
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
+  const confirmSuite = useConfirmCreateSuite()
   const { data: starters } = useStarterPrompts()
   // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
   const { data: branding } = useBranding()
@@ -42,10 +56,13 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const [text, setText] = useState('')
   const [draft, setDraft] = useState<DraftProposal | null>(null)
   const [rca, setRca] = useState<RcaSuggestion | null>(null)
+  const [suiteProposal, setSuiteProposal] = useState<SuiteProposal | null>(null)
+  const [answer, setAnswer] = useState<string | null>(null)
   // Tool-call transparency + dynamic follow-up buttons for the last answer (#65).
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   const [nextActions, setNextActions] = useState<NextAction[]>([])
   const [savedId, setSavedId] = useState<string | null>(null)
+  const [savedSuiteId, setSavedSuiteId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Which guided-authoring suggestions the human has confirmed (default off:
   // nothing is applied without an explicit confirm — ADR-0006 §5, story 7).
@@ -64,9 +81,12 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     setText(seedPrompt.text)
     setDraft(null)
     setRca(null)
+    setSuiteProposal(null)
+    setAnswer(null)
     setToolCalls([])
     setNextActions([])
     setSavedId(null)
+    setSavedSuiteId(null)
     setError(null)
     pendingFocus.current = true
     // Re-run on every request (nonce changes even when text repeats).
@@ -92,21 +112,39 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     setError(null)
     setDraft(null)
     setRca(null)
+    setSuiteProposal(null)
+    setAnswer(null)
     setToolCalls([])
     setNextActions([])
     setSavedId(null)
+    setSavedSuiteId(null)
     setApplyCf(false)
     setApplyRole(false)
     setApplySuite(false)
     try {
       const res = await turn.mutateAsync({ turn: text, page_context: pageContext })
       if (res.mode === 'authoring') setDraft(res.draft ?? null)
+      else if (res.mode === 'suite_authoring') {
+        setSuiteProposal(res.suite_proposal ?? null)
+        setAnswer(res.answer ?? null)
+      } else if (res.mode === 'query') setAnswer(res.answer ?? null)
       else setRca(res.rca ?? null)
       // Additive: which tools ran + the contextual follow-up buttons (#65).
       setToolCalls(res.tool_calls ?? [])
       setNextActions(res.next_actions ?? [])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'The Assistant could not respond.')
+    }
+  }
+
+  async function confirmSuiteProposal() {
+    if (!suiteProposal || suiteProposal.action !== 'create') return
+    setError(null)
+    try {
+      const created = await confirmSuite.mutateAsync(suiteProposal)
+      setSavedSuiteId(created.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not create the Suite.')
     }
   }
 
@@ -216,7 +254,8 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
 
             {/* Empty-conversation onboarding: concrete example prompts a
                 first-time user can click to see what they can ask (story 30). */}
-            {!draft && !rca && !turn.isPending && starters && starters.length > 0 && (
+            {!draft && !rca && !suiteProposal && !answer && !turn.isPending &&
+              starters && starters.length > 0 && (
               <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
             )}
 
@@ -236,6 +275,16 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
               />
             )}
             {rca && <RcaView rca={rca} />}
+            {suiteProposal && (
+              <SuiteProposalView
+                proposal={suiteProposal}
+                answer={answer}
+                savedId={savedSuiteId}
+                onConfirm={confirmSuiteProposal}
+                confirming={confirmSuite.isPending}
+              />
+            )}
+            {!suiteProposal && !draft && !rca && answer && <AnswerView answer={answer} />}
 
             {/* Dynamic follow-up buttons (#65), rendered from whatever the turn's
                 tools made relevant — generic, not a per-capability button set. */}
@@ -488,6 +537,75 @@ function Suggestion({
         <div className="mt-1 text-[11px] text-muted">{why}</div>
       </div>
     </label>
+  )
+}
+
+// The Suites-page capability's proposal (issue #66/#63): a brand-new Suite or a
+// change to one on screen — never created/applied until the human confirms.
+// Only "create" is confirmable from here; composing an existing Suite (#63)
+// still requires the specific test id and is left to a future entry point.
+function SuiteProposalView({
+  proposal,
+  answer,
+  savedId,
+  onConfirm,
+  confirming,
+}: {
+  proposal: SuiteProposal
+  answer: string | null
+  savedId: string | null
+  onConfirm: () => void
+  confirming: boolean
+}) {
+  const violation = proposal.deterministic_violation
+  return (
+    <div className="space-y-3">
+      {answer && <p className="text-sm text-gray-200">{answer}</p>}
+      <div className="card">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="text-sm font-semibold text-white">
+            {proposal.name || `Suite ${proposal.suite_id ?? ''}`}
+          </span>
+          <span className="badge ml-auto bg-panel text-muted">{proposal.action}</span>
+        </div>
+        {proposal.description && <p className="mb-2 text-xs text-muted">{proposal.description}</p>}
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+          <span className="badge bg-ink-soft text-muted">
+            {proposal.proposed_test_ids.length} tests
+          </span>
+          {proposal.proposed_deterministic_only && (
+            <span className="badge bg-pass/15 text-pass">deterministic-only</span>
+          )}
+          {proposal.job_scheduled && (
+            <span className="badge bg-warn/15 text-warn">used by nightly job</span>
+          )}
+        </div>
+      </div>
+
+      {violation && (
+        <div className="card border-fail/40 bg-fail/5">
+          <div className="mb-1 flex items-center gap-2 card-title text-fail">
+            <ShieldAlert size="14" /> Refused
+          </div>
+          <p className="text-xs text-gray-200">{violation}</p>
+        </div>
+      )}
+
+      {proposal.action === 'create' && !violation && (
+        <button className="btn btn-accent w-full" onClick={onConfirm} disabled={confirming || !!savedId}>
+          {savedId ? 'Created ✓' : confirming ? 'Creating…' : 'Confirm & create Suite'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// A plain query answer (e.g. "do we have a suite for X?") — no draft, no proposal.
+function AnswerView({ answer }: { answer: string }) {
+  return (
+    <div className="card">
+      <p className="text-sm text-gray-200">{answer}</p>
+    </div>
   )
 }
 
