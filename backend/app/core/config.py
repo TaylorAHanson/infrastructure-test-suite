@@ -134,11 +134,6 @@ class Settings(BaseSettings):
     OTEL_ENABLED: bool = False
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None
 
-    # ----- Remote agents ------------------------------------------------
-    # HMAC shared secret used to verify signed results posted by remote agents.
-    # In Databricks this should come from a secret resource, never source code.
-    REMOTE_AGENT_SIGNING_SECRET: Optional[str] = None
-
     # ----- Behaviour flags ----------------------------------------------
     # Auto-seeding is OFF everywhere by default: the platform creates no
     # mock/demo data. Real targets/tests are added via the UI/API. The built-in

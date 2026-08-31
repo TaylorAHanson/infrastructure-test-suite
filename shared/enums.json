@@ -1,88 +1,84 @@
 {
-  "AuthMode": [
-    "APP",
-    "USER"
+  "AuditAction": [
+    "target.register",
+    "target.edit",
+    "target.deregister",
+    "target.safety_class.change",
+    "target.roles.register",
+    "target.roles.change",
+    "test.create",
+    "test.update",
+    "test.rollback",
+    "test.accept",
+    "check.create",
+    "check.update",
+    "check.rollback",
+    "suite.create",
+    "suite.update",
+    "safety.override",
+    "branding.edit",
+    "example.promote",
+    "webhook.config.change"
   ],
   "CleanupPolicy": [
     "ALWAYS",
     "ON_SUCCESS",
-    "NEVER",
-    "BEST_EFFORT"
+    "NEVER"
   ],
-  "ConnectivityOutcome": [
-    "CONNECTABLE",
-    "NOT_CONNECTABLE",
-    "UNKNOWN"
+  "Depth": [
+    "quick",
+    "full"
   ],
-  "ExecutionMode": [
-    "PREFLIGHT",
-    "SMOKE",
-    "FULL"
+  "Evaluator": [
+    "deterministic",
+    "agentic"
   ],
-  "ExecutorKind": [
-    "DATABRICKS_JOB",
-    "APP_INLINE",
-    "SQL_WAREHOUSE",
-    "MODEL_SERVING",
-    "REMOTE_AGENT"
+  "Expectation": [
+    "PASS",
+    "DENY"
+  ],
+  "Phase": [
+    "queued",
+    "running",
+    "terminal"
   ],
   "ProbeOutcome": [
     "PASS",
     "FAIL",
-    "ERROR",
     "SKIP",
-    "PARTIAL"
+    "ERROR"
   ],
   "RequestSource": [
     "UI_MANUAL",
     "SCHEDULE",
     "API",
-    "REMOTE_AGENT",
-    "CI"
+    "CI",
+    "NIGHTLY"
   ],
-  "RootCauseBucket": [
-    "DNS_RESOLUTION_FAILURE",
-    "PRIVATE_DNS_MISCONFIGURATION",
-    "NCC_NOT_ATTACHED",
-    "NETWORK_POLICY_DENY",
-    "PRIVATELINK_ENDPOINT_NOT_ESTABLISHED",
-    "TLS_HANDSHAKE_FAILURE",
-    "OAUTH_SCOPE_MISSING",
-    "APP_RESOURCE_MISSING",
-    "SECRET_MISSING",
-    "PERMISSION_DENIED",
-    "TARGET_NOT_FOUND",
-    "SERVICE_UNSUPPORTED_IN_REGION",
-    "FEATURE_NOT_ENABLED",
-    "BUILD_EGRESS_BLOCKED",
-    "APP_DEPLOYMENT_FAILURE",
-    "UPSTREAM_TIMEOUT",
-    "DATA_VALIDATION_FAILURE",
-    "CLEANUP_FAILURE",
-    "EXTERNAL_AGENT_UNAVAILABLE",
-    "UNKNOWN"
+  "RiskTier": [
+    "R0",
+    "R1",
+    "R2",
+    "R3"
   ],
   "RunStatus": [
     "PENDING",
     "QUEUED",
     "RUNNING",
-    "PASSED",
-    "FAILED",
-    "PARTIAL",
+    "PASS",
+    "FAIL",
     "ERROR",
+    "BLOCKED_BY_SAFETY",
+    "SKIPPED",
     "CANCELLED"
   ],
-  "StepKind": [
-    "PRECHECK",
-    "DNS",
-    "AUTH",
-    "NETWORK",
-    "FUNCTIONAL",
-    "CLEANUP"
+  "SafetyClass": [
+    "read-only",
+    "sandbox",
+    "prod-for-us"
   ],
-  "TestCategory": [
-    "PRODUCER",
-    "PROCESSING",
-    "CONSUMER"
+  "TestStatus": [
+    "draft",
+    "active"
   ]
 }
