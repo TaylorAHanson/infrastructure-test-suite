@@ -43,6 +43,21 @@ _TUTORIAL_TEST_NAMES = {
     "Producer ingestion access", "Processing layer access",
 }
 
+# The Producer/Processing/Consumer posture Checks issue #96 added to
+# CATALOG_CHECK_SPECS. Scoped by name on purpose, same reason as
+# _TUTORIAL_TEST_NAMES above: issue #93 appends an intentionally-agentic Check
+# (admin-count) to that same shared list, so asserting "every
+# CATALOG_CHECK_SPECS entry is deterministic" would break the very split #93
+# establishes.
+_POSTURE_READONLY_CHECK_NAMES = {
+    "DLT pipeline declares a target catalog/schema",
+    "Cluster policies enforce auto-termination",
+    "Cluster policies pin approved instance types and runtime",
+    "Serverless SQL is enabled where expected",
+    "Secret scopes exist (credentials aren't hardcoded)",
+    "Model-serving layer enumerates without error",
+}
+
 
 def test_exemplar_checks_carry_the_tutorial_tag(seeded_session):
     exemplar_names = {spec["display_name"] for _, spec in CHECK_SPECS}
@@ -77,20 +92,12 @@ def test_onboarding_examples_still_present_and_tagged(seeded_session):
 
 def test_posture_catalog_checks_are_readonly_r0_deterministic(seeded_session):
     """issue #96: every Producer/Processing/Consumer posture Check is a GET,
-    R0, deterministic Check — and is not mistaken for a tutorial exemplar.
-
-    Excludes the Identity & Access advisory Check (issue #94), which is a
-    deliberate exception to "every posture Check is deterministic": it's an
-    agentic/advisory least-privilege judgment, asserted separately below.
-    """
-    catalog_names = {spec["display_name"] for _, spec in CATALOG_CHECK_SPECS}
+    R0, deterministic Check — and is not mistaken for a tutorial exemplar."""
     checks = seeded_session.exec(select(Check)).all()
-    catalog_checks = [c for c in checks if c.display_name in catalog_names]
-    assert len(catalog_checks) == len(CATALOG_CHECK_SPECS), (
-        "expected every CATALOG_CHECK_SPECS entry to be seeded")
+    catalog_checks = [c for c in checks if c.display_name in _POSTURE_READONLY_CHECK_NAMES]
+    assert len(catalog_checks) == len(_POSTURE_READONLY_CHECK_NAMES), (
+        "expected every issue #96 posture Check to be seeded")
     for check in catalog_checks:
-        if check.display_name == _IDENTITY_ACCESS_ADVISORY_CHECK:
-            continue
         assert check.operation.get("verb") == "GET", check.display_name
         assert check.risk_tier == RiskTier.R0.value, check.display_name
         assert check.evaluator == Evaluator.DETERMINISTIC, check.display_name

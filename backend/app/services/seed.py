@@ -130,17 +130,22 @@ CHECK_SPECS: list[tuple[str, dict]] = [
 #
 # Slices landed so far: Producer/Processing/Consumer posture reads (#96),
 # Identity & Access (#94, including one deliberately agentic/advisory
-# least-privilege Check), and Governance/Unity Catalog (#95, including its
-# grant-denied counterfactual pair). Every read-only entry declares
-# ``verb="GET"`` explicitly (R0) and phrases its assertion as bare success
-# ("... succeeds" / "... completes without error") — the reachability form for
-# a resource that can legitimately be empty on a clean workspace (a fresh
-# install has zero DLT pipelines, cluster policies, secret scopes, external
-# locations, ...; asserting non-emptiness there would false-fail). That phrase
-# compiles deterministically via ``compile_assertion`` (a bare "ok" predicate),
-# so every non-advisory Check here still gates CI. Security Posture, a
-# reworked CI Gate, and Sandbox Functional (#91's remaining suggested phasing)
-# are later slices, appended here without disturbing these.
+# least-privilege Check), Governance/Unity Catalog (#95, including its
+# grant-denied counterfactual pair), and Security Posture (#93, the platform's
+# SAT-style posture battery: SSO/isolation/exfiltration/token-hygiene settings
+# Checks plus one deliberately agentic admin-count Check). Every read-only
+# entry declares ``verb="GET"`` explicitly (R0) and phrases its assertion as
+# bare success ("... succeeds" / "... completes without error") or a
+# field-comparison ("field == N") — both compile deterministically via
+# ``compile_assertion``, so every non-advisory Check here still gates CI. The
+# bare-success/"without error" form is the reachability shape for a resource
+# that can legitimately be empty on a clean workspace (a fresh install has
+# zero DLT pipelines, cluster policies, secret scopes, external locations,
+# ...; asserting non-emptiness there would false-fail); the field-comparison
+# form is for settings Checks that assert a specific evidence value, seeded via
+# ``demo_evidence`` so every Check stays runnable without a workspace binding.
+# A reworked CI Gate and Sandbox Functional (#91's remaining suggested
+# phasing) are later slices, appended here without disturbing these.
 # ---------------------------------------------------------------------------
 CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
     # --- Producer: ingestion layer -------------------------------------------
@@ -275,6 +280,50 @@ CATALOG_CHECK_SPECS: list[tuple[str, dict]] = [
                                       "demo_outcome": "deny"}),
         handler_key="databricks_sdk",
         assertion="a read the effective identity lacks is denied and fails closed")),
+    # --- Security Posture (issue #93) ----------------------------------------
+    ("sso_enabled", dict(
+        display_name="SSO enabled",
+        description="Confirm federated single sign-on is enabled for the workspace, "
+                    "so authentication doesn't fall back to local passwords.",
+        operation=OperationIn(service="workspace_conf", method="get_status", verb="GET",
+                              params={"keys": "ssoEnabled", "demo_evidence": {"sso_enabled": 1}}),
+        handler_key="databricks_sdk",
+        assertion="sso_enabled == 1")),
+    ("no_isolation_clusters", dict(
+        display_name="No unisolated ('No Isolation Shared') clusters",
+        description="Confirm no cluster in the workspace runs under the permissive "
+                    "No Isolation Shared access mode, so user isolation is enforced workspace-wide.",
+        operation=OperationIn(service="clusters", method="list", verb="GET",
+                              params={"demo_evidence": {"no_isolation_clusters": 0}}),
+        handler_key="databricks_sdk",
+        assertion="no_isolation_clusters == 0")),
+    ("exfiltration_controls_off", dict(
+        display_name="Exfiltration controls disabled",
+        description="Confirm notebook export, results download, and notebook/table clipboard "
+                    "copy are all disabled, closing the primary data-exfiltration surface.",
+        operation=OperationIn(service="workspace_conf", method="get_status", verb="GET",
+                              params={"keys": "enableExportNotebook,enableResultsDownloading,"
+                                              "enableNotebookTableClipboard",
+                                      "demo_evidence": {"exfiltration_controls_enabled": 0}}),
+        handler_key="databricks_sdk",
+        assertion="exfiltration_controls_enabled == 0")),
+    ("pat_expiry_bounded", dict(
+        display_name="Personal access tokens are expiry-bounded",
+        description="Confirm no personal access token is non-expiring and a workspace "
+                    "max-lifetime policy is set, so a leaked PAT can't be used indefinitely.",
+        operation=OperationIn(service="token_management", method="list", verb="GET",
+                              params={"demo_evidence": {"non_expiring_pats": 0}}),
+        handler_key="databricks_sdk",
+        assertion="non_expiring_pats == 0")),
+    ("admin_count_sane", dict(
+        display_name="Workspace-admin count is sane",
+        description="An agentic advisory read: judges whether the number of workspace admins "
+                    "looks reasonable for the workspace, rather than an objective pass/fail. "
+                    "Non-deterministic by design, so it stays advisory and never gates CI.",
+        operation=OperationIn(service="users", method="list", verb="GET",
+                              params={"demo_evidence": {"admin_count": 3}}),
+        handler_key="databricks_sdk",
+        assertion="the workspace-admin count is sane")),
 ]
 
 
@@ -525,6 +574,25 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
              ("gov_grant_read_denied", "counterfactual")],
             ["governance", "uc", "policy", "safety"],
         ),
+        # --- Real posture Tests (Spec #91, issue #93) -------------------------
+        # Security Posture. One Test per Check — tutorial=False (the default),
+        # so none carry TUTORIAL_TAGS; this is headline catalog.
+        "sso": make_test("SSO enforcement", "Federated single sign-on is enabled.",
+                         [("sso_enabled", "assertion")], ["security", "identity", "posture"]),
+        "isolation": make_test("User isolation enforcement",
+                               "No cluster runs under the permissive No Isolation Shared mode.",
+                               [("no_isolation_clusters", "assertion")], ["security", "compute", "posture"]),
+        "exfiltration": make_test("Exfiltration controls",
+                                  "Notebook export, results download, and clipboard copy are off.",
+                                  [("exfiltration_controls_off", "assertion")], ["security", "posture"]),
+        "token_hygiene": make_test("Token hygiene",
+                                   "No non-expiring PATs; a max-lifetime policy is set.",
+                                   [("pat_expiry_bounded", "assertion")], ["security", "identity", "posture"]),
+        "admin_count": make_test("Workspace-admin count (advisory)",
+                                 "Judgement read on whether the admin count looks sane.",
+                                 [("admin_count_sane", "assertion")], ["security", "posture", "advisory"]),
+        # Later slices add entries to this dict here, via make_test(...) without
+        # tutorial=True, wiring CATALOG_CHECK_SPECS checks into Suites below.
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -562,11 +630,19 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
                "UC governance posture: metastore, ISOLATED catalog binding, external-location/"
                "storage-credential reachability, and a grant-denied counterfactual.",
                ["governance"], tags=["seeded", "governance", "uc"])
-    # Remaining real posture Suites (Security Posture, a reworked CI Gate,
-    # Sandbox Functional — Spec #91) are added here by later slices via
-    # make_suite(), the same helper used above — the lane Suites above
-    # (Producer/Processing/Consumer) also grow in place as their slices land,
-    # without disturbing the tutorial Tests they already carry.
+    # Security Posture (issue #93) is the platform's SAT-style posture
+    # battery: read-only/R0 settings Checks plus one agentic advisory Check,
+    # bundled together — a fresh install's first real validation battery, not
+    # a demo. A reworked CI Gate and Sandbox Functional (Spec #91's remaining
+    # suggested phasing) are added here by later slices via make_suite(), the
+    # same helper used above — the lane Suites above (Producer/Processing/
+    # Consumer) also grow in place as their slices land, without disturbing
+    # the tutorial Tests they already carry.
+    make_suite("Security Posture Suite",
+               "SSO, user isolation, exfiltration controls, and token hygiene — "
+               "plus an advisory read on the workspace-admin count.",
+               ["sso", "isolation", "exfiltration", "token_hygiene", "admin_count"],
+               tags=["seeded", "security", "posture"])
 
     if with_demo_targets:
         for t in [
