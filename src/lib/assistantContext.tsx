@@ -3,21 +3,41 @@
 // triage); the app-wide Assistant shelf reads it so its help is grounded in
 // what the user is looking at. This is the wire that makes one app-wide shelf
 // page-aware without embedding it in any single view.
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import type { PageContext } from '../types'
 
+// A request to open the shelf pre-seeded with input text. The `nonce` makes each
+// request distinct even when the text repeats, so the shelf re-opens/re-seeds on
+// every call (e.g. clicking "New test" twice) rather than only on a text change.
+export interface SeedPrompt {
+  text: string
+  nonce: number
+}
+
 interface Ctx {
   pageContext: PageContext
   setPageContext: (ctx: PageContext) => void
+  // The general entry-point mechanism: any surface can open the Assistant shelf
+  // pre-seeded with a starting sentence. The shelf watches `seedPrompt`; callers
+  // invoke `openWithPrompt` to raise a fresh request.
+  seedPrompt: SeedPrompt | null
+  openWithPrompt: (text: string) => void
 }
 
 const AssistantContext = createContext<Ctx | null>(null)
 
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const [pageContext, setPageContext] = useState<PageContext>({ page: '' })
-  const value = useMemo(() => ({ pageContext, setPageContext }), [pageContext])
+  const [seedPrompt, setSeedPrompt] = useState<SeedPrompt | null>(null)
+  const openWithPrompt = useCallback((text: string) => {
+    setSeedPrompt((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  const value = useMemo(
+    () => ({ pageContext, setPageContext, seedPrompt, openWithPrompt }),
+    [pageContext, seedPrompt, openWithPrompt],
+  )
   return <AssistantContext.Provider value={value}>{children}</AssistantContext.Provider>
 }
 
