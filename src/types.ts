@@ -369,11 +369,28 @@ export interface RcaSuggestion {
   advisory: boolean
 }
 
+/** A proposed Suite creation/composition (issue #66/#63) — never applied until
+ *  the human confirms via `POST /assistant/suite-compose/confirm`. */
+export interface SuiteProposal {
+  action: 'create' | 'add_test' | 'remove_test' | 'reorder' | 'toggle_det_only'
+  suite_id?: string
+  name?: string
+  description?: string
+  tags?: string[]
+  proposed_test_ids: string[]
+  proposed_deterministic_only: boolean
+  deterministic_violation: string | null
+  job_scheduled: boolean
+  requires_confirmation: boolean
+}
+
 export interface AssistantTurnResponse {
-  mode: 'authoring' | 'rca'
+  mode: 'authoring' | 'rca' | 'suite_authoring' | 'query'
   page: string
   draft?: DraftProposal
   rca?: RcaSuggestion
+  suite_proposal?: SuiteProposal | null
+  answer?: string | null
   clarifying_question?: string
 }
 

@@ -161,17 +161,56 @@ def _replace_members(session: Session, suite_id: str, test_ids: list[str]) -> No
         session.add(SuiteMember(suite_id=suite_id, test_id=tid, sort_order=i))
 
 
+def _confirm_create_suite(session: Session, payload: SuiteComposeConfirmIn, actor: str) -> dict:
+    """Apply a human-confirmed Suite-creation proposal (issue #66) — the missing
+    "start from nothing" counterpart to `confirm_suite_compose`'s existing actions.
+    """
+    if not payload.name:
+        raise HTTPException(422, "name required for action=create")
+    test_ids = list(payload.test_ids or [])
+    for tid in test_ids:
+        if not session.get(Test, tid):
+            raise HTTPException(404, f"test {tid} not found")
+    deterministic_only = bool(payload.deterministic_only)
+
+    draft_suite = Suite(name=payload.name, deterministic_only=deterministic_only)
+    violation = _suite_safety.check_deterministic_violation(
+        session, draft_suite, test_ids, proposed_deterministic_only=deterministic_only
+    )
+    if violation:
+        raise HTTPException(422, violation)
+
+    suite = Suite(name=payload.name, description=payload.description or "",
+                  tags=list(payload.tags or []), deterministic_only=deterministic_only)
+    session.add(suite)
+    session.commit()
+    session.refresh(suite)
+    _replace_members(session, suite.id, test_ids)
+    session.commit()
+    session.refresh(suite)
+
+    out = _suite_snapshot(session, suite)
+    versioning.snapshot(session, "suite", suite.id, suite.version, out, actor)
+    record_audit(session, actor=actor, action="suite.create", entity_type="suite",
+                 entity_id=suite.id, summary=f"Assistant created suite {suite.name}",
+                 before=None, after=out)
+    return out
+
+
 @router.post("/suite-compose/confirm")
 def confirm_suite_compose(
     payload: SuiteComposeConfirmIn,
     session: Session = Depends(get_session),
     actor: str = Query("assistant"),
 ) -> dict:
-    """Apply a human-confirmed suite composition proposal (suggest-then-confirm).
+    """Apply a human-confirmed suite creation/composition proposal (suggest-then-confirm).
 
     Re-validates the deterministic-only invariant before applying so the safety
     gate cannot be bypassed even if the proposal was generated without the tool.
     """
+    if payload.action == "create":
+        return _confirm_create_suite(session, payload, actor)
+
     suite = session.get(Suite, payload.suite_id)
     if not suite:
         raise HTTPException(404, "suite not found")

@@ -301,18 +301,22 @@ class RunProposalIn(BaseModel):
 
 
 class SuiteComposeConfirmIn(BaseModel):
-    """Confirm a suite composition proposal from a suite tool call (suggest-then-confirm).
+    """Confirm a suite creation/composition proposal from a suite tool call
+    (suggest-then-confirm, issue #66/#63).
 
-    The human confirms (or rejects) a proposal returned by one of the four suite
-    composition tools. The confirm endpoint re-validates the invariant before
-    applying so the safety gate cannot be bypassed.
+    The human confirms (or rejects) a proposal returned by one of the suite
+    creation/composition tools. The confirm endpoint re-validates the invariant
+    before applying so the safety gate cannot be bypassed.
     """
 
-    suite_id: str
-    action: str  # "add_test" | "remove_test" | "reorder" | "toggle_det_only"
+    suite_id: Optional[str] = None  # unset for action="create"
+    action: str  # "create" | "add_test" | "remove_test" | "reorder" | "toggle_det_only"
+    name: Optional[str] = None                    # for create
+    description: str = ""                         # for create
+    tags: list[str] = Field(default_factory=list)  # for create
     test_id: Optional[str] = None       # for add_test / remove_test
-    test_ids: Optional[list[str]] = None  # for reorder
-    deterministic_only: Optional[bool] = None  # for toggle_det_only
+    test_ids: Optional[list[str]] = None  # for create / reorder
+    deterministic_only: Optional[bool] = None  # for create / toggle_det_only
 
 
 # --------------------------- Findings feed (ADR-0009, #33) ----------------

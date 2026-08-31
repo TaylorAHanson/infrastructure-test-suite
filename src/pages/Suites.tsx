@@ -20,11 +20,15 @@ export default function Suites() {
         title="Suites"
         subtitle="A Suite is a named selection of Tests for a Run. A deterministic-only Suite computes its fail-closed verdict from deterministic Checks alone (agentic Checks stay advisory)."
         actions={
+          // Persistent entry point, shown whether or not the catalog is empty —
+          // same treatment as Test Studio's button (issue #59/#66): the chat
+          // icon + "Describe a…" label signal it opens a conversation, not a
+          // blank create form (there is no manual Suite-creation form, ADR-0021).
           <button
             className="btn btn-accent"
             onClick={() => openWithPrompt('Create a new suite that ')}
           >
-            <MessageSquarePlus size="15" /> New Suite
+            <MessageSquarePlus size="15" /> Describe a new suite
           </button>
         }
       />

@@ -16,6 +16,7 @@ import type {
   SafetyClass,
   StudioTest,
   Suite,
+  SuiteProposal,
   Target,
   TestVersion,
   VerdictResource,
@@ -78,6 +79,25 @@ export const useCommitDraft = () => {
   return useMutation({
     mutationFn: (body: CommitDraftBody) => api.post<StudioTest>('/assistant/draft', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['studio-tests'] }),
+  })
+}
+
+/** Confirm a Suite-creation proposal from the Assistant (issue #66) — the confirm
+ *  half of suggest-then-human-confirms; nothing is created until this is called
+ *  with the human's go-ahead. */
+export const useConfirmCreateSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (proposal: SuiteProposal) =>
+      api.post<Suite>('/assistant/suite-compose/confirm', {
+        action: 'create',
+        name: proposal.name,
+        description: proposal.description,
+        tags: proposal.tags,
+        test_ids: proposal.proposed_test_ids,
+        deterministic_only: proposal.proposed_deterministic_only,
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['suites'] }),
   })
 }
 
