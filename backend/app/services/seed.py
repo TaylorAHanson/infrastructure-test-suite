@@ -79,6 +79,28 @@ CHECK_SPECS: list[tuple[str, dict]] = [
                               params={"statement": "SELECT 1", "demo_row_count": 1}),
         handler_key="sql_warehouse",
         assertion="the warehouse came up healthy-ish")),
+    # --- Producer-category checks -------------------------------------------
+    ("jobs_list", dict(
+        display_name="Databricks Jobs list",
+        description="List Databricks Jobs to confirm the batch ingestion / workflow layer is reachable.",
+        operation=OperationIn(service="jobs", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the job list without error")),
+    ("pipelines_list", dict(
+        display_name="Delta Live Tables pipeline list",
+        description="List DLT pipelines to confirm the streaming/ETL ingestion layer is accessible.",
+        operation=OperationIn(service="pipelines", method="list_pipelines", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        assertion="the call returns the pipeline list without error")),
+    # --- Processing-category checks -----------------------------------------
+    ("warehouses_list", dict(
+        display_name="SQL warehouse inventory",
+        description="List all SQL warehouses to confirm the compute processing tier can be enumerated.",
+        operation=OperationIn(service="warehouses", method="list", verb="GET", params={}),
+        handler_key="databricks_sdk",
+        # Reachability assertion only — a fresh workspace may have zero warehouses,
+        # so asserting a non-empty result would false-fail a clean install.
+        assertion="the call returns the warehouse list without error")),
 ]
 
 
@@ -226,17 +248,31 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
 
     tests = {
         "sql": make_test("SQL Warehouse validation", "Warehouse reachable + returns rows.",
-                         [("sql_healthcheck", "assertion")], ["sql", "connectivity"]),
+                         [("sql_healthcheck", "assertion")], ["sql", "consumer", "connectivity"]),
         "uc": make_test("Unity Catalog access", "UC access via the SQL warehouse.",
-                        [("uc_listing", "assertion")], ["uc", "governance"]),
+                        [("uc_listing", "assertion")], ["uc", "consumer", "governance"]),
         "egress": make_test("Egress connectivity", "Outbound HTTPS egress works.",
                             [("egress_example", "assertion")], ["consumer", "egress"]),
         "policy": make_test("Cluster policy enforcement", "Compliant allowed; non-compliant denied.",
                             [("cluster_create_allowed", "assertion"),
-                             ("cluster_create_denied", "counterfactual")], ["policy", "safety"]),
+                             ("cluster_create_denied", "counterfactual")], ["processing", "policy", "safety"]),
         "self": make_test("Platform self-check", "The app's own store + a health read.",
                           [("lakebase_txn", "assertion"),
                            ("warehouse_healthy_ish", "assertion")], ["platform"]),
+        # --- Producer-category tests ----------------------------------------
+        "producer": make_test(
+            "Producer ingestion access",
+            "Databricks Jobs and DLT pipelines are reachable — the ingestion layer is up.",
+            [("jobs_list", "assertion"), ("pipelines_list", "assertion")],
+            ["producer", "ingestion", "connectivity"],
+        ),
+        # --- Processing-category tests --------------------------------------
+        "processing": make_test(
+            "Processing layer access",
+            "SQL warehouses can be enumerated — the compute processing tier is reachable.",
+            [("warehouses_list", "assertion")],
+            ["processing", "compute", "connectivity"],
+        ),
     }
 
     # Suites: grouping only. CI Gate is deterministic-only (ADR-0008).
@@ -257,6 +293,13 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
     make_suite("Full Regression", "Every seeded Test.", list(tests.keys()))
     make_suite("CI Gate", "Deterministic-only gate for the CI trigger.",
                ["sql", "policy"], deterministic_only=True, tags=["seeded", "ci"])
+    # Category suites — one per Producer/Processing/Consumer lane (README §2).
+    make_suite("Producer Suite", "Ingestion and pipeline layer reachability.",
+               ["producer"], tags=["seeded", "producer"])
+    make_suite("Processing Suite", "Compute and policy layer validation.",
+               ["processing", "policy"], tags=["seeded", "processing"])
+    make_suite("Consumer Suite", "SQL access, UC governance, and egress paths.",
+               ["sql", "uc", "egress"], tags=["seeded", "consumer"])
 
     if with_demo_targets:
         for t in [
@@ -270,5 +313,7 @@ def seed_all(session: Session, with_demo_targets: bool = True, **_ignored) -> No
             session.add(t)
         session.commit()
 
+    from sqlmodel import select as _select
+    suite_count = len(session.exec(_select(Suite)).all())
     logger.info("Seed complete: %d checks, %d tests, %d suites.",
-                len(checks), len(tests), 3)
+                len(checks), len(tests), suite_count)
