@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from app.core.enums import ProbeOutcome
+from app.core.enums import StageStatus
 
 
 @dataclass(frozen=True)
@@ -87,16 +87,16 @@ def is_connectivity_stage(stage_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Derived connectable / functional view
 # ---------------------------------------------------------------------------
-def _outcome_of(item: object) -> Optional[ProbeOutcome]:
+def _outcome_of(item: object) -> Optional[StageStatus]:
     """Read a stage outcome off a StageOutcome row, a StageResult, or a dict."""
     value = getattr(item, "outcome", None)
     if value is None and isinstance(item, dict):
         value = item.get("outcome")
     if value is None:
         return None
-    if isinstance(value, ProbeOutcome):
+    if isinstance(value, StageStatus):
         return value
-    return ProbeOutcome(value)
+    return StageStatus(value)
 
 
 def _stage_of(item: object) -> Optional[str]:
@@ -125,7 +125,7 @@ def derive_connectivity(stage_outcomes: Iterable[object]) -> dict:
     for item in stage_outcomes:
         stage_id = _stage_of(item)
         outcome = _outcome_of(item)
-        if stage_id is None or outcome is None or outcome == ProbeOutcome.SKIP:
+        if stage_id is None or outcome is None or outcome == StageStatus.SKIP:
             continue
         if is_connectivity_stage(stage_id):
             conn_ran += 1

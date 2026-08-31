@@ -8,7 +8,7 @@ entry rather than a code migration.
 
 What stays an enum here is the genuinely small, closed vocabulary:
 
-* :class:`ProbeOutcome` — the per-stage outcome primitive (pass/fail/skip/error).
+* :class:`StageStatus` — the per-stage outcome primitive (pass/fail/skip/error).
 * :class:`RunStatus`   — a Run's lifecycle + terminal verdict.
 * :class:`Evaluator`   — how a Check's assertion is judged (ADR-0008).
 * :class:`Expectation` — whether a Check expects success or a denial (counterfactual).
@@ -22,7 +22,7 @@ from __future__ import annotations
 from enum import Enum
 
 
-class ProbeOutcome(str, Enum):
+class StageStatus(str, Enum):
     """Outcome of a single stage on the canonical spine."""
 
     PASS = "PASS"
@@ -32,7 +32,7 @@ class ProbeOutcome(str, Enum):
 
     @property
     def failed(self) -> bool:
-        return self in (ProbeOutcome.FAIL, ProbeOutcome.ERROR)
+        return self in (StageStatus.FAIL, StageStatus.ERROR)
 
 
 class RunStatus(str, Enum):

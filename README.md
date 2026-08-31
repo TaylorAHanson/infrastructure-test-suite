@@ -64,7 +64,7 @@ See [`docs/architecture.md`](docs/architecture.md) for detail.
   global blocklist is the R3-never floor.
 - **Handler = the pluggable unit**: a Handler performs one kind of operation
   against a bound Target. Four ship today —
-  [`backend/app/executors/builtin`](backend/app/executors/builtin).
+  [`backend/app/handlers/builtin`](backend/app/handlers/builtin).
 - **Durable history**: app logs are ephemeral on Databricks Apps; run history
   and the audit log live in Lakebase.
 - **Databricks-native auth**: the injected App service-principal OAuth
@@ -83,7 +83,7 @@ backend/            FastAPI app, handlers, services, poller, migrations
                     not enums), open-SDK operation model + blocklist, config
   app/models        SQLModel tables (Check, Test, Suite, Target, RunRequest,
                     CheckRun, StageOutcome, TargetLease, AuditEvent, ...)
-  app/executors     Handler ABC + registry (keyed by handler_key) + builtins
+  app/handlers      Handler ABC + registry (keyed by handler_key) + builtins
   app/services      run engine, target locking, safety gate, risk tiering,
                      authoring, assertion compiler, agentic evaluator,
                      findings, flaky detection, retention, audit, versioning,
@@ -177,7 +177,7 @@ TLS handshake, OAuth scope, ...) to a concrete remediation.
 
 Four Handlers ship live — `databricks_sdk` (open-SDK: any Databricks SDK/API
 call, bounded by the blocklist), `sql_warehouse`, `outbound_http`, and
-`lakebase` (see [`backend/app/executors/builtin`](backend/app/executors/builtin)).
+`lakebase` (see [`backend/app/handlers/builtin`](backend/app/handlers/builtin)).
 The repo ships a worked-example library of Checks, Tests, and Suites built on
 those four Handlers — Test Studio and the Assistant are how you grow the
 catalog from there; a new Test does not require a new Handler.

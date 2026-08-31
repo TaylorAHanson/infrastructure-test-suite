@@ -25,11 +25,11 @@ from app.core.enums import (
     Depth,
     Evaluator,
     Expectation,
-    ProbeOutcome,
     RequestSource,
     RiskTier,
     RunStatus,
     SafetyClass,
+    StageStatus,
     TestStatus,
 )
 from app.core.ids import new_id, utcnow
@@ -346,7 +346,7 @@ class StageOutcome(SQLModel, table=True):
     stage: str = Field(index=True)  # canonical stage id, e.g. "AUTHENTICATE"
     sort_order: int = Field(default=0)
 
-    outcome: ProbeOutcome = Field(default=ProbeOutcome.SKIP)
+    outcome: StageStatus = Field(default=StageStatus.SKIP)
     message: str = ""
     failure_bucket: Optional[str] = Field(default=None, index=True)
     raw_excerpt: Optional[str] = Field(default=None, sa_column=Column(Text))

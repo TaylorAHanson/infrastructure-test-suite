@@ -17,9 +17,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Optional
 
-from app.core.enums import ProbeOutcome
-from app.executors.base import Handler, HandlerContext, HandlerError, StageResult
-from app.executors.registry import register
+from app.core.enums import StageStatus
+from app.handlers.base import Handler, HandlerContext, HandlerError, StageResult
+from app.handlers.registry import register
 
 #: Params that steer demo simulation / handler bookkeeping rather than the
 #: real SDK call — stripped before an operation's ``params`` become call kwargs.
@@ -106,13 +106,13 @@ class _SpineMixin:
 
     def stage_authenticate(self, ctx: HandlerContext) -> StageResult:
         if ctx.demo_mode:
-            return StageResult("AUTHENTICATE", ProbeOutcome.PASS, message="Demo mode: identity simulated.")
+            return StageResult("AUTHENTICATE", StageStatus.PASS, message="Demo mode: identity simulated.")
         try:
             client = self._client(ctx)
             me = client.current_user.me()
             who = getattr(me, "user_name", None) or "service-principal"
             suffix = f" (assumed role {ctx.assumed_group})" if ctx.assumed_group else ""
-            return StageResult("AUTHENTICATE", ProbeOutcome.PASS, message=f"Authenticated as {who}{suffix}.")
+            return StageResult("AUTHENTICATE", StageStatus.PASS, message=f"Authenticated as {who}{suffix}.")
         except Exception as exc:  # noqa: BLE001
             raise HandlerError(f"Authentication failed: {exc}", failure_bucket="AUTHENTICATION_FAILURE")
 
@@ -125,10 +125,10 @@ class _SpineMixin:
                 "Operation denied for the effective identity (fails closed).",
                 failure_bucket="PERMISSION_DENIED",
             )
-        return StageResult("AUTHORIZE", ProbeOutcome.PASS, message="Identity is authorized for this operation.")
+        return StageResult("AUTHORIZE", StageStatus.PASS, message="Identity is authorized for this operation.")
 
     def stage_verify(self, ctx: HandlerContext) -> StageResult:
-        return StageResult("VERIFY", ProbeOutcome.PASS, message="Response verified.")
+        return StageResult("VERIFY", StageStatus.PASS, message="Response verified.")
 
 
 @register("databricks_sdk")
@@ -147,7 +147,7 @@ class DatabricksSdkHandler(_SpineMixin, Handler):
                     failure_bucket="OPERATION_FAILED",
                 )
             return StageResult(
-                "OPERATE", ProbeOutcome.PASS,
+                "OPERATE", StageStatus.PASS,
                 message=f"Performed {ctx.operation.qualified or 'SDK call'}.",
                 evidence=evidence,
                 raw_excerpt=str(ctx.operation.to_dict()),
@@ -180,7 +180,7 @@ class DatabricksSdkHandler(_SpineMixin, Handler):
         self._operate_ok = True
         self._operate_evidence = evidence
         return StageResult(
-            "OPERATE", ProbeOutcome.PASS,
+            "OPERATE", StageStatus.PASS,
             message=f"Performed {ctx.operation.qualified}.",
             evidence=evidence,
             raw_excerpt=str(response)[:2000],
@@ -211,7 +211,7 @@ class DatabricksSdkHandler(_SpineMixin, Handler):
         call_params = {k: _resolve_ref(v, evidence) for k, v in dict(plan.get("params", {})).items()}
         method(**call_params)
         return StageResult(
-            "VERIFY", ProbeOutcome.PASS,
+            "VERIFY", StageStatus.PASS,
             message=f"Cleaned up via {plan['service']}.{plan['method']}.",
         )
 
@@ -223,7 +223,7 @@ class UnsupportedHandler(Handler):
 
     def stage_authorize(self, ctx: HandlerContext) -> StageResult:
         return StageResult(
-            "AUTHORIZE", ProbeOutcome.SKIP,
+            "AUTHORIZE", StageStatus.SKIP,
             message=f"No handler registered for '{getattr(ctx.check, 'handler_key', '?')}'.",
             failure_bucket="SERVICE_UNSUPPORTED",
         )

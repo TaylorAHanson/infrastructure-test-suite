@@ -8,10 +8,10 @@ row-count assertions ("returns at least one row") can be evaluated locally.
 from __future__ import annotations
 
 from app.core.config import settings
-from app.core.enums import ProbeOutcome
-from app.executors.base import HandlerContext, HandlerError, StageResult
-from app.executors.builtin.generic import DatabricksSdkHandler, _demo_outcome
-from app.executors.registry import register
+from app.core.enums import StageStatus
+from app.handlers.base import HandlerContext, HandlerError, StageResult
+from app.handlers.builtin.generic import DatabricksSdkHandler, _demo_outcome
+from app.handlers.registry import register
 
 
 @register("sql_warehouse")
@@ -28,7 +28,7 @@ class SqlWarehouseHandler(DatabricksSdkHandler):
         if ctx.demo_mode:
             row_count = int(ctx.param("demo_row_count", 1))
             return StageResult(
-                "OPERATE", ProbeOutcome.PASS, message=f"Statement returned {row_count} row(s).",
+                "OPERATE", StageStatus.PASS, message=f"Statement returned {row_count} row(s).",
                 raw_excerpt=statement, evidence={"row_count": row_count, "statement": statement},
             )
         try:
@@ -38,7 +38,7 @@ class SqlWarehouseHandler(DatabricksSdkHandler):
             )
             rows = resp.result.data_array if (resp.result and resp.result.data_array) else []
             return StageResult(
-                "OPERATE", ProbeOutcome.PASS, message=f"Statement returned {len(rows)} row(s).",
+                "OPERATE", StageStatus.PASS, message=f"Statement returned {len(rows)} row(s).",
                 raw_excerpt=statement, evidence={"row_count": len(rows), "first_row": rows[0] if rows else None},
             )
         except Exception as exc:  # noqa: BLE001

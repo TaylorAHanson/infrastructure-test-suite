@@ -19,7 +19,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from app.core.enums import CleanupPolicy, Depth, ProbeOutcome
+from app.core.enums import CleanupPolicy, Depth, StageStatus
 from app.core.ids import utcnow
 from app.core.operations import Operation
 from app.core.stages import ordered_stages
@@ -33,7 +33,7 @@ class HandlerError(Exception):
         message: str,
         failure_bucket: str = "UNKNOWN",
         recommendation: Optional[str] = None,
-        outcome: ProbeOutcome = ProbeOutcome.FAIL,
+        outcome: StageStatus = StageStatus.FAIL,
     ) -> None:
         super().__init__(message)
         self.failure_bucket = failure_bucket
@@ -46,7 +46,7 @@ class StageResult:
     """The outcome of one stage on the canonical spine."""
 
     stage: str
-    outcome: ProbeOutcome = ProbeOutcome.SKIP
+    outcome: StageStatus = StageStatus.SKIP
     message: str = ""
     failure_bucket: Optional[str] = None
     evidence: dict = field(default_factory=dict)
@@ -97,7 +97,7 @@ class Handler:
     run depth) in spine order. Everything else is a clean SKIP.
     """
 
-    #: Registry key (set via :func:`app.executors.registry.register`).
+    #: Registry key (set via :func:`app.handlers.registry.register`).
     handler_key: str = "base"
     #: Canonical stage ids this handler maps onto (spine order enforced by base).
     STAGES: tuple[str, ...] = ()
@@ -121,7 +121,7 @@ class Handler:
     def _dispatch(self, stage_id: str, ctx: HandlerContext) -> StageResult:
         method = getattr(self, f"stage_{stage_id.lower()}", None)
         if method is None:
-            return StageResult(stage_id, ProbeOutcome.SKIP, message=f"No {stage_id} stage implemented.")
+            return StageResult(stage_id, StageStatus.SKIP, message=f"No {stage_id} stage implemented.")
         return method(ctx)
 
     def _run_one(self, stage_id: str, ctx: HandlerContext) -> StageResult:
@@ -137,7 +137,7 @@ class Handler:
             )
         except Exception as exc:  # noqa: BLE001 - classify everything, never crash a run
             result = StageResult(
-                stage=stage_id, outcome=ProbeOutcome.ERROR, message=str(exc),
+                stage=stage_id, outcome=StageStatus.ERROR, message=str(exc),
                 failure_bucket="UNKNOWN", raw_excerpt=_excerpt(traceback.format_exc()),
             )
         result.stage = stage_id
@@ -172,7 +172,7 @@ class Handler:
         try:
             result = self.cleanup(ctx)
         except Exception as exc:  # noqa: BLE001
-            result = StageResult("VERIFY", ProbeOutcome.ERROR, message=f"Cleanup failed: {exc}",
+            result = StageResult("VERIFY", StageStatus.ERROR, message=f"Cleanup failed: {exc}",
                                  failure_bucket="CLEANUP_FAILURE")
         if result is None:
             return None
