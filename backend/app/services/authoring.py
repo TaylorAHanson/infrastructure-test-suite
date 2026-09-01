@@ -31,6 +31,7 @@ from typing import Any, Callable, Optional
 
 from sqlmodel import Session, select
 
+from app.core import sdk_surface
 from app.core.enums import Expectation, RiskTier, SafetyClass
 from app.core.operations import Operation
 from app.handlers.registry import OperationBlocked, validate_operation
@@ -235,11 +236,25 @@ def _ask_model(model_call: Optional[ModelCall], intent: str, grounding: dict) ->
     return plan, bool(plan)
 
 
-def _resolve_operation(plan: dict, grounding: dict) -> tuple[Optional[dict], Optional[dict], str]:
+#: Minimum term-coverage (0..1, see :func:`app.core.sdk_surface.top_match_confidence`)
+#: the top SDK-surface hit must clear before the deterministic fallback adopts
+#: it unconditionally. Below this, the match is a weak/fuzzy one (a greeting, a
+#: meta-question, gibberish that happens to share a substring with a keyword) —
+#: the fallback must abstain (→ the clarifying-question proposal) rather than
+#: silently author a bogus check from chit-chat. A genuine intent the model
+#: didn't parse still clears this bar comfortably (most of its terms land on
+#: one entry), so the model-free deterministic path stays green.
+_MIN_SURFACE_CONFIDENCE = 0.34
+
+
+def _resolve_operation(intent: str, plan: dict,
+                       grounding: dict) -> tuple[Optional[dict], Optional[dict], str]:
     """Pick the operation to author: the model's, else the top grounded hit.
 
     Returns ``(operation_dict, source_surface_entry, name_hint)``. ``operation``
-    is None only when nothing could be resolved (→ a clarifying question).
+    is None when nothing could be resolved, or when the only grounded candidate
+    is below :data:`_MIN_SURFACE_CONFIDENCE` — both cases fall through to a
+    clarifying question rather than guessing.
     """
     surface = grounding.get("sdk_surface") or []
     plan_op = plan.get("operation") or {}
@@ -257,7 +272,7 @@ def _resolve_operation(plan: dict, grounding: dict) -> tuple[Optional[dict], Opt
         name_hint = str(plan.get("name") or f"{service}.{method}")
         return op, source, name_hint
 
-    if surface:
+    if surface and sdk_surface.top_match_confidence(intent) >= _MIN_SURFACE_CONFIDENCE:
         top = surface[0]
         op = Operation(service=top["service"], method=top["method"],
                        verb=top.get("verb", ""), params={}).to_dict()
@@ -365,7 +380,7 @@ def build_draft(session: Session, intent: str, plan: dict, model_available: bool
         grounding = _grounding(session, intent, target)
     safety_class = target.safety_class if target else None
 
-    operation, source, name_hint = _resolve_operation(plan, grounding)
+    operation, source, name_hint = _resolve_operation(intent, plan, grounding)
     if operation is None:
         # A required slot (the operation) is unresolved — ask one focused
         # question rather than guess (hybrid interaction, ADR-0006 §1).
