@@ -15,13 +15,13 @@ from sqlmodel import select
 from app.core.enums import Evaluator, RiskTier
 from app.models import Check, Suite, SuiteMember, Test, TestCheck, WorkedExample
 from app.services.seed import (
-    CATALOG_CHECK_SPECS,
     CHECK_SPECS,
     ONBOARDING_EXAMPLES,
     TUTORIAL_TAGS,
     WORKED_EXAMPLES,
     seed_all,
 )
+from app.services.seed.domains.identity_access import CHECK_SPECS as IDENTITY_ACCESS_CHECK_SPECS
 
 # The three deterministic, read-only (R0) reads in the Identity & Access
 # slice (issue #94) — the least-privilege judgment Check is asserted
@@ -43,12 +43,12 @@ _TUTORIAL_TEST_NAMES = {
     "Producer ingestion access", "Processing layer access",
 }
 
-# The Producer/Processing/Consumer posture Checks issue #96 added to
-# CATALOG_CHECK_SPECS. Scoped by name on purpose, same reason as
-# _TUTORIAL_TEST_NAMES above: issue #93 appends an intentionally-agentic Check
-# (admin-count) to that same shared list, so asserting "every
-# CATALOG_CHECK_SPECS entry is deterministic" would break the very split #93
-# establishes.
+# The Producer/Processing/Consumer posture Checks issue #96 added, each now
+# owned by its own domain module (#107). Scoped by name on purpose, same
+# reason as _TUTORIAL_TEST_NAMES above: issue #93's Security Posture module
+# owns an intentionally-agentic Check (admin-count) of its own, so asserting
+# "every posture Check anywhere is deterministic" would break the very split
+# #93 establishes.
 _POSTURE_READONLY_CHECK_NAMES = {
     "DLT pipeline declares a target catalog/schema",
     "Cluster policies enforce auto-termination",
@@ -158,9 +158,9 @@ def test_identity_access_suite_is_seeded_and_nonempty(seeded_session):
 def test_identity_access_readonly_checks_are_r0_deterministic(seeded_session):
     checks = {c.display_name: c for c in seeded_session.exec(select(Check)).all()}
     assert len(_IDENTITY_ACCESS_DETERMINISTIC_CHECKS) == sum(
-        1 for _, spec in CATALOG_CHECK_SPECS
+        1 for _, spec in IDENTITY_ACCESS_CHECK_SPECS
         if spec["display_name"] in _IDENTITY_ACCESS_DETERMINISTIC_CHECKS
-    ), "expected every deterministic Identity & Access Check to be declared in CATALOG_CHECK_SPECS"
+    ), "expected every deterministic Identity & Access Check to be declared in its domain module"
     for name in _IDENTITY_ACCESS_DETERMINISTIC_CHECKS:
         check = checks[name]
         assert check.operation.get("verb") == "GET", f"{name!r} must be a read (verb=GET)"

@@ -44,10 +44,20 @@ class SuiteSpec:
 
 @dataclass(frozen=True)
 class Contribution:
-    """A domain module's slice of the seed catalog."""
+    """A domain module's slice of the seed catalog.
+
+    ``ci_gate_tests`` is the CI Gate's opt-in seam (#98): a domain module that
+    owns a deterministic, read-only (R0) Test lists its own key(s) here to
+    volunteer for the CI Gate. The ``ci_gate`` domain module composes the
+    gate's membership by collecting every discovered contribution's
+    ``ci_gate_tests`` and re-deriving each member Check's evaluator/risk tier
+    from its spec before trusting the opt-in — so a domain never needs to
+    edit ``ci_gate`` itself to join (or be kept out of) the gate.
+    """
 
     check_specs: list[tuple[str, dict]] = field(default_factory=list)
     check_tags: list[str] = field(default_factory=list)
     tests: dict[str, TestSpec] = field(default_factory=dict)
     suites: list[SuiteSpec] = field(default_factory=list)
     worked_examples: list[dict] = field(default_factory=list)
+    ci_gate_tests: list[str] = field(default_factory=list)

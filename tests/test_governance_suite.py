@@ -17,7 +17,7 @@ from app.handlers.base import HandlerContext
 from app.handlers.builtin.generic import DatabricksSdkHandler
 from app.models import Check, Suite, SuiteMember, Test, TestCheck
 from app.services.assertion_compiler import evaluate_predicate
-from app.services.seed import CATALOG_CHECK_SPECS
+from app.services.seed.domains.governance import CHECK_SPECS as GOVERNANCE_CHECK_SPECS
 
 _GOVERNANCE_READ_KEYS = {
     "gov_metastore_assigned", "gov_catalog_isolated",
@@ -27,7 +27,7 @@ _REACHABILITY_KEYS = {"gov_external_locations", "gov_storage_credentials"}
 
 
 def _governance_checks(session) -> dict[str, Check]:
-    names_by_key = {k: spec["display_name"] for k, spec in CATALOG_CHECK_SPECS if k.startswith("gov_")}
+    names_by_key = {k: spec["display_name"] for k, spec in GOVERNANCE_CHECK_SPECS}
     checks = session.exec(select(Check)).all()
     by_name = {c.display_name: c for c in checks}
     return {key: by_name[name] for key, name in names_by_key.items()}
