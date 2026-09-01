@@ -140,3 +140,16 @@ def test_works_without_a_model_using_deterministic_fallback(seeded_session):
                                         model_call=None)
     assert draft.checks
     assert draft.derivation["model_available"] is False
+
+
+# ------------------ conversational-turn abstention guard (issue #112) ------------------
+def test_is_conversational_turn_recognises_greetings_and_meta_questions():
+    for turn in ("hi", "Hello!", "hey there", "Test are you working?",
+                 "what can you do?", "who are you?", "thanks!"):
+        assert authoring.is_conversational_turn(turn), turn
+
+
+def test_is_conversational_turn_leaves_real_intents_alone():
+    for turn in ("run a sql query on the warehouse", "list the jobs",
+                 "create a cluster and confirm it starts", "zzzz qwerty", ""):
+        assert not authoring.is_conversational_turn(turn), turn
