@@ -180,6 +180,25 @@ def test_turn_asks_a_clarifying_question_when_slot_missing(client):
     assert r.json()["draft"]["clarifying_question"]
 
 
+def test_turn_abstains_on_weak_grounding_match_from_chit_chat(client):
+    # A greeting the model didn't resolve into an operation must not fall back
+    # to guessing *something* just because it fuzzy-matches a keyword substring
+    # (e.g. "are" inside "warehouse") — the safety floor for the "assistant
+    # invents a bogus test from chit-chat" bug (issue #111). Below the surface's
+    # relevance/confidence threshold, the fallback abstains: a clarifying
+    # question and zero checks, so the shelf never renders Save as Draft.
+    set_model({})  # model yields nothing usable
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": "hi there, how are you doing today?",
+        "page_context": {"page": "test-studio"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "authoring"
+    draft = body["draft"]
+    assert draft["clarifying_question"]
+    assert draft["checks"] == []
+
+
 def test_turn_grounds_on_sdk_surface_operation_not_pre_declared(client):
     set_model({"operation": {"service": "jobs", "method": "list", "params": {}},
                "assertion": "the operation succeeds", "name": "list jobs"})

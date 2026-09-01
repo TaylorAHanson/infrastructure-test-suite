@@ -160,6 +160,11 @@ def find_operation(service: str, method: str) -> Optional[SdkOperation]:
     return None
 
 
+def _tokenize(query: str) -> list[str]:
+    """Normalise a free-text query into filter terms (len > 2, comma-tolerant)."""
+    return [t for t in (query or "").lower().replace(",", " ").split() if len(t) > 2]
+
+
 def _score(op: SdkOperation, terms: list[str]) -> int:
     """Crude relevance: how many query terms hit the entry's searchable text."""
     haystack = " ".join(
@@ -176,7 +181,24 @@ def search_sdk_surface(query: str, limit: int = 8) -> list[SdkOperation]:
     blocklisted operation is never returned (it is filtered from the surface),
     so a suggestion can never name a catastrophic call.
     """
-    terms = [t for t in (query or "").lower().replace(",", " ").split() if len(t) > 2]
+    terms = _tokenize(query)
     scored = [(op, _score(op, terms)) for op in all_operations()]
     hits = [op for op, s in sorted(scored, key=lambda x: x[1], reverse=True) if s > 0]
     return hits[:limit]
+
+
+def top_match_confidence(query: str) -> float:
+    """The best surface hit's term-coverage for ``query``, as a 0..1 fraction.
+
+    The fraction of ``query``'s terms the single best-matching entry covers —
+    ``0.0`` when the query has no terms or nothing on the surface matches at
+    all. This is what lets a caller tell a grounded intent ("run a sql query on
+    the warehouse", most terms covered by one entry) apart from an incidental
+    one-word overlap in an unrelated sentence (a greeting, a meta-question,
+    gibberish that happens to contain a common substring of a keyword).
+    """
+    terms = _tokenize(query)
+    if not terms:
+        return 0.0
+    best = max((_score(op, terms) for op in all_operations()), default=0)
+    return best / len(terms)

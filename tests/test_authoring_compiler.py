@@ -123,6 +123,17 @@ def test_missing_operation_slot_asks_one_clarifying_question(seeded_session):
     assert draft.checks == []
 
 
+def test_weak_surface_match_abstains_instead_of_guessing(seeded_session):
+    # "are" fuzzy-matches a substring of the "warehouse" keyword, so the surface
+    # isn't empty — but it covers only 1 of 6 query terms, well below the
+    # confidence bar. The fallback must abstain rather than silently draft a
+    # check from a greeting (issue #111).
+    draft = authoring.draft_from_intent(
+        seeded_session, "hi there, how are you doing today?", model_call=_model({}))
+    assert draft.clarifying_question
+    assert draft.checks == []
+
+
 def test_works_without_a_model_using_deterministic_fallback(seeded_session):
     # No model at all: grounds on the surface and still produces a draft.
     draft = authoring.draft_from_intent(seeded_session, "run a sql query on the warehouse",
