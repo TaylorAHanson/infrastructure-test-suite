@@ -449,6 +449,10 @@ _AUTHORING_TOOL_SYSTEM = (
     "target's registered roles as needed. "
     "For a query turn (e.g. 'Do we have a test for X?', 'What happened last run?'), "
     "call the appropriate read tool(s), then reply with {\"answer\": \"<plain-English answer>\"}. "
+    "For a meta, greeting, or chit-chat turn that isn't a request to author, query, or manage "
+    "anything (e.g. 'hi', 'are you working?', 'what can you do?'), skip the tools and reply with "
+    "{\"answer\": \"<a short, plain-English blurb of what you can help with>\"} — never a "
+    "clarifying question or a Draft. "
     "For authoring, reply with a single JSON object: {\"name\", \"description\", "
     "\"operation\": {\"service\", \"method\", \"params\"}, \"assertion\", \"handler_key\", "
     "\"run_as_role\" (or null), \"counterfactual\": {\"assertion\", \"params\"} or null, "
@@ -630,6 +634,15 @@ def _authoring_turn(session: Session, payload: AssistantTurnIn,
     if plan.get("answer") and "operation" not in plan and "name" not in plan:
         return {"mode": "query", "page": ctx.page, "answer": plan["answer"],
                 "tool_calls": executed}
+    # Deterministic guard (issue #112): the model gave nothing resolvable (no
+    # model configured, or a degraded reply) *and* the turn itself is a
+    # greeting/meta/chit-chat turn — abstain into the capability blurb instead
+    # of a clarifying-question Draft. The model-free safety net; #111's
+    # weak-surface-match abstention (inside build_draft) remains the fallback
+    # for anything this classifier misses.
+    if "operation" not in plan and "name" not in plan and authoring.is_conversational_turn(intent):
+        return {"mode": "query", "page": ctx.page,
+                "answer": authoring.CONVERSATIONAL_ANSWER, "tool_calls": executed}
     proposal = authoring.build_draft(session, intent, plan, bool(plan), target,
                                      grounding=grounding)
     return {"mode": "authoring", "page": ctx.page, "draft": proposal.to_dict(),

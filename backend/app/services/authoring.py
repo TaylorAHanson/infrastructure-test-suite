@@ -194,6 +194,47 @@ def parse_json_object(text: str) -> dict:
         return {}
 
 
+#: Deterministic patterns for a meta / greeting / chit-chat turn — not a request
+#: to author, query, or manage anything (issue #112). This is abstention *inside*
+#: the authoring turn (ADR-0019 §6), never a keyword classifier at the router:
+#: the router still picks a capability from page context alone. It exists as
+#: the model-free (or degraded-model) safety net — a live model is nudged by
+#: :data:`app.services.assistant_graph._AUTHORING_TOOL_SYSTEM` to recognise the
+#: same turns itself and reply with ``{"answer": ...}`` directly.
+_CONVERSATIONAL_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
+    r"^\s*(hi|hello|hey|howdy|yo|greetings)\b",
+    r"\bhow('s| is| are) it going\b",
+    r"\bhow are you\b",
+    r"\bare you (working|there|online|up|alive)\b",
+    r"\bwhat can you do\b",
+    r"\bwhat do you do\b",
+    r"\bwho are you\b",
+    r"\bwhat (is|are) you\b",
+    r"^\s*(thanks|thank you|ok|okay|cool|nice)\s*[.!?]*\s*$",
+)]
+
+#: The plain-English capability blurb a conversational turn gets back
+#: (mode="query", no draft) — see :func:`is_conversational_turn`.
+CONVERSATIONAL_ANSWER = (
+    "Yes — I'm working. I can author a validation test from one sentence, "
+    "check whether a test already covers something, explain why a check "
+    "regressed, or help you build and run Suites. Just tell me what you'd "
+    "like to do."
+)
+
+
+def is_conversational_turn(intent: str) -> bool:
+    """True for a greeting/meta/chit-chat turn that isn't an authoring request.
+
+    A deterministic pattern match, not the router's capability choice (that
+    stays context-only, ADR-0019 §4) — this only decides, *once a turn has
+    already landed in authoring*, whether an unresolved plan should abstain
+    into :data:`CONVERSATIONAL_ANSWER` rather than a clarifying-question Draft.
+    """
+    text = (intent or "").strip()
+    return bool(text) and any(p.search(text) for p in _CONVERSATIONAL_PATTERNS)
+
+
 _AUTHORING_SYSTEM = (
     "You are the authoring capability of a Databricks validation Assistant. Turn "
     "the user's plain-English intent into ONE Databricks SDK/API call plus a "
