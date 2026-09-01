@@ -16,12 +16,12 @@ from app.core.enums import RiskTier, SafetyClass
 from app.models import Check, Suite, SuiteMember, Test
 from app.services.risk import effective_risk_tier
 from app.services.safety import evaluate_operation_safety
-from app.services.seed import CATALOG_CHECK_SPECS
+from app.services.seed.domains.sandbox_functional import CHECK_SPECS as SANDBOX_FUNCTIONAL_CHECK_SPECS
 
 from helpers import target_id as _target_id
 from helpers import test_id as _test_id
 
-_JOB_SMOKE_SPEC = dict(CATALOG_CHECK_SPECS)["job_smoke"]
+_JOB_SMOKE_SPEC = dict(SANDBOX_FUNCTIONAL_CHECK_SPECS)["job_smoke"]
 
 
 def _job_smoke_check(session) -> Check:

@@ -4,14 +4,14 @@ Covers the authoring shapes the model must express: a deterministic
 connectivity Check, a functional (row-count) Check, an open-SDK mutating
 Check with a **counterfactual** pair, and an **agentic** (non-compilable →
 advisory) Check. Every Check and Test here carries :data:`TUTORIAL_TAGS` so
-it's distinguishable from the real posture catalog
-(:mod:`app.services.seed.domains.catalog`) that later slices of Spec #91 add
+it's distinguishable from the real posture catalog — each domain's own
+module under :mod:`app.services.seed.domains` (#107) — that Spec #91 adds
 alongside it, without disturbing these exemplars.
 
 The "Producer ingestion access" / "Processing layer access" Tests below are
-also referenced by the catalog domain's lane Suites (Producer/Processing
-Suite) — a cross-module Suite membership the registry resolves once every
-domain's Checks/Tests are merged.
+also referenced by the producer/processing domains' lane Suites
+(Producer/Processing Suite) — a cross-module Suite membership the registry
+resolves once every domain's Checks/Tests are merged.
 """
 from __future__ import annotations
 

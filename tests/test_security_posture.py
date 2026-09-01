@@ -25,9 +25,9 @@ _DETERMINISTIC_CHECK_NAMES = {
 _ADVISORY_CHECK_NAME = "Workspace-admin count is sane"
 
 # The full Security Posture catalog (issue #93). Scoped by name on purpose —
-# CATALOG_CHECK_SPECS is a shared list other slices (e.g. issue #96) also
-# append to, so deriving "the catalog" from that shared list would pull in
-# Checks this Suite never claims to contain.
+# other domain modules (e.g. issue #96's Producer/Processing/Consumer) own
+# their own Checks, so deriving "the catalog" from a shared list would pull
+# in Checks this Suite never claims to contain.
 _SECURITY_POSTURE_CHECK_NAMES = _DETERMINISTIC_CHECK_NAMES | {_ADVISORY_CHECK_NAME}
 
 

@@ -11,11 +11,13 @@ catalog before building rows, so a cross-module reference — a Test naming a
 Check from another domain, a Suite naming a Test from another domain, a
 counterfactual's counterpart — resolves against the merged whole.
 
-This first slice moves the tutorial exemplars (:mod:`.domains.tutorial`) and
-the worked/onboarding example libraries (:mod:`.domains.examples`) into their
-own modules to prove the pattern; the real posture catalog
-(:mod:`.domains.catalog`, Spec #91) follows as one module for now — later
-slices may split it further without touching this file.
+Every real-catalog domain (Spec #91) — Producer, Processing, Consumer,
+Security Posture, Identity & Access, Governance/Unity Catalog, Sandbox
+Functional — owns its own module under ``.domains``, alongside the tutorial
+exemplars (:mod:`.domains.tutorial`) and the worked/onboarding example
+libraries (:mod:`.domains.examples`) (#107). No domain's content lives in a
+shared structure here; this file only re-exports the tutorial/example
+libraries' constants for the tests that assert against them by name.
 """
 from __future__ import annotations
 
@@ -27,7 +29,6 @@ from app.core.enums import Expectation, SafetyClass
 from app.models import Check, Suite, Target, Test, WorkedExample
 from app.services.seed.build import make_check, make_suite, make_test
 from app.services.seed.contribution import Contribution, SuiteSpec
-from app.services.seed.domains.catalog import CATALOG_CHECK_SPECS
 from app.services.seed.domains.examples import ONBOARDING_EXAMPLES, WORKED_EXAMPLES
 from app.services.seed.domains.tutorial import CHECK_SPECS, TUTORIAL_TAGS
 from app.services.seed.registry import discover_contributions
@@ -35,7 +36,6 @@ from app.services.seed.registry import discover_contributions
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "CATALOG_CHECK_SPECS",
     "CHECK_SPECS",
     "ONBOARDING_EXAMPLES",
     "TUTORIAL_TAGS",
