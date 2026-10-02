@@ -155,6 +155,8 @@ def chat_with_tools(
 def _wire_message(m: dict) -> dict:
     """One chat message in OpenAI wire shape, carrying tool-reply fields if set."""
     wire = {"role": m.get("role", "user"), "content": m.get("content", "")}
+    if m.get("tool_calls"):
+        wire["tool_calls"] = m["tool_calls"]
     if m.get("tool_call_id"):
         wire["tool_call_id"] = m["tool_call_id"]
     if m.get("name"):

@@ -72,6 +72,18 @@ def test_test_connection_failure_blocks_save(client):
     assert resp.status_code == 422
 
 
+def test_scope_only_identity_handle_blocks_register(client):
+    """A secret-scope name without a key (the register-target UI typo) is refused."""
+    resp = client.post("/api/v1/targets", json={
+        "name": "ws", "safety_class": "read-only",
+        "identity_handle": "validation-platform"})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "test-connection failed" in detail
+    assert "scope/key" in detail
+    assert "validation-platform" in detail
+
+
 def test_test_connection_endpoint(client):
     ok = client.post("/api/v1/targets/test-connection",
                      json={"name": "x", "safety_class": "read-only", "identity_handle": "kv/sp"})

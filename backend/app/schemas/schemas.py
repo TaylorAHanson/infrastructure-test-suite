@@ -87,6 +87,45 @@ class TestUpdate(BaseModel):
     check_edits: Optional[list[TestCheckEdit]] = None
 
 
+class ScriptTestCreate(BaseModel):
+    """A new script Test. ``script`` defaults to the starter template."""
+
+    name: str
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    run_as_role: Optional[str] = None
+    script: Optional[str] = None
+
+
+class ScriptSave(BaseModel):
+    """Save a Test's script (and optionally its fields) as its next version."""
+
+    script: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[list[str]] = None
+    run_as_role: Optional[str] = None
+
+
+class ScriptAnalyze(BaseModel):
+    script: str
+
+
+class EditorMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str = ""
+
+
+class EditorTurnIn(BaseModel):
+    """One turn of the test-editor agent: the conversation plus the editor's state."""
+
+    messages: list[EditorMessage]
+    script: str = ""
+    test_id: Optional[str] = None
+    target_id: Optional[str] = None
+    last_dry_run: Optional[dict] = None
+
+
 # --------------------------- Suites ----------------------------
 class SuiteCreate(BaseModel):
     name: str
@@ -169,6 +208,17 @@ class SafetyOverrideIn(BaseModel):
     target_name: str
     reason: str = ""
     confirmed: bool = True
+
+
+class ScriptDryRun(BaseModel):
+    """Run a script once against a target without recording a Run."""
+
+    script: str
+    target_id: str
+    depth: Depth = Depth.QUICK
+    run_as_role: Optional[str] = None
+    override: Optional[SafetyOverrideIn] = None
+    params: dict = Field(default_factory=dict)
 
 
 class RunSubmit(BaseModel):
@@ -307,25 +357,6 @@ class RunProposalIn(BaseModel):
     suite_ids: list[str] = Field(default_factory=list)
     test_ids: list[str] = Field(default_factory=list)
     depth: Depth = Depth.QUICK
-
-
-class SuiteComposeConfirmIn(BaseModel):
-    """Confirm a suite creation/composition proposal from a suite tool call
-    (suggest-then-confirm, issue #66/#63).
-
-    The human confirms (or rejects) a proposal returned by one of the suite
-    creation/composition tools. The confirm endpoint re-validates the invariant
-    before applying so the safety gate cannot be bypassed.
-    """
-
-    suite_id: Optional[str] = None  # unset for action="create"
-    action: str  # "create" | "add_test" | "remove_test" | "reorder" | "toggle_det_only"
-    name: Optional[str] = None                    # for create
-    description: str = ""                         # for create
-    tags: list[str] = Field(default_factory=list)  # for create
-    test_id: Optional[str] = None       # for add_test / remove_test
-    test_ids: Optional[list[str]] = None  # for create / reorder
-    deterministic_only: Optional[bool] = None  # for create / toggle_det_only
 
 
 # --------------------------- Findings feed (ADR-0009, #33) ----------------

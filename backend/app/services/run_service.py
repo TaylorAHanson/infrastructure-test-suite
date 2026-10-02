@@ -21,17 +21,19 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 
 from sqlmodel import Session, select
 
 from app.core.enums import (
+    Depth,
     Evaluator,
     Expectation,
     Phase,
     RiskTier,
     RunStatus,
     SafetyClass,
+    StageStatus,
     TERMINAL_STATUSES,
     TestStatus,
 )
@@ -234,7 +236,8 @@ def expand_request(session: Session, request: RunRequest) -> list[CheckRun]:
                 depth=request.depth,
                 evaluator=sel.check.evaluator,
                 expectation=sel.expectation,
-                gating=sel.check.evaluator == Evaluator.DETERMINISTIC,
+                gating=(sel.check.evaluator == Evaluator.DETERMINISTIC
+                        and not (sel.check.hints or {}).get("advisory")),
                 run_as_role=sel.run_as_role,
                 risk_tier=sel.check.risk_tier,
                 workspace_name=(target.workspace_name if target else None),
@@ -489,6 +492,35 @@ def _elapsed_ms(run: CheckRun) -> Optional[int]:
     return None
 
 
+_NETWORK_STAGES = ("RESOLVE", "CONNECT", "TLS")
+
+
+def denied_as_expected(check: Check, failed: Any) -> bool:
+    """Whether a counterfactual's failure is the denial it asked for.
+
+    A DNS outage, an expired secret or a 404 is not "denied by policy": only a
+    permission denial satisfies ``AUTHORIZE``, only a network-stage failure
+    satisfies ``CONNECT``, and ``OPERATE`` accepts any API failure once the
+    identity has authenticated.
+    """
+    expected = (check.expected_stage or "AUTHORIZE").upper()
+    stage, bucket = (failed.stage or "").upper(), failed.failure_bucket or ""
+    if expected == "AUTHORIZE":
+        return bucket == "PERMISSION_DENIED"
+    if expected == "CONNECT":
+        return stage in _NETWORK_STAGES or bucket == "NETWORK_POLICY_DENY"
+    if expected == "OPERATE":
+        return stage in ("AUTHORIZE", "OPERATE") and bucket != "AUTHENTICATION_FAILURE"
+    return stage == expected
+
+
+def _needs_the_operation(run: CheckRun, check: Check) -> bool:
+    """A denial, or a predicate over the response, can't be judged without OPERATE."""
+    if run.expectation == Expectation.DENY:
+        return True
+    return (check.compiled_predicate or {}).get("kind") == "compare"
+
+
 def _aggregate(run: CheckRun, check: Check, stage_results: list) -> None:
     """Compute the CheckRun verdict + failure classification from stage outcomes."""
     evidence: dict = {}
@@ -498,13 +530,26 @@ def _aggregate(run: CheckRun, check: Check, stage_results: list) -> None:
 
     first_failed = next((sr for sr in stage_results if sr.failed), None)
     operation_succeeded = first_failed is None
+    wrong_denial = None
+
+    if first_failed is None and run.evaluator == Evaluator.DETERMINISTIC and _needs_the_operation(run, check) \
+            and not any(sr.stage == "OPERATE" and sr.outcome != StageStatus.SKIP for sr in stage_results):
+        run.verdict = RunStatus.SKIPPED
+        run.evidence = evidence
+        run.message = ("Not evaluated: this check judges the operation's result (or its denial), and quick "
+                       "depth stops before the operation runs. Run at full depth.")
+        run.finished_at = utcnow()
+        run.duration_ms = _elapsed_ms(run)
+        return
 
     if run.evaluator == Evaluator.DETERMINISTIC:
         if run.expectation == Expectation.DENY:
             predicate = check.compiled_predicate or {"kind": "denied"}
+            passed = evaluate_predicate(predicate, evidence, operation_succeeded)
+            if passed and first_failed is not None and not denied_as_expected(check, first_failed):
+                passed, wrong_denial = False, first_failed
         else:
-            predicate = check.compiled_predicate or None
-        passed = evaluate_predicate(predicate, evidence, operation_succeeded)
+            passed = evaluate_predicate(check.compiled_predicate or None, evidence, operation_succeeded)
     else:
         # Agentic: advisory. Judge execution is Spec 4; record the operation
         # outcome as advisory signal (never gates — gating=False set at fan-out).
@@ -515,7 +560,13 @@ def _aggregate(run: CheckRun, check: Check, stage_results: list) -> None:
     run.message = (first_failed.message if first_failed else "All stages passed.")
 
     if not passed:
-        if first_failed is not None:
+        if wrong_denial is not None:
+            expected = (check.expected_stage or "AUTHORIZE").upper()
+            run.failure_stage = wrong_denial.stage
+            run.failure_bucket = wrong_denial.failure_bucket or "UNKNOWN"
+            run.message = (f"Expected a denial at {expected}, but it failed at {wrong_denial.stage} "
+                           f"({wrong_denial.failure_bucket or 'UNKNOWN'}): {wrong_denial.message}")
+        elif first_failed is not None:
             run.failure_stage = first_failed.stage
             run.failure_bucket = first_failed.failure_bucket or "UNKNOWN"
         elif run.expectation == Expectation.DENY:
@@ -633,13 +684,38 @@ def _dispatch_pending(request_id: str) -> int:
     return len(runnable)
 
 
+def _work_units(run_ids: list[str]) -> list:
+    """One unit per structured CheckRun; one per (script Test × target) group.
+
+    A script Test runs its script once per target and records every check's
+    CheckRun from that one execution.
+    """
+    from app.db.session import session_scope
+    from app.services.script_tests import execute_script_group, is_script_check
+
+    singles: list[str] = []
+    groups: dict[tuple, list[str]] = {}
+    with session_scope() as session:
+        for rid in run_ids:
+            run = session.get(CheckRun, rid)
+            check = session.get(Check, run.check_id) if run else None
+            if run is not None and is_script_check(check):
+                test_id = run.test_id or (check.hints or {}).get("script_test_id")
+                groups.setdefault((run.request_id, test_id, run.target_id), []).append(rid)
+            else:
+                singles.append(rid)
+    units = [lambda ids=ids: execute_script_group(ids) for ids in groups.values()]
+    units += [lambda rid=rid: execute_check_run(rid) for rid in singles]
+    return units
+
+
 def _execute_batch(run_ids: list[str]) -> None:
     """Execute CheckRuns concurrently, bounded by the configured concurrency."""
     if not run_ids:
         return
     max_workers = max(1, getattr(_settings(), "MAX_RUN_CONCURRENCY", 10))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        list(pool.map(execute_check_run, run_ids))
+        list(pool.map(lambda unit: unit(), _work_units(run_ids)))
 
 
 def _mark_queued(run_ids: list[str]) -> None:
@@ -780,10 +856,16 @@ def request_verdict(check_runs: list[CheckRun]) -> RunStatus:
 
     Only **gating** (deterministic) runs affect the verdict; agentic/advisory
     runs are signal only (ADR-0008). Fail-closed: any non-PASS gating run blocks.
+    A SKIPPED run (a mutating script check in a quick run) neither passes nor
+    blocks; if every gating run was skipped the verdict is SKIPPED.
     """
     gating = [r for r in check_runs if r.gating]
     if not gating:
         return RunStatus.PASS
+    ran = [r for r in gating if r.verdict != RunStatus.SKIPPED]
+    if not ran:
+        return RunStatus.SKIPPED
+    gating = ran
     if any(r.verdict == RunStatus.BLOCKED_BY_SAFETY for r in gating):
         return RunStatus.BLOCKED_BY_SAFETY
     if any(r.verdict == RunStatus.ERROR for r in gating):
@@ -846,15 +928,18 @@ def request_resource(session: Session, request: RunRequest) -> dict:
     from app.core.stages import is_connectivity_stage
 
     runs = session.exec(select(CheckRun).where(CheckRun.request_id == request.id)).all()
-    gating_runs = [r for r in runs if r.gating]
+    gating_runs = [r for r in runs if r.gating and r.verdict not in (RunStatus.SKIPPED, RunStatus.BLOCKED_BY_SAFETY)]
     # A cheap connectable/functional aggregate from where gating runs failed: the
     # connectivity path is broken if any gating run failed at/before AUTHORIZE;
-    # the functional path is broken if any failed at OPERATE/VERIFY. (Per-CheckRun
-    # detail exposes the exact derived view from stage outcomes.)
-    conn_broken = any(r.failure_stage and is_connectivity_stage(r.failure_stage) for r in gating_runs)
-    func_broken = any(r.failure_stage and not is_connectivity_stage(r.failure_stage) for r in gating_runs)
+    # the functional path is broken if any failed at OPERATE/VERIFY. A safety
+    # block or a skip never reached the workspace, so it says nothing either way;
+    # quick depth never runs a functional stage. (Per-CheckRun detail exposes the
+    # exact derived view from stage outcomes.)
+    failed = [r for r in gating_runs if r.verdict in (RunStatus.FAIL, RunStatus.ERROR) and r.failure_stage]
+    conn_broken = any(is_connectivity_stage(r.failure_stage) for r in failed)
+    func_broken = any(not is_connectivity_stage(r.failure_stage) for r in failed)
     connectable = None if not gating_runs else not conn_broken
-    functional = None if not gating_runs else not func_broken
+    functional = None if not gating_runs or request.depth == Depth.QUICK else not func_broken
     return {
         **request.model_dump(mode="json"),
         "run_id": request.id,

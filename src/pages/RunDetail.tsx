@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, ChevronDown, ChevronRight } from 'lucide-react'
 
@@ -33,19 +33,22 @@ export default function RunDetail() {
         actions={<><Badge value={run.phase} /><Badge value={run.verdict} /></>}
       />
 
-      <div className="mb-4 grid grid-cols-2 gap-4 md:grid-cols-4">
-        <Meta label="Verdict" value={run.verdict} />
-        <Meta label="Phase" value={run.phase} />
-        <Meta label="Depth" value={run.depth} />
-        <Meta label="Source" value={run.request_source} />
-        <Meta label="Requested by" value={run.requested_by} />
-        <Meta label="Targets" value={run.target_ids.length ? `${run.target_ids.length} selected` : 'all'} />
-        <MetaBadge label="Connectable" value={triState(run.connectable)} cls={triStateClass(run.connectable)} />
-        <MetaBadge label="Functional" value={triState(run.functional)} cls={triStateClass(run.functional)} />
-        <Meta label="Created" value={timeAgo(run.created_at)} />
-        <Meta label="Git SHA" value={run.git_sha} />
-        <Meta label="App version" value={run.app_version} />
-        <Meta label="CheckRuns" value={String(run.run_ids.length)} />
+      <div className="card mb-4 grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-3 md:divide-x md:divide-edge">
+        <MetaGroup title="Request">
+          <Meta label="Source" value={run.request_source} />
+          <Meta label="Requested by" value={run.requested_by} />
+          <Meta label="Created" value={timeAgo(run.created_at)} title={run.created_at} />
+        </MetaGroup>
+        <MetaGroup title="Scope">
+          <Meta label="Depth" value={run.depth} />
+          <Meta label="Targets" value={run.target_ids.length ? `${run.target_ids.length} selected` : 'all'} />
+          <Meta label="Check runs" value={String(run.run_ids.length)} />
+        </MetaGroup>
+        <MetaGroup title="Result">
+          <MetaBadge label="Connectable" value={triState(run.connectable)} cls={triStateClass(run.connectable)} />
+          <MetaBadge label="Functional" value={triState(run.functional)} cls={triStateClass(run.functional)} />
+          <Meta label="Build" value={`v${run.app_version} · ${run.git_sha}`} mono />
+        </MetaGroup>
       </div>
 
       <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -69,7 +72,7 @@ export default function RunDetail() {
         {/* Failure-taxonomy summary: gating (blocks) vs advisory (signal only). */}
         <div className="card">
           <div className="card-title mb-2">Failure summary</div>
-          <div className="text-xs uppercase tracking-wide text-muted">Gating (blocks the pipeline)</div>
+          <div className="text-xs uppercase tracking-wide text-muted">Gating (sets the verdict)</div>
           {gating.length ? (
             <ul className="mb-3 mt-1 space-y-1">
               {gating.map(([bucket, count]) => (
@@ -82,7 +85,7 @@ export default function RunDetail() {
           ) : (
             <p className="mb-3 mt-1 text-sm text-pass">None</p>
           )}
-          <div className="text-xs uppercase tracking-wide text-muted">Advisory (signal only, never gates)</div>
+          <div className="text-xs uppercase tracking-wide text-muted">Advisory (doesn't affect the verdict)</div>
           {advisory.length ? (
             <ul className="mt-1 space-y-1">
               {advisory.map(([bucket, count]) => (
@@ -189,20 +192,31 @@ function CheckRunRowView({ row }: { row: CheckRunRow }) {
   )
 }
 
-function Meta({ label, value }: { label: string; value: string }) {
+function MetaGroup({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="card py-2">
-      <div className="card-title">{label}</div>
-      <div className="mt-0.5 truncate text-sm text-white">{value}</div>
+    <div className="md:pl-8 md:first:pl-0">
+      <div className="card-title mb-2">{title}</div>
+      <dl className="space-y-1.5">{children}</dl>
+    </div>
+  )
+}
+
+function Meta({ label, value, title, mono }: { label: string; value: string; title?: string; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 text-sm">
+      <dt className="shrink-0 text-muted">{label}</dt>
+      <dd className={`truncate text-right text-white ${mono ? 'font-mono text-xs' : ''}`} title={title ?? value}>
+        {value}
+      </dd>
     </div>
   )
 }
 
 function MetaBadge({ label, value, cls }: { label: string; value: string; cls: string }) {
   return (
-    <div className="card py-2">
-      <div className="card-title">{label}</div>
-      <div className="mt-0.5"><span className={`badge ${cls}`}>{value}</span></div>
+    <div className="flex items-center justify-between gap-4 text-sm">
+      <dt className="text-muted">{label}</dt>
+      <dd><span className={`badge ${cls}`}>{value}</span></dd>
     </div>
   )
 }

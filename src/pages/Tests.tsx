@@ -1,13 +1,15 @@
-import { Fragment, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Fragment, lazy, Suspense, useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  CircleHelp,
+  Code2,
   Copy,
   FileCode,
   History,
-  MessageSquarePlus,
+  Pencil,
   Plus,
   Search,
   Sparkles,
@@ -16,7 +18,8 @@ import {
 } from 'lucide-react'
 
 import { PageHeader } from '../components/PageHeader'
-import { useAssistantContext, useDeclarePageContext } from '../lib/assistantContext'
+import SuiteDialog from '../components/SuiteDialog'
+import { useDeclarePageContext } from '../lib/assistantContext'
 import {
   useAcceptTest,
   useAdminSettings,
@@ -25,23 +28,25 @@ import {
   useRollbackTest,
   useStudioTests,
   useSuites,
+  useTestScript,
   useTestVersions,
-  useTestYaml,
 } from '../hooks/queries'
+import { errorMessage } from '../lib/api'
 import { statusClass } from '../lib/format'
+import { GUIDE_WRITING_TESTS } from '../lib/guide'
 import type { Check, Operation, StudioTest, Suite } from '../types'
 
-// The one Tests view. It folds together what used to be three pages: the
-// catalog (browse + search), Test Studio (the Draft → accept → Active lifecycle,
-// derivation panel and version history — ADR-0006 §8) and Suites, which are
-// now just a filter over the list. Adding a Test is always "Describe a new
-// test" → the Assistant shelf (ADR-0021); there is no manual create form.
+const CodeEditor = lazy(() => import('../components/CodeEditor'))
+
+// The one Tests view: the catalog (browse + search), the Draft → Active
+// lifecycle and version history, and Suites as a filter over the list. A Test
+// is a Python script written in the test editor (/tests/:id/edit), where an
+// assistant works beside the code. Suites are made by hand here.
 // The selected test, suite filter and tab live in the URL so every view is
 // linkable and the back button behaves.
 export default function Tests() {
   const [params, setParams] = useSearchParams()
   const view = params.get('view') === 'reference' ? 'reference' : 'tests'
-  const { openWithPrompt } = useAssistantContext()
 
   const setParam = (key: string, value: string | null) =>
     setParams((prev) => {
@@ -55,13 +60,11 @@ export default function Tests() {
     <div>
       <PageHeader
         title="Tests"
-        subtitle="Target-agnostic Tests, each an ordered set of Checks. Describe one to the Assistant to add it."
+        subtitle="Target-agnostic Tests. Each is a Python script whose checks are its results."
         actions={
-          // Persistent, self-disclosing entry point (ADR-0021): the chat icon +
-          // "Describe a…" label say it opens a conversation, not a blank form.
-          <button className="btn btn-accent" onClick={() => openWithPrompt('Create a new test that ', 'auto')}>
-            <MessageSquarePlus size="15" /> Describe a new test
-          </button>
+          <Link className="btn btn-accent" to="/tests/new">
+            <Plus size="15" /> New test
+          </Link>
         }
       />
 
@@ -97,8 +100,8 @@ function TestsView({
   const { data: tests } = useStudioTests()
   const { data: suites } = useSuites()
   const { data: checks } = useChecks()
-  const { openWithPrompt } = useAssistantContext()
   const [q, setQ] = useState('')
+  const [suiteDialog, setSuiteDialog] = useState<{ suite: Suite | null } | null>(null)
 
   const suiteId = params.get('suite')
   const suite = suites?.find((s) => s.id === suiteId) ?? null
@@ -140,7 +143,7 @@ function TestsView({
           totalTests={tests?.length ?? 0}
           selectedId={suite?.id ?? null}
           onSelect={(id) => setParam('suite', id)}
-          onNew={() => openWithPrompt('Create a new suite that ', 'suite')}
+          onNew={() => setSuiteDialog({ suite: null })}
         />
         {suite && (
           <div className="flex flex-wrap items-center gap-2 text-sm text-muted">
@@ -148,11 +151,12 @@ function TestsView({
             {suite.deterministic_only && (
               <span className="badge bg-pass/15 text-pass">deterministic-only</span>
             )}
+            {!suite.enabled && <span className="badge bg-ink-soft text-muted">disabled</span>}
             <button
-              className="ml-auto text-xs text-accent hover:underline"
-              onClick={() => openWithPrompt(`Update the "${suite.name}" suite to `, 'suite')}
+              className="ml-auto inline-flex items-center gap-1 text-xs text-accent hover:underline"
+              onClick={() => setSuiteDialog({ suite })}
             >
-              Edit suite with the Assistant
+              <Pencil size="11" /> Edit suite
             </button>
           </div>
         )}
@@ -160,7 +164,9 @@ function TestsView({
 
       {!tests ? null : !filtered.length ? (
         <div className="card text-sm text-muted">
-          {tests.length ? 'No tests match.' : 'No tests yet — describe one to the Assistant to get started.'}
+          {tests.length ? 'No tests match.' : (
+            <>No tests yet. <Link to="/tests/new" className="text-accent hover:underline">Write the first one</Link>.</>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[320px_1fr]">
@@ -174,6 +180,18 @@ function TestsView({
           </div>
           {selected && <TestDetail key={selected.id} test={selected} checkById={checkById} />}
         </div>
+      )}
+      {suiteDialog && (
+        <SuiteDialog
+          suite={suiteDialog.suite}
+          tests={tests ?? []}
+          checkById={checkById}
+          onClose={() => setSuiteDialog(null)}
+          onSaved={(id) => {
+            setSuiteDialog(null)
+            setParam('suite', id)
+          }}
+        />
       )}
     </>
   )
@@ -234,7 +252,11 @@ function TestGroup({
               t.id === selectedId ? 'bg-ink-soft text-white' : 'text-gray-300 hover:bg-ink-soft hover:text-white'
             }`}
           >
-            {t.origin === 'assistant' && <Sparkles size="13" className="shrink-0 text-accent" />}
+            {t.script ? (
+              <Code2 size="13" className="shrink-0 text-info" />
+            ) : (
+              t.origin === 'assistant' && <Sparkles size="13" className="shrink-0 text-accent" />
+            )}
             <span className="truncate">{t.name}</span>
             <span className="ml-auto shrink-0 text-[10px] text-muted">{t.members.length} {t.members.length === 1 ? 'check' : 'checks'}</span>
           </button>
@@ -245,19 +267,33 @@ function TestGroup({
   )
 }
 
-function opLabel(op?: Operation): string {
+function isScriptCheck(check?: Check): boolean {
+  return check?.handler_key === 'script'
+}
+
+function scriptCalls(check: Check): string[] {
+  const calls = check.hints?.calls
+  return Array.isArray(calls) ? calls.map(String) : []
+}
+
+function opLabel(op?: Operation, check?: Check): string {
+  if (check && isScriptCheck(check)) {
+    const calls = scriptCalls(check)
+    return calls.length ? calls.join(', ') : '(no calls)'
+  }
   if (!op) return '-'
   const call = [op.service, op.method].filter(Boolean).join('.')
   return op.verb ? `${op.verb.toUpperCase()} ${call || '(sdk)'}` : call || '(sdk)'
 }
 
 function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<string, Check> }) {
+  const navigate = useNavigate()
   const accept = useAcceptTest()
   const rollback = useRollbackTest()
   const promote = usePromoteExample()
   const { data: versions } = useTestVersions(test.id)
   const [promoted, setPromoted] = useState(false)
-  const [showYaml, setShowYaml] = useState(false)
+  const [showScript, setShowScript] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const toggle = (checkId: string) =>
     setExpanded((prev) => {
@@ -278,6 +314,9 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
           <span className="badge bg-ink-soft text-muted">v{test.version}</span>
           {test.run_as_role && <span className="badge bg-ink-soft text-accent">run-as: {test.run_as_role}</span>}
           <div className="ml-auto flex gap-2">
+            <button className="btn" onClick={() => navigate(`/tests/${test.id}/edit`)}>
+              <Code2 size="15" /> {test.script ? 'Open in editor' : 'Edit as script'}
+            </button>
             {test.status === 'draft' && (
               <button className="btn btn-accent" onClick={() => accept.mutate(test.id)} disabled={accept.isPending}>
                 <CheckCircle2 size="15" /> Accept → Active
@@ -306,11 +345,20 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
         <div className="mb-2 flex items-center gap-2">
           <span className="card-title">Checks ({members.length})</span>
           <span className="text-[11px] text-muted">click a check for its full definition</span>
-          <button className="ml-auto text-xs text-accent hover:underline" onClick={() => setShowYaml((v) => !v)}>
-            <FileCode size="12" className="mr-1 inline" /> {showYaml ? 'Hide YAML' : 'View YAML'}
+          <a
+            className="ml-auto text-xs text-muted hover:text-white"
+            href={GUIDE_WRITING_TESTS}
+            target="_blank"
+            rel="noopener"
+            title="How test scripts work (opens the guide in a new tab)"
+          >
+            <CircleHelp size="12" className="mr-1 inline" /> Help
+          </a>
+          <button className="text-xs text-accent hover:underline" onClick={() => setShowScript((v) => !v)}>
+            <FileCode size="12" className="mr-1 inline" /> {showScript ? 'Hide script' : 'View script'}
           </button>
         </div>
-        {showYaml && <TestYaml test={test} />}
+        {showScript && <TestScriptView test={test} />}
         <div className="overflow-hidden rounded-lg border border-edge">
           <table className="w-full">
             <thead className="bg-ink">
@@ -345,9 +393,13 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
                         <div className="text-sm text-white">{check?.display_name ?? m.check_id}</div>
                         {check?.assertion && <div className="text-xs text-muted">{check.assertion}</div>}
                       </td>
-                      <td className="td font-mono text-xs text-info">{opLabel(check?.operation)}</td>
+                      <td className="td font-mono text-xs text-info">{opLabel(check?.operation, check)}</td>
                       <td className="td">
-                        {check && <span className={`badge ${statusClass(check.evaluator)}`}>{check.evaluator}</span>}
+                        {check?.hints?.advisory ? (
+                          <span className="badge bg-flaky/15 text-flaky">advisory</span>
+                        ) : (
+                          check && <span className={`badge ${statusClass(check.evaluator)}`}>{check.evaluator}</span>
+                        )}
                       </td>
                       <td className="td">
                         {isCf ? (
@@ -408,6 +460,7 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
 // A Check's full definition — what it calls, with which params, and how the
 // result is judged — for every Test, not just Assistant-authored ones (#117).
 function CheckDefinition({ check }: { check: Check }) {
+  if (isScriptCheck(check)) return <ScriptCheckDefinition check={check} />
   const params = check.operation?.params ?? {}
   const hasHints = Object.keys(check.hints ?? {}).length > 0
   return (
@@ -459,30 +512,71 @@ function CheckDefinition({ check }: { check: Check }) {
   )
 }
 
-// The Test's YAML export (ADR-0001 §8: a review/portability format, never the
-// source of truth), read-only with copy.
-function TestYaml({ test }: { test: StudioTest }) {
-  const { data, isLoading, error } = useTestYaml(test.id, test.version)
+function ScriptCheckDefinition({ check }: { check: Check }) {
+  const calls = scriptCalls(check)
+  const role = check.hints?.role as string | undefined
+  return (
+    <dl className="grid grid-cols-[150px_1fr] gap-y-1 text-sm">
+      {check.description && (
+        <>
+          <dt className="text-muted">Description</dt>
+          <dd className="text-gray-200">{check.description}</dd>
+        </>
+      )}
+      <dt className="text-muted">Defined in</dt>
+      <dd className="text-gray-200">
+        {check.expectation === 'DENY' ? 'with expect_deny(…)' : 'with check(…)'} in the test script
+        {check.expectation === 'DENY' && check.expected_stage ? `, denied at ${check.expected_stage}` : ''}
+      </dd>
+      <dt className="text-muted">Calls</dt>
+      <dd className="font-mono text-xs text-info">{calls.length ? calls.join(', ') : 'none'}</dd>
+      {role && (
+        <>
+          <dt className="text-muted">Runs as</dt>
+          <dd className="text-accent">{role}</dd>
+        </>
+      )}
+      <dt className="text-muted">Verdict</dt>
+      <dd className="text-gray-200">
+        {check.hints?.advisory ? 'advisory — reported, never gates the run' : 'gating — a failure fails the run'}
+      </dd>
+      <dt className="text-muted">Check id</dt>
+      <dd className="font-mono text-xs text-muted">{check.id} · v{check.version}</dd>
+    </dl>
+  )
+}
+
+// The Test's script, read-only with copy. Tests that predate scripts show the
+// script they would convert to.
+function TestScriptView({ test }: { test: StudioTest }) {
+  const { data, isLoading, error } = useTestScript(test.id)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const copy = () => {
     if (!data) return
     // The clipboard API can be denied (no permission, non-secure context);
     // say so rather than fail silently — the text stays selectable.
-    navigator.clipboard.writeText(data.yaml).then(
+    navigator.clipboard.writeText(data.script).then(
       () => setCopyState('copied'),
       () => setCopyState('failed'),
     ).finally(() => setTimeout(() => setCopyState('idle'), 1500))
   }
+  if (isLoading) return <div className="mb-3 text-xs text-muted">Loading…</div>
+  if (error || !data) return <div className="mb-3 text-xs text-fail">Couldn't load the script: {errorMessage(error)}</div>
   return (
-    <div className="relative mb-3">
-      {data && (
-        <button className="btn absolute right-2 top-2 px-2 py-1 text-xs" onClick={copy}>
+    <div className="mb-3">
+      {data.converted && (
+        <div className="mb-2 text-[11px] text-muted">
+          This test predates scripts; this is the script it converts to when you edit it.
+        </div>
+      )}
+      <div className="relative h-96 overflow-hidden rounded-lg border border-edge">
+        <button className="btn absolute right-2 top-2 z-10 px-2 py-1 text-xs" onClick={copy}>
           <Copy size="12" /> {copyState === 'copied' ? 'Copied ✓' : copyState === 'failed' ? 'Copy failed — select the text' : 'Copy'}
         </button>
-      )}
-      <pre className="max-h-96 overflow-auto rounded-lg border border-edge bg-ink p-3 text-[11px] text-gray-200">
-        {isLoading ? 'Loading…' : error ? `Couldn't load the YAML export: ${(error as Error).message}` : data?.yaml}
-      </pre>
+        <Suspense fallback={<div className="p-3 text-xs text-muted">Loading…</div>}>
+          <CodeEditor value={data.script} readOnly />
+        </Suspense>
+      </div>
     </div>
   )
 }

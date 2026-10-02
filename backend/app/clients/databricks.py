@@ -135,7 +135,10 @@ def parse_identity_handle(handle: Optional[str]) -> tuple[str, str]:
         raise IdentityError("identity handle is required (a Databricks secret-scope 'scope/key')")
     parts = handle.split("/")
     if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
-        raise IdentityError(f"identity handle must be 'scope/key', got '{handle}'")
+        raise IdentityError(
+            "identity handle must be a Databricks secret-scope 'scope/key' pair "
+            f"(scope name and the key that holds the SP client secret), got '{handle}'"
+        )
     return parts[0].strip(), parts[1].strip()
 
 

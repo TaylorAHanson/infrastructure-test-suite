@@ -145,7 +145,28 @@ def create_all() -> None:
     """
     import app.models  # noqa: F401  ensure models are registered
 
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    _add_missing_nullable_columns(engine)
+
+
+def _add_missing_nullable_columns(engine) -> None:  # noqa: ANN001
+    """Add nullable model columns an existing table lacks (create_all won't)."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present or not column.nullable or column.primary_key:
+                    continue
+                ddl_type = column.type.compile(dialect=engine.dialect)
+                conn.exec_driver_sql(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}')
+                logger.info("Added missing column %s.%s", table.name, column.name)
 
 
 def get_session() -> Iterator[Session]:

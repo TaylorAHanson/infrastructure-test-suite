@@ -36,13 +36,41 @@ class OutboundHttpHandler(Handler):
             raise HandlerError(f"DNS resolution failed for {host}: {exc}",
                                failure_bucket="DNS_RESOLUTION_FAILURE")
 
+    def _endpoint(self, ctx: HandlerContext) -> tuple[str, int, bool]:
+        parsed = urlparse(self._url(ctx))
+        https = parsed.scheme != "http"
+        return parsed.hostname or "", parsed.port or (443 if https else 80), https
+
     def stage_connect(self, ctx: HandlerContext) -> StageResult:
-        if str(ctx.param("demo_outcome", "pass")).lower() == "deny":
-            raise HandlerError("Egress denied by network policy.", failure_bucket="NETWORK_POLICY_DENY")
-        return StageResult("CONNECT", StageStatus.PASS, message="Egress path reachable.")
+        if ctx.demo_mode:
+            if str(ctx.param("demo_outcome", "pass")).lower() == "deny":
+                raise HandlerError("Egress denied by network policy.", failure_bucket="NETWORK_POLICY_DENY")
+            return StageResult("CONNECT", StageStatus.PASS, message="Demo mode: egress path simulated.")
+        host, port, _ = self._endpoint(ctx)
+        try:
+            socket.create_connection((host, port), timeout=10).close()
+        except socket.timeout as exc:
+            raise HandlerError(f"Connecting to {host}:{port} timed out: {exc}", failure_bucket="UPSTREAM_TIMEOUT")
+        except OSError as exc:
+            raise HandlerError(f"Couldn't connect to {host}:{port}: {exc}", failure_bucket="CONNECTION_FAILED")
+        return StageResult("CONNECT", StageStatus.PASS,
+                           message=f"Connected to {host}:{port} from this app (not from workspace compute).")
 
     def stage_tls(self, ctx: HandlerContext) -> StageResult:
-        return StageResult("TLS", StageStatus.PASS, message="TLS handshake ok.")
+        if ctx.demo_mode:
+            return StageResult("TLS", StageStatus.PASS, message="Demo mode: TLS simulated.")
+        host, port, https = self._endpoint(ctx)
+        if not https:
+            return StageResult("TLS", StageStatus.SKIP, message="Plain HTTP: no TLS handshake.")
+        import ssl
+
+        try:
+            with socket.create_connection((host, port), timeout=10) as sock:
+                with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+                    pass
+        except (ssl.SSLError, OSError) as exc:
+            raise HandlerError(f"TLS handshake with {host} failed: {exc}", failure_bucket="TLS_HANDSHAKE_FAILURE")
+        return StageResult("TLS", StageStatus.PASS, message=f"TLS handshake with {host} ok.")
 
     def stage_operate(self, ctx: HandlerContext) -> StageResult:
         method = str(ctx.param("method", "GET")).upper()

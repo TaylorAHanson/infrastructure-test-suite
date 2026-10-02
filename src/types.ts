@@ -320,6 +320,8 @@ export interface StudioTest {
   version: number
   enabled: boolean
   updated_at?: string
+  /** The Python test script, when this Test is script-authored. */
+  script?: string | null
   members: {
     check_id: string
     kind: string
@@ -369,21 +371,6 @@ export interface RcaSuggestion {
   advisory: boolean
 }
 
-/** A proposed Suite creation/composition (issue #66/#63) — never applied until
- *  the human confirms via `POST /assistant/suite-compose/confirm`. */
-export interface SuiteProposal {
-  action: 'create' | 'add_test' | 'remove_test' | 'reorder' | 'toggle_det_only'
-  suite_id?: string
-  name?: string
-  description?: string
-  tags?: string[]
-  proposed_test_ids: string[]
-  proposed_deterministic_only: boolean
-  deterministic_violation: string | null
-  job_scheduled: boolean
-  requires_confirmation: boolean
-}
-
 /** One tool the Assistant called this turn, surfaced for transparency (#65): the
  *  tool name, the args it was invoked with, and its result. Rendered as a
  *  collapsed one-line indicator, expandable to show args/result. */
@@ -407,11 +394,10 @@ export interface NextAction {
 }
 
 export interface AssistantTurnResponse {
-  mode: 'authoring' | 'rca' | 'suite_authoring' | 'query'
+  mode: 'authoring' | 'rca' | 'query'
   page: string
   draft?: DraftProposal
   rca?: RcaSuggestion
-  suite_proposal?: SuiteProposal | null
   answer?: string | null
   clarifying_question?: string
   /** Which tools the agent called this turn, with args/result (additive, #65). */
@@ -446,6 +432,153 @@ export interface TestVersion {
   actor: string
   created_at: string
   snapshot: Record<string, unknown>
+}
+
+// ---------------- Script Tests + Test editor ----------------
+export interface ScriptDiagnostic {
+  line: number
+  message: string
+}
+
+export interface ScriptCheckInfo {
+  name: string
+  kind: 'assertion' | 'counterfactual'
+  line: number
+  role?: string | null
+  expected_stage?: string | null
+  advisory: boolean
+  description?: string
+}
+
+export interface ScriptCallInfo {
+  op: string
+  verb: string
+  tier: string
+  line: number
+  blocklisted: boolean
+}
+
+/** Static analysis of a script (`POST /scripts/analyze`) — never executes it. */
+export interface ScriptAnalysis {
+  ok: boolean
+  errors: ScriptDiagnostic[]
+  warnings: ScriptDiagnostic[]
+  checks: ScriptCheckInfo[]
+  calls: ScriptCallInfo[]
+  max_risk_tier: string
+}
+
+export interface TestScript {
+  script: string
+  /** True when the script was generated from a structured (pre-script) Test. */
+  converted: boolean
+  analysis: ScriptAnalysis
+}
+
+/** One brokered call the script made during a run. */
+export interface ScriptCallRecord {
+  op: string
+  verb?: string
+  tier?: string | null
+  role?: string
+  outcome: 'ok' | 'error' | 'blocked' | 'skipped' | string
+  message?: string
+  error_kind?: string
+  ms?: number
+  line?: number | null
+  status_code?: number
+  overridden?: boolean
+  demo?: boolean
+  [key: string]: unknown
+}
+
+export type ScriptCheckOutcome = 'pass' | 'fail' | 'error' | 'blocked' | 'skipped' | 'not_reached'
+
+export interface ScriptCheckResult {
+  name: string
+  kind: string
+  role?: string | null
+  advisory: boolean
+  description: string
+  expected_stage?: string | null
+  outcome: ScriptCheckOutcome
+  stage?: string | null
+  bucket?: string | null
+  message: string
+  traceback?: string | null
+  line?: number | null
+  evidence: Record<string, unknown>
+  calls: ScriptCallRecord[]
+  ms?: number | null
+}
+
+export interface ScriptError {
+  kind: 'syntax' | 'error' | 'timeout' | 'crash' | string
+  message: string
+  line?: number | null
+  traceback?: string | null
+}
+
+export interface ScriptRunResult {
+  checks: ScriptCheckResult[]
+  error: ScriptError | null
+  output: string
+  logs: string[]
+  setup_calls: ScriptCallRecord[]
+  duration_ms: number
+  timed_out: boolean
+}
+
+export interface DryRunResponse {
+  analysis: ScriptAnalysis
+  result: ScriptRunResult | null
+  target: { id: string; name: string; safety_class: string } | null
+  depth: Depth
+  /** The script the run executed (set on the editor agent's runs). */
+  script?: string
+}
+
+export interface EditorChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface EditorStep {
+  tool: string
+  detail: string
+  ok: boolean
+}
+
+export interface EditorProposal {
+  script: string
+  summary: string
+  analysis: ScriptAnalysis
+}
+
+export interface EditorTurnResponse {
+  reply: string
+  proposal?: EditorProposal | null
+  steps: EditorStep[]
+  dry_run?: DryRunResponse | null
+  /** True when the turn failed (e.g. no model endpoint); `reply` says why. */
+  error?: boolean
+}
+
+/** `GET /scripts/sdk/index`: {service: {method: {verb, summary, signature}}}. */
+export type SdkIndex = Record<string, Record<string, { verb: string; summary: string; signature: string }>>
+
+export interface SdkMethodDetail {
+  service: string
+  method: string
+  verb: string
+  rest_verb: string
+  path: string
+  summary: string
+  tier: string
+  call: string
+  doc?: string
+  blocklisted?: boolean
+  blocklist_reason?: string
 }
 
 // ---------------- Branding (runtime white-label, ADR-0013 / #38) ----------------

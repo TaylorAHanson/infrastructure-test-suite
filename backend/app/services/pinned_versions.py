@@ -36,7 +36,7 @@ from app.services.authoring import apply_check_update
 _CHECK_FIXED = ("id", "version", "created_at", "updated_at")
 #: Test columns a rollback restores from the snapshot.
 _TEST_RESTORED = ("name", "description", "tags", "run_as_role", "status", "origin",
-                  "derivation", "enabled")
+                  "derivation", "enabled", "script")
 _TEST_EDITABLE = ("name", "description", "tags", "run_as_role", "enabled")
 
 
@@ -183,6 +183,8 @@ def rollback_test(session: Session, test: Test, version: int, actor: str) -> Tes
     for key in _TEST_RESTORED:
         if key in data:
             setattr(test, key, data[key])
+    if "script" not in data:
+        test.script = None  # a snapshot from before scripts existed is a structured Test
     if isinstance(data.get("members"), list):
         set_members(session, test.id, [
             TestCheckIn(check_id=m["check_id"], kind=m.get("kind", "assertion"),

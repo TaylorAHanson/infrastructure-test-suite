@@ -97,149 +97,6 @@ def _search_suites(session, target, args):
                                          int(args.get("limit", 10) or 10))
 
 
-# ---------------------------------------------------------------------------
-# Suite creation — proposal-only (issue #66, spec #56 user stories 12-13). The
-# composition tools below (issue #63) all require an existing suite_id; this
-# is the missing "start from nothing" counterpart, following the same
-# eager-validate/never-auto-apply shape.
-# ---------------------------------------------------------------------------
-def _create_suite(session, target, args):
-    from app.models import Suite, Test
-    from app.services import suite_safety
-    name = str(args.get("name", "")).strip()
-    if not name:
-        return {"error": "name is required"}
-    test_ids = list(args.get("test_ids") or [])
-    for tid in test_ids:
-        if not session.get(Test, tid):
-            return {"error": f"test {tid!r} not found"}
-    deterministic_only = bool(args.get("deterministic_only", False))
-    # Unpersisted stand-in Suite — only its deterministic_only flag is read, and
-    # that is always supplied explicitly below, so a real row isn't needed yet.
-    draft_suite = Suite(name=name, deterministic_only=deterministic_only)
-    violation = suite_safety.check_deterministic_violation(
-        session, draft_suite, test_ids, proposed_deterministic_only=deterministic_only)
-    return {
-        "name": name,
-        "description": str(args.get("description", "") or ""),
-        "tags": list(args.get("tags") or []),
-        "proposed_test_ids": test_ids,
-        "proposed_deterministic_only": deterministic_only,
-        "deterministic_violation": violation,
-        "job_scheduled": False,
-        "requires_confirmation": True,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Suite composition tools — proposal-only (issue #63, spec #56 user stories 8-11)
-# ---------------------------------------------------------------------------
-def _compose_suite_add_test(session, target, args):
-    from app.models import Suite, SuiteMember, Test
-    from app.services import suite_safety
-    suite_id = str(args.get("suite_id", ""))
-    test_id = str(args.get("test_id", ""))
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        return {"error": f"suite {suite_id!r} not found"}
-    test = session.get(Test, test_id)
-    if not test:
-        return {"error": f"test {test_id!r} not found"}
-    existing = session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
-    ).all()
-    current_ids = [m.test_id for m in existing]
-    if test_id in current_ids:
-        return {"error": f"test {test_id!r} is already a member of this suite"}
-    proposed_ids = current_ids + [test_id]
-    violation = suite_safety.check_deterministic_violation(session, suite, proposed_ids)
-    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
-    return {
-        "suite_id": suite_id,
-        "proposed_test_ids": proposed_ids,
-        "proposed_deterministic_only": suite.deterministic_only,
-        "deterministic_violation": violation,
-        "job_scheduled": job_scheduled,
-        "requires_confirmation": True,
-    }
-
-
-def _compose_suite_remove_test(session, target, args):
-    from app.models import Suite, SuiteMember
-    from app.services import suite_safety
-    suite_id = str(args.get("suite_id", ""))
-    test_id = str(args.get("test_id", ""))
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        return {"error": f"suite {suite_id!r} not found"}
-    existing = session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
-    ).all()
-    current_ids = [m.test_id for m in existing]
-    if test_id not in current_ids:
-        return {"error": f"test {test_id!r} is not a member of this suite"}
-    proposed_ids = [tid for tid in current_ids if tid != test_id]
-    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
-    return {
-        "suite_id": suite_id,
-        "proposed_test_ids": proposed_ids,
-        "proposed_deterministic_only": suite.deterministic_only,
-        "deterministic_violation": None,
-        "job_scheduled": job_scheduled,
-        "requires_confirmation": True,
-    }
-
-
-def _compose_suite_reorder(session, target, args):
-    from app.models import Suite, SuiteMember
-    from app.services import suite_safety
-    suite_id = str(args.get("suite_id", ""))
-    new_order = list(args.get("test_ids") or [])
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        return {"error": f"suite {suite_id!r} not found"}
-    existing = session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
-    ).all()
-    current_ids = {m.test_id for m in existing}
-    if set(new_order) != current_ids:
-        return {"error": "test_ids must be a permutation of the suite's current member ids"}
-    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
-    return {
-        "suite_id": suite_id,
-        "proposed_test_ids": new_order,
-        "proposed_deterministic_only": suite.deterministic_only,
-        "deterministic_violation": None,
-        "job_scheduled": job_scheduled,
-        "requires_confirmation": True,
-    }
-
-
-def _compose_suite_toggle_det_only(session, target, args):
-    from app.models import Suite, SuiteMember
-    from app.services import suite_safety
-    suite_id = str(args.get("suite_id", ""))
-    new_value = bool(args.get("deterministic_only", False))
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        return {"error": f"suite {suite_id!r} not found"}
-    existing = session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
-    ).all()
-    current_ids = [m.test_id for m in existing]
-    violation = suite_safety.check_deterministic_violation(
-        session, suite, current_ids, proposed_deterministic_only=new_value)
-    job_scheduled = suite_safety.is_suite_referenced_by_nightly_job(session, suite_id)
-    return {
-        "suite_id": suite_id,
-        "proposed_test_ids": current_ids,
-        "proposed_deterministic_only": new_value,
-        "deterministic_violation": violation,
-        "job_scheduled": job_scheduled,
-        "requires_confirmation": True,
-    }
-
-
 #: name → adapter ``(session, target, arguments) -> result``. The single dispatch
 #: table for what the model is allowed to invoke; nothing outside it is reachable.
 TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
@@ -253,13 +110,6 @@ TOOL_REGISTRY: dict[str, Callable[[Session, Optional[Target], dict], Any]] = {
     "failure_archive": _failure_archive,
     "operation_reference": _operation_reference,
     "search_suites": _search_suites,
-    # Suite creation (propose-only, issue #66)
-    "create_suite": _create_suite,
-    # Suite composition (propose-only, issue #63)
-    "compose_suite_add_test": _compose_suite_add_test,
-    "compose_suite_remove_test": _compose_suite_remove_test,
-    "compose_suite_reorder": _compose_suite_reorder,
-    "compose_suite_toggle_det_only": _compose_suite_toggle_det_only,
 }
 
 
@@ -312,40 +162,6 @@ TOOL_SCHEMAS: list[dict] = [
         "List available Suites by name/description/tags — for grounding a run-submission "
         "proposal. Returns id, name, test_count, deterministic_only.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}),
-    # Suite creation — returns a proposal only (issue #66)
-    _function_schema("create_suite",
-        "Propose creating a brand-new Suite with a name, description, tags, "
-        "deterministic_only flag, and initial member test_ids (from search_tests — "
-        "never invent one). Returns a proposal with a deterministic-only violation "
-        "check. Never auto-applies; requires confirmation.",
-        {"name": {"type": "string"}, "description": {"type": "string"},
-         "tags": {"type": "array", "items": {"type": "string"}},
-         "deterministic_only": {"type": "boolean"},
-         "test_ids": {"type": "array", "items": {"type": "string"}}},
-        ["name"]),
-    # Suite composition tools — return proposals only (issue #63)
-    _function_schema("compose_suite_add_test",
-        "Propose adding a Test to a Suite. Returns a proposal with deterministic-only "
-        "violation check and nightly-job warning. Never auto-applies; requires confirmation.",
-        {"suite_id": {"type": "string"}, "test_id": {"type": "string"}},
-        ["suite_id", "test_id"]),
-    _function_schema("compose_suite_remove_test",
-        "Propose removing a Test from a Suite. Returns a proposal with nightly-job "
-        "warning. Never auto-applies; requires confirmation.",
-        {"suite_id": {"type": "string"}, "test_id": {"type": "string"}},
-        ["suite_id", "test_id"]),
-    _function_schema("compose_suite_reorder",
-        "Propose reordering Tests in a Suite. test_ids must be a permutation of the "
-        "current member ids. Never auto-applies; requires confirmation.",
-        {"suite_id": {"type": "string"},
-         "test_ids": {"type": "array", "items": {"type": "string"}}},
-        ["suite_id", "test_ids"]),
-    _function_schema("compose_suite_toggle_det_only",
-        "Propose toggling deterministic_only on a Suite. Refused if any member Test "
-        "contains agentic Checks. Never auto-applies; requires confirmation.",
-        {"suite_id": {"type": "string"},
-         "deterministic_only": {"type": "boolean", "description": "new value for the flag"}},
-        ["suite_id", "deterministic_only"]),
 ]
 
 
@@ -459,69 +275,6 @@ _AUTHORING_TOOL_SYSTEM = (
     "\"clarifying_question\" (or null)}. Ground your operation on the tools; never invent a role."
 )
 
-_SUITE_TOOL_SYSTEM = (
-    "You are the Suite capability of a Databricks validation Assistant, reachable from "
-    "the Suites page. Use search_tests to find existing Tests by name/description when "
-    "the user names them (never invent a test id), and search_suites if the user might "
-    "mean an existing Suite. "
-    "To create a brand-new Suite, call create_suite with name, description, tags, "
-    "deterministic_only, and test_ids. To change a Suite already on screen (its id is in "
-    "the grounding as suite_id), call compose_suite_add_test / compose_suite_remove_test / "
-    "compose_suite_reorder / compose_suite_toggle_det_only instead. Every one of these "
-    "tools only proposes a change — nothing is created or applied until the human "
-    "confirms. After the tool responds, reply with a single JSON object: "
-    "{\"answer\": \"<plain-English summary of the proposal, asking the user to confirm>\"}. "
-    "For a plain question (no creation/change intended), just reply with {\"answer\": ...}."
-)
-
-#: Suite-mutating tool names reachable from the Suites page (issue #66/#63) — the
-#: `_suite_turn` loop scans executed tool calls for one of these to surface as a
-#: confirmable proposal, and maps each to the `action` the confirm endpoint expects.
-_SUITE_ACTION_BY_TOOL = {
-    "create_suite": "create",
-    "compose_suite_add_test": "add_test",
-    "compose_suite_remove_test": "remove_test",
-    "compose_suite_reorder": "reorder",
-    "compose_suite_toggle_det_only": "toggle_det_only",
-}
-
-
-def _suite_turn(session: Session, payload: AssistantTurnIn,
-                model_call: Optional[ModelCall]) -> dict:
-    """The Suites-page capability (issue #66): create a brand-new Suite, or compose
-    one already on screen, via chat — grounded on search_tests/search_suites.
-
-    Every mutating tool only proposes (issue #63's pattern, extended to creation);
-    nothing is created or changed until the human confirms via
-    ``POST /assistant/suite-compose/confirm``, which re-runs the safety gate.
-    """
-    ctx = payload.page_context
-    intent = payload.turn
-    grounding = {"suite_id": ctx.suite_id} if ctx.suite_id else {}
-    init: _TurnState = {
-        "messages": [{"role": "system", "content": _SUITE_TOOL_SYSTEM},
-                     {"role": "user", "content": json.dumps({"intent": intent, "grounding": grounding})}],
-        "executed": [], "pending": [], "plan": {}, "iters": 0,
-    }
-    graph = _build_graph(session, None, model_call)
-    final = graph.invoke(init, {"recursion_limit": 2 * MAX_ITERS + 5})
-    plan = final.get("plan") or {}
-    executed = final.get("executed", [])
-
-    suite_call = next((t for t in reversed(executed) if t["name"] in _SUITE_ACTION_BY_TOOL), None)
-    proposal = None
-    if suite_call is not None and "error" not in (suite_call["result"] or {}):
-        proposal = {**suite_call["result"], "action": _SUITE_ACTION_BY_TOOL[suite_call["name"]]}
-
-    return {
-        "mode": "suite_authoring" if proposal else "query",
-        "page": ctx.page,
-        "answer": plan.get("answer"),
-        "suite_proposal": proposal,
-        "tool_calls": executed,
-    }
-
-
 _RUN_SUBMISSION_TOOL_SYSTEM = (
     "You are the run-submission capability of a Databricks validation Assistant. "
     "Use search_targets and search_suites to identify the target(s) and suite(s)/test(s) "
@@ -607,19 +360,14 @@ def run_agent_turn(session: Session, payload: AssistantTurnIn,
     ctx = payload.page_context
     if payload.mode == "run_submission":
         return _run_submission_turn(session, payload, model_call)
-    if payload.mode in ("authoring", "rca", "suite"):
+    if payload.mode in ("authoring", "rca"):
         mode = payload.mode
     elif ctx.finding:
         mode = "rca"
-    elif ctx.page == "suites":
-        # The Suites page (issue #66): create-or-compose, never the Test compiler.
-        mode = "suite"
     else:
         mode = "authoring"
     if mode == "rca":
         return _rca_turn(session, payload, model_call)
-    if mode == "suite":
-        return _suite_turn(session, payload, model_call)
     return _authoring_turn(session, payload, model_call)
 
 

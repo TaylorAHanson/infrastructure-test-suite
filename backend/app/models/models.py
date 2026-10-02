@@ -111,6 +111,11 @@ class Test(SQLModel, table=True):
     #: run-as-role + why, suggested counterfactuals/suite + why. What makes an
     #: AI-produced Test auditable by a stranger (ADR-0006 §8, user story 11).
     derivation: dict = _json_col()
+    #: The Test as a Python script. When set it is the source of truth: its
+    #: ``with check(...)`` blocks are synced to Check rows (handler_key
+    #: ``script``) so results, history and provenance work as for any Check.
+    #: None = a legacy structured Test (operation + assertion per Check).
+    script: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
 
     version: int = Field(default=1)
     enabled: bool = Field(default=True, index=True)

@@ -46,10 +46,9 @@ SQL_PLAN = {
 
 # --------------------------- tool-calling plumbing (#57) ---------------------------
 def test_tool_inventory_is_closed_by_omission():
-    # The registered tool schemas are the read/grounding tools plus search_suites (#64),
-    # suite creation (#66), and 4 suite-composition proposal tools (#63). No schema
-    # exists for a Target write, /admin/*, Branding, or Webhook action — closed by
-    # omission at design time.
+    # The registered tool schemas are the read/grounding tools plus search_suites (#64).
+    # No schema exists for a Target write, /admin/*, Branding, Webhook or Suite write
+    # — closed by omission at design time.
     from app.services.assistant_graph import TOOL_REGISTRY, TOOL_SCHEMAS
 
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
@@ -58,11 +57,6 @@ def test_tool_inventory_is_closed_by_omission():
         "search_tests",
         "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
         "search_suites",
-        # Suite creation (issue #66)
-        "create_suite",
-        # Suite composition tools (issue #63)
-        "compose_suite_add_test", "compose_suite_remove_test",
-        "compose_suite_reorder", "compose_suite_toggle_det_only",
     }
     assert set(TOOL_REGISTRY) == names
     for forbidden in ("register_target", "edit_target", "delete_target", "target_register",
@@ -665,240 +659,14 @@ def test_turn_run_history_global_answers_without_draft(client):
     assert any(t["name"] == "run_history" for t in executed)
 
 
-# --------------------- suite composition tools (issue #63) ---------------------
+# ------------- suites are composed by hand, not by the Assistant -------------
 
-def test_suite_compose_add_test_returns_proposal(client):
-    # Successful composition: add a Test to a non-deterministic-only Suite.
-    # The tool returns a proposal (not applied) with requires_confirmation=True.
-    suites = client.get("/api/v1/suites").json()
-    suite = next(s for s in suites if not s["deterministic_only"])
-    suite_id = suite["id"]
-    all_tests = client.get("/api/v1/tests").json()
-    available = [t["id"] for t in all_tests
-                 if t["status"] == "active" and t["id"] not in suite["test_ids"]]
-    if not available:
-        pytest.skip("all active tests are already members of the non-det-only suite")
-    test_id = available[0]
+def test_assistant_has_no_suite_writing_tools():
+    from app.services.assistant_graph import TOOL_REGISTRY
 
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": test_id}}]}
-        return {"answer": f"Proposal ready — confirm to add {test_id} to {suite_id}."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {test_id} to suite {suite_id}",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["deterministic_violation"] is None
-    assert result["requires_confirmation"] is True
-    assert test_id in result["proposed_test_ids"]
-    # Suite is unchanged until the human confirms — the tool only proposes.
-    assert client.get(f"/api/v1/suites/{suite_id}").json()["test_ids"] == suite["test_ids"]
+    assert not [n for n in TOOL_REGISTRY if "suite" in n and n != "search_suites"]
 
 
-def test_suite_compose_det_only_violation_refused(client):
-    # Adding a Test with an agentic Check to a deterministic_only Suite is refused
-    # at the tool level and at the confirm endpoint.
-    suites = client.get("/api/v1/suites").json()
-    ci_gate = next(s for s in suites if s["deterministic_only"])
-    suite_id = ci_gate["id"]
-
-    # The seeded "Platform self-check" test contains warehouse_healthy_ish whose
-    # assertion "the warehouse came up healthy-ish" compiles to agentic/non-compilable.
-    all_tests = client.get("/api/v1/tests").json()
-    agentic_test = next(
-        (t for t in all_tests
-         if ("platform" in t["name"].lower() or "self" in t["name"].lower())
-         and t["id"] not in ci_gate["test_ids"]),
-        None,
-    )
-    if agentic_test is None:
-        pytest.skip("no agentic test available as non-member of the CI Gate suite")
-    test_id = agentic_test["id"]
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": test_id}}]}
-        return {"answer": "Refused — that test contains agentic Checks."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {test_id} to the CI gate suite",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["deterministic_violation"] is not None
-    assert "agentic" in result["deterministic_violation"].lower()
-
-    # The confirm endpoint also refuses the same change (safety gate re-runs).
-    cr = client.post("/api/v1/assistant/suite-compose/confirm",
-                     json={"suite_id": suite_id, "action": "add_test", "test_id": test_id})
-    assert cr.status_code == 422
-
-
-def test_suite_compose_job_scheduled_warning_surfaced(client):
-    # A Suite included in a past NIGHTLY run gets job_scheduled=True in the tool result,
-    # making the extra-visible confirmation visible to the caller.
-    suites = client.get("/api/v1/suites").json()
-    suite = suites[0]
-    suite_id = suite["id"]
-
-    # Record a NIGHTLY RunRequest that references this suite explicitly.
-    nr = client.post("/api/v1/runs", json={
-        "suite_ids": [suite_id], "depth": "quick",
-        "requested_by": "nightly-dab", "request_source": "NIGHTLY"})
-    assert nr.status_code in (200, 202)
-
-    all_tests = client.get("/api/v1/tests").json()
-    non_member = next(
-        (t["id"] for t in all_tests
-         if t["id"] not in suite["test_ids"] and t["status"] == "active"),
-        None,
-    )
-    if non_member is None:
-        pytest.skip("all active tests are already members of the first suite")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": non_member}}]}
-        return {"answer": "⚠ This suite is used by the nightly job — extra confirmation needed."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {non_member} to suite {suite_id}",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["job_scheduled"] is True
-
-
-# ----------------------- suite creation (issue #66) -----------------------
-# The composition tools above (#63) all require an existing suite_id — they
-# cannot get a first-time user from "Suites page, nothing exists" to "a Suite
-# created via the assistant" on their own. `create_suite` is the missing
-# counterpart; these tests cover the turn (proposal) and confirm (apply) halves.
-
-def test_suite_turn_routes_to_suite_capability_not_test_authoring(client):
-    # A turn on the Suites page (no suite_id — nothing exists yet) must not be
-    # routed through the Test-authoring compiler; it gets mode="suite_authoring"
-    # (or "query") from the dedicated Suite capability, never mode="authoring".
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "create_suite",
-                                    "arguments": {"name": "Smoke suite", "test_ids": [test_id]}}]}
-        return {"answer": "Proposal ready — confirm to create the Suite."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "Create a new suite that runs the smoke test",
-        "page_context": {"page": "suites"}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["mode"] == "suite_authoring"
-    assert "draft" not in body
-
-
-def test_suite_turn_create_proposal_is_never_auto_applied(client):
-    before = client.get("/api/v1/suites").json()
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "create_suite",
-                                    "arguments": {"name": "Smoke suite",
-                                                 "description": "Runs the smoke test.",
-                                                 "test_ids": [test_id]}}]}
-        return {"answer": "Proposal ready — confirm to create the Suite."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "Create a new suite that runs the smoke test",
-        "page_context": {"page": "suites"}})
-    assert r.status_code == 200
-    proposal = r.json().get("suite_proposal")
-    assert proposal is not None
-    assert proposal["action"] == "create"
-    assert proposal["name"] == "Smoke suite"
-    assert proposal["proposed_test_ids"] == [test_id]
-    assert proposal["deterministic_violation"] is None
-    assert proposal["requires_confirmation"] is True
-    # Nothing is created until the human confirms.
-    after = client.get("/api/v1/suites").json()
-    assert len(after) == len(before)
-
-
-def test_suite_create_confirm_creates_suite_end_to_end(client):
-    # The confirm half: a first-time user goes from "nothing exists" to "a Suite
-    # created via the assistant" (issue #66 AC #3).
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
-        "action": "create", "name": "Assistant-created suite",
-        "description": "Created end-to-end via the Assistant.",
-        "test_ids": [test_id], "deterministic_only": False,
-    })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["name"] == "Assistant-created suite"
-    assert body["test_ids"] == [test_id]
-
-    listed = client.get("/api/v1/suites").json()
-    assert any(s["id"] == body["id"] for s in listed)
-
-
-def test_suite_create_confirm_requires_name(client):
-    r = client.post("/api/v1/assistant/suite-compose/confirm",
-                    json={"action": "create", "test_ids": []})
-    assert r.status_code == 422
-
-
-def test_suite_create_confirm_det_only_violation_refused(client):
-    # Creating a deterministic_only Suite whose member Test has an agentic Check
-    # is refused at confirm time — the safety gate applies to creation too.
-    all_tests = client.get("/api/v1/tests").json()
-    agentic_test = next(
-        (t for t in all_tests if "platform" in t["name"].lower() or "self" in t["name"].lower()),
-        None,
-    )
-    if agentic_test is None:
-        pytest.skip("no agentic test available in the seeded catalog")
-
-    before = client.get("/api/v1/suites").json()
-    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
-        "action": "create", "name": "Bad CI gate",
-        "test_ids": [agentic_test["id"]], "deterministic_only": True,
-    })
-    assert r.status_code == 422
-    after = client.get("/api/v1/suites").json()
-    assert len(after) == len(before)
+def test_suite_compose_confirm_endpoint_is_gone(client):
+    r = client.post("/api/v1/assistant/suite-compose/confirm", json={"action": "create", "name": "x"})
+    assert r.status_code in (404, 405)

@@ -3,6 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
 import type {
   AssistantTurnResponse,
+  Depth,
+  DryRunResponse,
+  EditorChatMessage,
+  EditorTurnResponse,
+  ScriptAnalysis,
+  SdkIndex,
+  SdkMethodDetail,
+  TestScript,
   AssumableRole,
   AuditEvent,
   Branding,
@@ -17,7 +25,6 @@ import type {
   SafetyClass,
   StudioTest,
   Suite,
-  SuiteProposal,
   Target,
   TestVersion,
   VerdictResource,
@@ -90,24 +97,139 @@ export const useCommitDraft = () => {
   })
 }
 
-/** Confirm a Suite-creation proposal from the Assistant (issue #66) — the confirm
- *  half of suggest-then-human-confirms; nothing is created until this is called
- *  with the human's go-ahead. */
-export const useConfirmCreateSuite = () => {
+export interface SuiteBody {
+  name: string
+  description?: string
+  tags?: string[]
+  test_ids: string[]
+  deterministic_only?: boolean
+  enabled?: boolean
+}
+
+export const useCreateSuite = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (proposal: SuiteProposal) =>
-      api.post<Suite>('/assistant/suite-compose/confirm', {
-        action: 'create',
-        name: proposal.name,
-        description: proposal.description,
-        tags: proposal.tags,
-        test_ids: proposal.proposed_test_ids,
-        deterministic_only: proposal.proposed_deterministic_only,
-      }),
+    mutationFn: (body: SuiteBody) => api.post<Suite>('/suites', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['suites'] }),
   })
 }
+
+export const useUpdateSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...body }: Partial<SuiteBody> & { id: string }) =>
+      api.patch<Suite>(`/suites/${id}`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['suites'] }),
+  })
+}
+
+export const useDeleteSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.del<void>(`/suites/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['suites'] }),
+  })
+}
+
+// ---------------- Script Tests + the Test editor ----------------
+const invalidateTest = (qc: ReturnType<typeof useQueryClient>, testId?: string) => {
+  qc.invalidateQueries({ queryKey: ['studio-tests'] })
+  qc.invalidateQueries({ queryKey: ['tests'] })
+  qc.invalidateQueries({ queryKey: ['checks'] })
+  if (testId) {
+    qc.invalidateQueries({ queryKey: ['test-script', testId] })
+    qc.invalidateQueries({ queryKey: ['test-versions', testId] })
+  }
+}
+
+export const useTestScript = (testId?: string) =>
+  useQuery({
+    queryKey: ['test-script', testId],
+    queryFn: () => api.get<TestScript>(`/tests/${testId}/script`),
+    enabled: !!testId,
+    staleTime: Infinity,
+  })
+
+export const useScriptTemplate = (enabled: boolean) =>
+  useQuery({
+    queryKey: ['script-template'],
+    queryFn: () => api.get<{ script: string }>('/scripts/template'),
+    enabled,
+    staleTime: Infinity,
+  })
+
+export interface ScriptTestBody {
+  name: string
+  description?: string
+  tags?: string[]
+  script?: string
+  run_as_role?: string | null
+}
+
+export const useCreateScriptTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: ScriptTestBody) => api.post<StudioTest>('/tests/script', body),
+    onSuccess: (t) => invalidateTest(qc, t.id),
+  })
+}
+
+export const useSaveScript = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ testId, ...body }: Partial<ScriptTestBody> & { testId: string; script: string }) =>
+      api.put<StudioTest>(`/tests/${testId}/script`, body),
+    onSuccess: (_t, v) => invalidateTest(qc, v.testId),
+  })
+}
+
+export const useDeleteTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (testId: string) => api.del<void>(`/tests/${testId}`),
+    onSuccess: () => invalidateTest(qc),
+  })
+}
+
+export const useAnalyzeScript = () =>
+  useMutation({
+    mutationFn: (script: string) => api.post<ScriptAnalysis>('/scripts/analyze', { script }),
+  })
+
+export interface DryRunBody {
+  script: string
+  target_id: string
+  depth: Depth
+  run_as_role?: string | null
+}
+
+export const useDryRun = () =>
+  useMutation({
+    mutationFn: (body: DryRunBody) => api.post<DryRunResponse>('/scripts/dry-run', body),
+  })
+
+export const useSdkIndex = () =>
+  useQuery({
+    queryKey: ['sdk-index'],
+    queryFn: () => api.get<SdkIndex>('/scripts/sdk/index'),
+    staleTime: Infinity,
+  })
+
+export const fetchSdkMethod = (service: string, method: string) =>
+  api.get<SdkMethodDetail>(`/scripts/sdk/${encodeURIComponent(service)}?method=${encodeURIComponent(method)}`)
+
+export interface EditorTurnBody {
+  messages: EditorChatMessage[]
+  script: string
+  test_id?: string | null
+  target_id?: string | null
+  last_dry_run?: DryRunResponse | null
+}
+
+export const useEditorTurn = () =>
+  useMutation({
+    mutationFn: (body: EditorTurnBody) => api.post<EditorTurnResponse>('/assistant/editor-turn', body),
+  })
 
 export const useAcceptTest = () => {
   const qc = useQueryClient()
@@ -122,10 +244,7 @@ export const useRollbackTest = () => {
   return useMutation({
     mutationFn: ({ testId, version }: { testId: string; version: number }) =>
       api.post<StudioTest>(`/tests/${testId}/rollback/${version}`),
-    onSuccess: (_d, v) => {
-      qc.invalidateQueries({ queryKey: ['studio-tests'] })
-      qc.invalidateQueries({ queryKey: ['test-versions', v.testId] })
-    },
+    onSuccess: (_d, v) => invalidateTest(qc, v.testId),
   })
 }
 

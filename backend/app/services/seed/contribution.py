@@ -17,8 +17,10 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class TestSpec:
-    """One Test: a target-agnostic bundle of Check references.
+    """One Test: a Python script, or (legacy) a bundle of structured Check references.
 
+    A script Test sets ``script``; its checks come from the script's own
+    ``with check(...)`` blocks, so ``members`` stays empty. A structured Test's
     ``members`` is a list of ``(check_key, kind)`` pairs, ``kind`` one of
     ``"assertion"`` or ``"counterfactual"``. A counterfactual's counterpart is
     resolved as the nearest preceding assertion-kind member — the positive
@@ -27,8 +29,9 @@ class TestSpec:
 
     name: str
     description: str
-    members: list[tuple[str, str]]
+    members: list[tuple[str, str]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    script: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,9 +53,10 @@ class Contribution:
     owns a deterministic, read-only (R0) Test lists its own key(s) here to
     volunteer for the CI Gate. The ``ci_gate`` domain module composes the
     gate's membership by collecting every discovered contribution's
-    ``ci_gate_tests`` and re-deriving each member Check's evaluator/risk tier
-    from its spec before trusting the opt-in — so a domain never needs to
-    edit ``ci_gate`` itself to join (or be kept out of) the gate.
+    ``ci_gate_tests`` and re-deriving each Test's checks (from its script's
+    analysis, or each member Check's spec) before trusting the opt-in — so a
+    domain never needs to edit ``ci_gate`` itself to join (or be kept out of)
+    the gate.
     """
 
     check_specs: list[tuple[str, dict]] = field(default_factory=list)

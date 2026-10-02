@@ -83,21 +83,10 @@ def test_run_over_seeded_test_emits_stage_outcomes(client):
     assert detail["functional"] is True
 
 
-def test_lane_suites_pass_in_demo_mode_without_a_workspace(client):
-    """issue #96: the extended Producer/Processing/Consumer posture Checks are
-    fully exercisable in demo mode — no live workspace required, and an empty
-    (demo) resource list is not a false-fail.
-
-    Processing Suite also carries the tutorial cluster-create Test (R1), so it
-    needs a mutating target; the posture Checks themselves are all R0 and would
-    pass on a read-only target too.
-    """
-    for name, safety_class in (("Producer Suite", "read-only"),
-                               ("Processing Suite", "sandbox"),
-                               ("Consumer Suite", "read-only")):
-        run_id, resource = submit(client, suite_ids=[_suite_id(client, name)],
-                                  target_ids=[_target_id(client, safety_class)], depth="full")
-        assert resource["verdict"] == "PASS", f"{name}: {resource}"
+def test_the_connectivity_suite_passes_in_demo_mode_without_a_workspace(client):
+    _, resource = submit(client, suite_ids=[_suite_id(client, "Connectivity Suite")],
+                         target_ids=[_target_id(client, "read-only")], depth="full")
+    assert resource["verdict"] == "PASS", resource
 
 
 def test_depth_defaults_to_quick_and_full_is_opt_in(client):
@@ -186,10 +175,10 @@ def test_yaml_export_carries_each_checks_full_definition(client):
     call params and description, not just its service.method label."""
     import yaml
 
-    y = client.get(f"/api/v1/tests/{_test_id(client, 'SSO enforcement')}/yaml").json()["yaml"]
+    y = client.get(f"/api/v1/tests/{_test_id(client, 'SQL Warehouse validation')}/yaml").json()["yaml"]
     (check,) = yaml.safe_load(y)["test"]["checks"]
-    assert check["operation"]["params"]["keys"] == "ssoEnabled"
-    assert check["description"].startswith("Confirm federated single sign-on is enabled")
+    assert check["operation"]["params"]["statement"] == "SELECT 1 AS healthcheck"
+    assert check["description"].startswith("Run a trivial statement on a SQL warehouse")
 
 
 def test_yaml_export_carries_a_counterfactuals_expected_stage(client):

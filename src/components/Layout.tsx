@@ -76,9 +76,12 @@ export default function Layout() {
   // it, so the sidebar auto-collapses to an icon rail — derived, never toggled.
   const [shelfOpen, setShelfOpen] = useState(false)
   const { width, collapsed, startResize } = useShelfWidth()
-  const navCollapsed = shelfOpen && collapsed
+  const { pathname } = useLocation()
+  // The test editor brings its own assistant and wants the whole width.
+  const inEditor = /^\/tests\/(new|[^/]+\/edit)\/?$/.test(pathname)
+  const navCollapsed = inEditor || (shelfOpen && collapsed)
 
-  const inSettings = useLocation().pathname.startsWith('/settings')
+  const inSettings = pathname.startsWith('/settings')
   const [settingsOpen, setSettingsOpen] = useState(inSettings)
   useEffect(() => {
     if (inSettings) setSettingsOpen(true)
@@ -158,20 +161,28 @@ export default function Layout() {
             </div>
           )}
         </aside>
-        <main className="min-w-0 flex-1 overflow-auto">
-          <div className="mx-auto max-w-[1400px] p-6">
+        {inEditor ? (
+          <main className="min-w-0 flex-1 overflow-hidden p-4">
             <Outlet />
-          </div>
-        </main>
+          </main>
+        ) : (
+          <main className="min-w-0 flex-1 overflow-auto">
+            <div className="mx-auto max-w-[1400px] p-6">
+              <Outlet />
+            </div>
+          </main>
+        )}
         {/* The one app-wide Assistant, reachable from every page (ADR-0012),
             sharing space with <main> as a resizable push-pane (#58). */}
-        <AssistantShelf
-          open={shelfOpen}
-          onOpen={() => setShelfOpen(true)}
-          onClose={() => setShelfOpen(false)}
-          width={width}
-          onResizeStart={startResize}
-        />
+        {!inEditor && (
+          <AssistantShelf
+            open={shelfOpen}
+            onOpen={() => setShelfOpen(true)}
+            onClose={() => setShelfOpen(false)}
+            width={width}
+            onResizeStart={startResize}
+          />
+        )}
       </div>
     </AssistantProvider>
   )

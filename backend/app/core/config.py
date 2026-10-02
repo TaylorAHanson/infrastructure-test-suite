@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # ----- App metadata -------------------------------------------------
     PROJECT_NAME: str = "databricks-regression-validation"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "1.1.0"
     ENVIRONMENT: str = "local"
     API_V1_PREFIX: str = "/api/v1"
     LOG_LEVEL: str = "INFO"
@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # poll timeout (ADR-0005 §2). A run holding a lease past this deadline is
     # force-reclaimed even if still heartbeating, so a wedged run frees its lock.
     MAX_RUN_DURATION_SECONDS: int = 1800
+    # Python-script Tests: wall-clock limit and address-space cap per script run.
+    # Long enough for a classic cluster launch, inside MAX_RUN_DURATION_SECONDS.
+    SCRIPT_TIMEOUT_SECONDS: int = 1500
+    SCRIPT_MEMORY_MB: int = 1024
+    # Output budget for the editor agent's replies (full scripts need room).
+    ASSISTANT_MAX_TOKENS: int = 6000
 
     # ----- Retained history (ADR-0015) ----------------------------------
     # The single configurable retention knob: check-result history is pruned to

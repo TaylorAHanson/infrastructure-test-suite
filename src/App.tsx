@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import Layout from './components/Layout'
@@ -12,6 +13,9 @@ import Branding from './pages/Branding'
 import Notifications from './pages/Notifications'
 import ReleaseNotes from './pages/ReleaseNotes'
 
+// The editor pulls in CodeMirror; load it only when a test is opened for editing.
+const TestEditor = lazy(() => import('./pages/TestEditor'))
+
 export default function App() {
   return (
     <Routes>
@@ -20,6 +24,8 @@ export default function App() {
         <Route path="runs" element={<Runs />} />
         <Route path="runs/:runId" element={<RunDetail />} />
         <Route path="tests" element={<Tests />} />
+        <Route path="tests/new" element={<Suspense fallback={null}><TestEditor /></Suspense>} />
+        <Route path="tests/:testId/edit" element={<Suspense fallback={null}><TestEditor /></Suspense>} />
         <Route path="audit" element={<Audit />} />
         <Route path="settings">
           <Route index element={<Navigate to="branding" replace />} />

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from app.core.enums import Evaluator, RiskTier
 from app.schemas.schemas import CheckCreate
+from app.script_runtime.analysis import analyze
 from app.services.authoring import build_check_fields
 from app.services.seed.contribution import Contribution, SuiteSpec
 
@@ -31,6 +32,14 @@ def _is_deterministic_r0(check_spec: dict) -> bool:
     return fields["evaluator"] == Evaluator.DETERMINISTIC and fields["risk_tier"] == RiskTier.R0.value
 
 
+def _script_gates(script: str) -> bool:
+    """A script can gate when it's valid, read-only, and has no advisory checks."""
+    analysis = analyze(script)
+    return (analysis["ok"] and bool(analysis["checks"])
+            and analysis["max_risk_tier"] == RiskTier.R0.value
+            and not any(c.get("advisory") for c in analysis["checks"]))
+
+
 def _compose_test_keys(contributions: list[Contribution]) -> list[str]:
     checks = {key: spec for contribution in contributions for key, spec in contribution.check_specs}
     tests = {key: spec for contribution in contributions for key, spec in contribution.tests.items()}
@@ -38,8 +47,11 @@ def _compose_test_keys(contributions: list[Contribution]) -> list[str]:
     keys: list[str] = []
     for contribution in contributions:
         for key in contribution.ci_gate_tests:
-            members = tests[key].members
-            if all(_is_deterministic_r0(checks[check_key]) for check_key, _ in members):
+            spec = tests[key]
+            if spec.script:
+                if _script_gates(spec.script):
+                    keys.append(key)
+            elif all(_is_deterministic_r0(checks[check_key]) for check_key, _ in spec.members):
                 keys.append(key)
     return keys
 
@@ -55,9 +67,9 @@ def compose_contribution(contributions: list[Contribution]) -> Contribution:
         suites=[
             SuiteSpec(
                 "CI Gate",
-                "Deterministic-only, read-only posture gate for the CI trigger: every "
-                "deterministic R0 Test a posture domain module volunteers — never a "
-                "judgment read, never a mutation.",
+                "Run after every apply: read-only health checks against the canary objects "
+                "terraform provisions — identity, metastore, SQL, Unity Catalog storage and "
+                "grants. Never a judgment read, never a mutation.",
                 _compose_test_keys(contributions),
                 deterministic_only=True,
                 tags=["seeded", "ci"],

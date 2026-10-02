@@ -1,6 +1,8 @@
 """Seed data: Check/Test/Suite exemplars so the app is useful on first boot.
 
-Idempotent: if any Check exists, seeding is skipped. The catalog is composed
+Idempotent: into an empty database it builds the catalog; into a seeded one it
+runs :func:`~app.services.seed.upgrade.upgrade_catalog`, which retires what
+earlier releases seeded and adds what's missing. The catalog is composed
 from **auto-discovered domain modules** under
 :mod:`app.services.seed.domains` (#106): a domain module declares a
 :class:`~app.services.seed.contribution.Contribution` of its own Checks/
@@ -11,9 +13,9 @@ catalog before building rows, so a cross-module reference — a Test naming a
 Check from another domain, a Suite naming a Test from another domain, a
 counterfactual's counterpart — resolves against the merged whole.
 
-Every real-catalog domain (Spec #91) — Producer, Processing, Consumer,
-Security Posture, Identity & Access, Governance/Unity Catalog, Sandbox
-Functional — owns its own module under ``.domains``, alongside the tutorial
+Every real-catalog domain — the quick and compute health tiers and the
+security posture battery, all script Tests — owns its own module under
+``.domains``, alongside the tutorial
 exemplars (:mod:`.domains.tutorial`) and the worked/onboarding example
 libraries (:mod:`.domains.examples`) (#107). No domain's content lives in a
 shared structure here; this file only re-exports the tutorial/example
@@ -70,11 +72,13 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
 
     seed_branding(session)
 
+    contributions = discover_contributions()
     if session.exec(select(Check)).first():
-        logger.info("Seed skipped: checks already present.")
+        from app.services.seed.upgrade import upgrade_catalog
+
+        upgrade_catalog(session, contributions)
         return
 
-    contributions = discover_contributions()
 
     _seed_examples(session, contributions)  # worked-example library (ADR-0006 §9)
     logger.info("Seeding Check/Test/Suite exemplars...")

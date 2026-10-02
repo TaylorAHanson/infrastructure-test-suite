@@ -31,6 +31,8 @@ def make_check(spec: dict, *, tags: list[str] | None = None) -> Check:
 
 def make_test(session: Session, checks: dict[str, Check], spec: TestSpec) -> Test:
     """Build a Test + its TestCheck members, wiring counterfactual counterparts."""
+    if spec.script:
+        return _make_script_test(session, spec)
     test = Test(name=spec.name, description=spec.description, tags=spec.tags)
     session.add(test)
     session.commit()
@@ -45,6 +47,23 @@ def make_test(session: Session, checks: dict[str, Check], spec: TestSpec) -> Tes
         if kind == "assertion":
             last_assertion_key = check_key
     session.commit()
+    return test
+
+
+def _make_script_test(session: Session, spec: TestSpec) -> Test:
+    """A script Test: its Check rows are synced from the script's declared checks."""
+    from app.script_runtime.analysis import analyze
+    from app.services.script_tests import sync_script_checks
+
+    analysis = analyze(spec.script or "")
+    if not analysis["ok"]:
+        raise ValueError(f"seeded test {spec.name!r} has an invalid script: {analysis['errors']}")
+    test = Test(name=spec.name, description=spec.description, tags=spec.tags, script=spec.script)
+    session.add(test)
+    session.flush()
+    sync_script_checks(session, test, spec.script or "", analysis)
+    session.commit()
+    session.refresh(test)
     return test
 
 

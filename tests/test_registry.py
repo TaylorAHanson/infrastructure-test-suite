@@ -53,20 +53,17 @@ def test_every_seeded_check_resolves_a_handler(seeded_session):
         assert get_handler(c.handler_key) is not None
 
 
-def test_seeded_catalog_covers_producer_processing_consumer(seeded_session):
-    """The default catalog covers all three README test-category lanes (issue #61)."""
+def test_seeded_catalog_covers_every_layer_an_apply_can_break(seeded_session):
+    """The default catalog reaches identity, Unity Catalog storage, SQL, classic
+    and serverless compute, and security posture — not just the control plane."""
     from sqlmodel import select
 
     from app.models import Suite, Test
 
     tests = seeded_session.exec(select(Test)).all()
     test_tags = {tag for t in tests for tag in (t.tags or [])}
-    assert "producer" in test_tags, "No producer-tagged test in catalog"
-    assert "processing" in test_tags, "No processing-tagged test in catalog"
-    assert "consumer" in test_tags, "No consumer-tagged test in catalog"
+    for tag in ("identity", "uc", "storage", "sql", "classic", "serverless", "network", "posture"):
+        assert tag in test_tags, f"no {tag}-tagged test in the catalog"
 
-    suites = seeded_session.exec(select(Suite)).all()
-    suite_names = {s.name for s in suites}
-    assert "Producer Suite" in suite_names, "Producer Suite missing from catalog"
-    assert "Processing Suite" in suite_names, "Processing Suite missing from catalog"
-    assert "Consumer Suite" in suite_names, "Consumer Suite missing from catalog"
+    suite_names = {s.name for s in seeded_session.exec(select(Suite)).all()}
+    assert {"CI Gate", "Post-apply health: compute & network", "Security posture (drift)"} <= suite_names

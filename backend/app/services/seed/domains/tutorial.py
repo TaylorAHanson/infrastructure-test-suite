@@ -4,14 +4,10 @@ Covers the authoring shapes the model must express: a deterministic
 connectivity Check, a functional (row-count) Check, an open-SDK mutating
 Check with a **counterfactual** pair, and an **agentic** (non-compilable →
 advisory) Check. Every Check and Test here carries :data:`TUTORIAL_TAGS` so
-it's distinguishable from the real posture catalog — each domain's own
-module under :mod:`app.services.seed.domains` (#107) — that Spec #91 adds
-alongside it, without disturbing these exemplars.
-
-The "Producer ingestion access" / "Processing layer access" Tests below are
-also referenced by the producer/processing domains' lane Suites
-(Producer/Processing Suite) — a cross-module Suite membership the registry
-resolves once every domain's Checks/Tests are merged.
+it's distinguishable from the real catalog (the health and posture script
+Tests in the other domain modules). These stay in the structured form on
+purpose: they're what the converter and the structured runtime are exercised
+against.
 """
 from __future__ import annotations
 
@@ -76,28 +72,6 @@ CHECK_SPECS: list[tuple[str, dict]] = [
                        params={"statement": "SELECT 1", "demo_row_count": 1}),
         handler_key="sql_warehouse",
         assertion="the warehouse came up healthy-ish")),
-    # --- Producer-category checks -------------------------------------------
-    ("jobs_list", dict(
-        display_name="Databricks Jobs list",
-        description="List Databricks Jobs to confirm the batch ingestion / workflow layer is reachable.",
-        operation=dict(service="jobs", method="list", verb="GET", params={}),
-        handler_key="databricks_sdk",
-        assertion="the call returns the job list without error")),
-    ("pipelines_list", dict(
-        display_name="Delta Live Tables pipeline list",
-        description="List DLT pipelines to confirm the streaming/ETL ingestion layer is accessible.",
-        operation=dict(service="pipelines", method="list_pipelines", verb="GET", params={}),
-        handler_key="databricks_sdk",
-        assertion="the call returns the pipeline list without error")),
-    # --- Processing-category checks -----------------------------------------
-    ("warehouses_list", dict(
-        display_name="SQL warehouse inventory",
-        description="List all SQL warehouses to confirm the compute processing tier can be enumerated.",
-        operation=dict(service="warehouses", method="list", verb="GET", params={}),
-        handler_key="databricks_sdk",
-        # Reachability assertion only — a fresh workspace may have zero warehouses,
-        # so asserting a non-empty result would false-fail a clean install.
-        assertion="the call returns the warehouse list without error")),
 ]
 
 
@@ -121,20 +95,6 @@ TESTS: dict[str, TestSpec] = {
                      [("lakebase_txn", "assertion"),
                       ("warehouse_healthy_ish", "assertion")],
                      ["platform", *TUTORIAL_TAGS]),
-    # --- Producer-category tests ----------------------------------------
-    "producer": TestSpec(
-        "Producer ingestion access",
-        "Databricks Jobs and DLT pipelines are reachable — the ingestion layer is up.",
-        [("jobs_list", "assertion"), ("pipelines_list", "assertion")],
-        ["producer", "ingestion", "connectivity", *TUTORIAL_TAGS],
-    ),
-    # --- Processing-category tests --------------------------------------
-    "processing": TestSpec(
-        "Processing layer access",
-        "SQL warehouses can be enumerated — the compute processing tier is reachable.",
-        [("warehouses_list", "assertion")],
-        ["processing", "compute", "connectivity", *TUTORIAL_TAGS],
-    ),
 }
 
 

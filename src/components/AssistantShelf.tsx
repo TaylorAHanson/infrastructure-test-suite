@@ -1,29 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Sparkles, X, Send, ShieldAlert, Lightbulb, Search, GripVertical,
-  Check, ChevronRight, ArrowUpRight, Wand2,
+  Sparkles, X, Send, Lightbulb, Search, GripVertical,
+  Check, ChevronRight, ArrowUpRight, Wand2, Code2,
 } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
 import type { AssistantMode } from '../lib/assistantContext'
-import {
-  useAssistantTurn,
-  useBranding,
-  useCommitDraft,
-  useConfirmCreateSuite,
-  useStarterPrompts,
-} from '../hooks/queries'
-import type { DraftCheckBody } from '../hooks/queries'
-import type {
-  DraftProposal,
-  NextAction,
-  RcaSuggestion,
-  SuiteProposal,
-  ToolCall,
-  WorkedExample,
-} from '../types'
+import { useAssistantTurn, useBranding, useStarterPrompts } from '../hooks/queries'
+import { errorMessage } from '../lib/api'
+import type { NextAction, RcaSuggestion, ToolCall, WorkedExample } from '../types'
 
 interface AssistantShelfProps {
   open: boolean
@@ -37,8 +23,9 @@ interface AssistantShelfProps {
 
 // The single, app-wide Assistant surface (ADR-0012): a resizable push-pane
 // (issue #58) that shares horizontal space with <main> rather than covering it.
-// It hands the harness the page's declared context, then shows an authoring
-// Draft (suggest-then-human-confirms) or an advisory RCA suggestion.
+// It hands the harness the page's declared context and answers questions or
+// suggests an RCA. Writing a test hands off to the test editor, where a
+// dedicated assistant works on the script beside the code.
 export default function AssistantShelf({ open, onOpen, onClose, width, onResizeStart }: AssistantShelfProps) {
   const { pageContext, seedPrompt, openWithPrompt } = useAssistantContext()
   const navigate = useNavigate()
@@ -46,34 +33,25 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   // Set when a seed request arrives while the input isn't mounted yet; the
   // focus effect below consumes it once the shelf has opened and rendered.
   const pendingFocus = useRef(false)
-  // The capability a seeded conversation asked for (e.g. "New suite" → suite
-  // mode). It sticks across follow-up turns until another entry point re-seeds
+  // The capability a seeded conversation asked for (e.g. "Describe a new test" →
+  // authoring mode). It sticks across follow-up turns until another entry point re-seeds
   // with a different mode, or the user moves to another page.
   const [mode, setMode] = useState<AssistantMode>('auto')
   const turn = useAssistantTurn()
-  const commit = useCommitDraft()
-  const confirmSuite = useConfirmCreateSuite()
   const { data: starters } = useStarterPrompts()
   // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
   const { data: branding } = useBranding()
   const assistantName = branding?.assistant_name || 'Assistant'
 
   const [text, setText] = useState('')
-  const [draft, setDraft] = useState<DraftProposal | null>(null)
+  // Set when the turn was a request to write a test: the editor takes it from here.
+  const [authoring, setAuthoring] = useState<string | null>(null)
   const [rca, setRca] = useState<RcaSuggestion | null>(null)
-  const [suiteProposal, setSuiteProposal] = useState<SuiteProposal | null>(null)
   const [answer, setAnswer] = useState<string | null>(null)
   // Tool-call transparency + dynamic follow-up buttons for the last answer (#65).
   const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
   const [nextActions, setNextActions] = useState<NextAction[]>([])
-  const [savedId, setSavedId] = useState<string | null>(null)
-  const [savedSuiteId, setSavedSuiteId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // Which guided-authoring suggestions the human has confirmed (default off:
-  // nothing is applied without an explicit confirm — ADR-0006 §5, story 7).
-  const [applyCf, setApplyCf] = useState(false)
-  const [applyRole, setApplyRole] = useState(false)
-  const [applySuite, setApplySuite] = useState(false)
 
   // Declared before the seed effect so a seed that lands with a page change wins.
   useEffect(() => setMode('auto'), [pageContext.page])
@@ -88,15 +66,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     onOpen()
     setText(seedPrompt.text)
     if (seedPrompt.mode) setMode(seedPrompt.mode)
-    setDraft(null)
-    setRca(null)
-    setSuiteProposal(null)
-    setAnswer(null)
-    setToolCalls([])
-    setNextActions([])
-    setSavedId(null)
-    setSavedSuiteId(null)
-    setError(null)
+    reset()
     pendingFocus.current = true
     // Re-run on every request (nonce changes even when text repeats).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,45 +86,35 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     }
   }, [open])
 
-  async function ask() {
-    if (!text.trim()) return
-    setError(null)
-    setDraft(null)
+  function reset() {
+    setAuthoring(null)
     setRca(null)
-    setSuiteProposal(null)
     setAnswer(null)
     setToolCalls([])
     setNextActions([])
-    setSavedId(null)
-    setSavedSuiteId(null)
-    setApplyCf(false)
-    setApplyRole(false)
-    setApplySuite(false)
+    setError(null)
+  }
+
+  async function ask() {
+    if (!text.trim()) return
+    reset()
     try {
       const res = await turn.mutateAsync({ turn: text, page_context: pageContext, mode })
-      if (res.mode === 'authoring') setDraft(res.draft ?? null)
-      else if (res.mode === 'suite_authoring') {
-        setSuiteProposal(res.suite_proposal ?? null)
-        setAnswer(res.answer ?? null)
+      if (res.mode === 'authoring') {
+        setAuthoring(text)
+        setAnswer(res.draft?.clarifying_question ?? null)
       } else if (res.mode === 'query') setAnswer(res.answer ?? null)
       else setRca(res.rca ?? null)
       // Additive: which tools ran + the contextual follow-up buttons (#65).
       setToolCalls(res.tool_calls ?? [])
       setNextActions(res.next_actions ?? [])
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'The Assistant could not respond.')
+      setError(errorMessage(e) || 'The Assistant could not respond.')
     }
   }
 
-  async function confirmSuiteProposal() {
-    if (!suiteProposal || suiteProposal.action !== 'create') return
-    setError(null)
-    try {
-      const created = await confirmSuite.mutateAsync(suiteProposal)
-      setSavedSuiteId(created.id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create the Suite.')
-    }
+  function openEditor(intent: string) {
+    navigate(`/tests/new?ask=${encodeURIComponent(intent)}`)
   }
 
   // Run a dynamic next-action button (#65): `author` re-seeds the input with a
@@ -163,54 +123,6 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   function runNextAction(action: NextAction) {
     if (action.kind === 'author' && action.seed) openWithPrompt(action.seed)
     else if (action.kind === 'navigate' && action.href) navigate(action.href)
-  }
-
-  async function saveDraft() {
-    if (!draft || !draft.checks.length) return
-    setError(null)
-
-    const checks: DraftCheckBody[] = draft.checks.map((c) => ({
-      operation: c.operation,
-      handler_key: c.handler_key,
-      assertion: c.assertion,
-      kind: c.kind,
-    }))
-    // Apply only the suggestions the human confirmed (suggest-then-confirm).
-    const applied: Record<string, unknown> = {}
-    const cf = draft.suggested_counterfactual
-    if (applyCf && cf) {
-      checks.push({
-        operation: cf.operation,
-        handler_key: cf.handler_key,
-        assertion: cf.assertion,
-        kind: 'counterfactual',
-        counterpart_index: 0,
-      })
-      applied.counterfactual = { assertion: cf.assertion, why: cf.why }
-    }
-    const roleRef = draft.suggested_run_as_role?.role
-    const runAsRole =
-      applyRole && roleRef ? (roleRef.label || roleRef.group_id) : undefined
-    if (runAsRole) applied.run_as_role = { role: runAsRole, why: draft.suggested_run_as_role?.why }
-    const suiteId = applySuite ? draft.suggested_suite?.suite_id : undefined
-    if (suiteId) applied.suite = { suite_id: suiteId, name: draft.suggested_suite?.name,
-                                   why: draft.suggested_suite?.why }
-
-    try {
-      const created = await commit.mutateAsync({
-        name: draft.name || 'Untitled Test',
-        description: draft.description,
-        checks,
-        run_as_role: runAsRole,
-        suite_id: suiteId,
-        // Persist what was applied + why, so the derivation panel is auditable
-        // by a stranger (ADR-0006 §8, user story 11).
-        derivation: { ...draft.derivation, applied },
-      })
-      setSavedId(created.id)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save the Draft.')
-    }
   }
 
   // Closed: a floating launcher, out of flow so it never takes split-pane width.
@@ -246,7 +158,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
       <div className="flex items-center gap-2 border-b border-edge p-4">
         <Sparkles size="18" className="text-accent" />
         <span className="text-sm font-semibold text-white">{assistantName}</span>
-        <span className="badge bg-panel text-muted">{mode === 'suite' ? 'suite' : pageContext.page || 'app'}</span>
+        <span className="badge bg-panel text-muted">{pageContext.page || 'app'}</span>
         <button className="ml-auto text-muted hover:text-white" onClick={onClose}>
           <X size="18" />
         </button>
@@ -254,8 +166,8 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
 
           <div className="flex-1 overflow-auto p-4">
             <p className="mb-3 text-xs text-muted">
-              Describe a test in one sentence, or ask why a check regressed. Nothing is
-              saved or run until you confirm.
+              Ask about your tests, targets and runs, or why a check regressed. To write
+              a test, describe it and we'll open it in the test editor.
             </p>
 
             {error && <div className="mb-3 text-sm text-fail">{error}</div>}
@@ -263,7 +175,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
 
             {/* Empty-conversation onboarding: concrete example prompts a
                 first-time user can click to see what they can ask (story 30). */}
-            {!draft && !rca && !suiteProposal && !answer && !turn.isPending &&
+            {!authoring && !rca && !answer && !turn.isPending &&
               starters && starters.length > 0 && (
               <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
             )}
@@ -273,27 +185,9 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
                 before the answer so it reads as "it looked, then it answered." */}
             {toolCalls.length > 0 && <ToolCallList calls={toolCalls} />}
 
-            {draft && (
-              <DraftView
-                draft={draft}
-                savedId={savedId}
-                onSave={saveDraft}
-                saving={commit.isPending}
-                toggles={{ applyCf, applyRole, applySuite }}
-                setToggles={{ setApplyCf, setApplyRole, setApplySuite }}
-              />
-            )}
+            {authoring && <AuthoringHandoff onOpen={() => openEditor(authoring)} />}
             {rca && <RcaView rca={rca} />}
-            {suiteProposal && (
-              <SuiteProposalView
-                proposal={suiteProposal}
-                answer={answer}
-                savedId={savedSuiteId}
-                onConfirm={confirmSuiteProposal}
-                confirming={confirmSuite.isPending}
-              />
-            )}
-            {!suiteProposal && !draft && !rca && answer && <AnswerView answer={answer} />}
+            {!authoring && !rca && answer && <AnswerView answer={answer} />}
 
             {/* Dynamic follow-up buttons (#65), rendered from whatever the turn's
                 tools made relevant — generic, not a per-capability button set. */}
@@ -307,7 +201,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
               <textarea
                 ref={inputRef}
                 className="input min-h-[64px] flex-1"
-                placeholder="e.g. start a cluster under compute-policy P and confirm it's allowed"
+                placeholder="e.g. which tests cover Unity Catalog grants?"
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => {
@@ -410,201 +304,21 @@ function NextActions({
   )
 }
 
-function riskColor(tier: string): string {
-  return tier === 'R0' ? 'text-pass' : tier === 'R3' ? 'text-fail' : 'text-warn'
-}
-
-interface Toggles {
-  applyCf: boolean
-  applyRole: boolean
-  applySuite: boolean
-}
-
-function DraftView({
-  draft,
-  savedId,
-  onSave,
-  saving,
-  toggles,
-  setToggles,
-}: {
-  draft: DraftProposal
-  savedId: string | null
-  onSave: () => void
-  saving: boolean
-  toggles: Toggles
-  setToggles: {
-    setApplyCf: (v: boolean) => void
-    setApplyRole: (v: boolean) => void
-    setApplySuite: (v: boolean) => void
-  }
-}) {
-  if (draft.clarifying_question) {
-    return (
-      <div className="card">
-        <div className="mb-1 flex items-center gap-2 card-title">
-          <Lightbulb size="14" /> One question
-        </div>
-        <p className="text-sm text-gray-200">{draft.clarifying_question}</p>
-      </div>
-    )
-  }
+// A request to write a test: the editor's assistant writes the script with you,
+// beside the code, so the handoff carries the sentence over.
+function AuthoringHandoff({ onOpen }: { onOpen: () => void }) {
   return (
-    <div className="space-y-3">
-      <div className="card">
-        <div className="mb-1 flex items-center gap-2">
-          <span className="text-sm font-semibold text-white">{draft.name}</span>
-          <span className={`badge ml-auto ${riskColor(draft.max_risk_tier)}`}>
-            max {draft.max_risk_tier}
-          </span>
-        </div>
-        <p className="mb-2 text-xs text-muted">{draft.description}</p>
-        {draft.checks.map((c, i) => (
-          <div key={i} className="mb-2 rounded-lg border border-edge bg-panel p-2">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[11px] text-info">
-                {c.operation.service}.{c.operation.method}
-              </span>
-              <span className={`badge ${riskColor(c.risk_tier)}`}>{c.risk_tier}</span>
-              <span className="badge bg-ink text-muted">{c.evaluator}</span>
-            </div>
-            <div className="mt-1 text-sm text-gray-200">“{c.assertion}”</div>
-          </div>
-        ))}
+    <div className="card">
+      <div className="mb-1 flex items-center gap-2 card-title">
+        <Code2 size="14" /> Write it in the test editor
       </div>
-
-      {draft.refusals.length > 0 && (
-        <div className="card border-fail/40 bg-fail/5">
-          <div className="mb-1 flex items-center gap-2 card-title text-fail">
-            <ShieldAlert size="14" /> Refused (R3 / blocklisted)
-          </div>
-          {draft.refusals.map((r, i) => (
-            <p key={i} className="text-xs text-gray-200">{r.reason}</p>
-          ))}
-        </div>
-      )}
-
-      {(draft.suggested_counterfactual || draft.suggested_suite || draft.suggested_run_as_role) && (
-        <div className="card">
-          <div className="mb-2 card-title">Guided suggestions (tick to apply on save)</div>
-          {draft.suggested_counterfactual && (
-            <Suggestion label="Counterfactual" why={draft.suggested_counterfactual.why}
-                        checked={toggles.applyCf} onChange={setToggles.setApplyCf}>
-              “{draft.suggested_counterfactual.assertion}”
-            </Suggestion>
-          )}
-          {draft.suggested_run_as_role && (
-            <Suggestion label="Run-as-role" why={draft.suggested_run_as_role.why}
-                        checked={toggles.applyRole} onChange={setToggles.setApplyRole}>
-              {draft.suggested_run_as_role.role.label || draft.suggested_run_as_role.role.group_id}
-            </Suggestion>
-          )}
-          {draft.suggested_suite && (
-            <Suggestion label="Suite placement" why={draft.suggested_suite.why}
-                        checked={toggles.applySuite} onChange={setToggles.setApplySuite}>
-              {draft.suggested_suite.name}
-            </Suggestion>
-          )}
-        </div>
-      )}
-
-      {draft.checks.length > 0 && (
-        <button className="btn btn-accent w-full" onClick={onSave} disabled={saving || !!savedId}>
-          {savedId ? 'Saved as Draft ✓ (accept it on the Tests page to run)' : saving ? 'Saving…' : 'Save as Draft'}
-        </button>
-      )}
-    </div>
-  )
-}
-
-function Suggestion({
-  label,
-  why,
-  children,
-  checked,
-  onChange,
-}: {
-  label: string
-  why: string
-  children: ReactNode
-  checked: boolean
-  onChange: (v: boolean) => void
-}) {
-  return (
-    <label className="mb-2 flex cursor-pointer gap-2 rounded-lg border border-edge bg-ink p-2">
-      <input
-        type="checkbox"
-        className="mt-1"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <div>
-        <div className="flex items-center gap-2">
-          <span className="badge bg-panel text-accent">{label}</span>
-          <span className="text-sm text-gray-200">{children}</span>
-        </div>
-        <div className="mt-1 text-[11px] text-muted">{why}</div>
-      </div>
-    </label>
-  )
-}
-
-// The Suites-page capability's proposal (issue #66/#63): a brand-new Suite or a
-// change to one on screen — never created/applied until the human confirms.
-// Only "create" is confirmable from here; composing an existing Suite (#63)
-// still requires the specific test id and is left to a future entry point.
-function SuiteProposalView({
-  proposal,
-  answer,
-  savedId,
-  onConfirm,
-  confirming,
-}: {
-  proposal: SuiteProposal
-  answer: string | null
-  savedId: string | null
-  onConfirm: () => void
-  confirming: boolean
-}) {
-  const violation = proposal.deterministic_violation
-  return (
-    <div className="space-y-3">
-      {answer && <p className="text-sm text-gray-200">{answer}</p>}
-      <div className="card">
-        <div className="mb-1 flex items-center gap-2">
-          <span className="text-sm font-semibold text-white">
-            {proposal.name || `Suite ${proposal.suite_id ?? ''}`}
-          </span>
-          <span className="badge ml-auto bg-panel text-muted">{proposal.action}</span>
-        </div>
-        {proposal.description && <p className="mb-2 text-xs text-muted">{proposal.description}</p>}
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-          <span className="badge bg-ink-soft text-muted">
-            {proposal.proposed_test_ids.length} tests
-          </span>
-          {proposal.proposed_deterministic_only && (
-            <span className="badge bg-pass/15 text-pass">deterministic-only</span>
-          )}
-          {proposal.job_scheduled && (
-            <span className="badge bg-warn/15 text-warn">used by nightly job</span>
-          )}
-        </div>
-      </div>
-
-      {violation && (
-        <div className="card border-fail/40 bg-fail/5">
-          <div className="mb-1 flex items-center gap-2 card-title text-fail">
-            <ShieldAlert size="14" /> Refused
-          </div>
-          <p className="text-xs text-gray-200">{violation}</p>
-        </div>
-      )}
-
-      {proposal.action === 'create' && !violation && (
-        <button className="btn btn-accent w-full" onClick={onConfirm} disabled={confirming || !!savedId}>
-          {savedId ? 'Created ✓' : confirming ? 'Creating…' : 'Confirm & create Suite'}
-        </button>
-      )}
+      <p className="mb-3 text-sm text-gray-200">
+        Tests are Python scripts. The editor's assistant will draft this one, check every SDK call,
+        and dry-run it with you before anything is saved.
+      </p>
+      <button className="btn btn-accent w-full justify-center" onClick={onOpen}>
+        <Code2 size="16" /> Open in the test editor
+      </button>
     </div>
   )
 }

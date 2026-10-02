@@ -14,13 +14,13 @@ import type { PageContext } from '../types'
 export interface SeedPrompt {
   text: string
   nonce: number
-  /** Which Assistant capability the seeded conversation targets (e.g. `suite`
-   *  for "New suite"). Omitted = keep the shelf's current mode. */
+  /** Which Assistant capability the seeded conversation targets (e.g.
+   *  `authoring`). Omitted = keep the shelf's current mode. */
   mode?: AssistantMode
 }
 
 /** The turn `mode` the harness accepts; `auto` picks from the page context. */
-export type AssistantMode = 'auto' | 'authoring' | 'suite'
+export type AssistantMode = 'auto' | 'authoring'
 
 interface Ctx {
   pageContext: PageContext

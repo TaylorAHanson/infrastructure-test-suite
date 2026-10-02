@@ -8,7 +8,7 @@ from app.core.ids import utcnow
 from app.db.session import get_session
 from app.models import Suite, SuiteMember, Test
 from app.schemas.schemas import SuiteCreate, SuiteUpdate
-from app.services import versioning, yaml_export
+from app.services import suite_safety, versioning, yaml_export
 from app.services.audit import record_audit
 
 router = APIRouter()
@@ -24,7 +24,8 @@ def _test_ids(session: Session, suite_id: str) -> list[str]:
 def _set_members(session: Session, suite_id: str, test_ids: list[str]) -> None:
     for m in session.exec(select(SuiteMember).where(SuiteMember.suite_id == suite_id)).all():
         session.delete(m)
-    for i, tid in enumerate(test_ids):
+    session.flush()
+    for i, tid in enumerate(dict.fromkeys(test_ids)):
         session.add(SuiteMember(suite_id=suite_id, test_id=tid, sort_order=i))
 
 
@@ -61,6 +62,10 @@ def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
             raise HTTPException(422, f"test {tid} not found")
     suite = Suite(name=payload.name, description=payload.description, tags=payload.tags,
                   deterministic_only=payload.deterministic_only)
+    violation = suite_safety.check_deterministic_violation(
+        session, suite, payload.test_ids, proposed_deterministic_only=payload.deterministic_only)
+    if violation:
+        raise HTTPException(422, violation)
     session.add(suite)
     session.commit()
     session.refresh(suite)
@@ -82,6 +87,14 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
         raise HTTPException(404, "suite not found")
     before = _suite_out(session, suite)
     data = payload.model_dump(exclude_unset=True)
+    for tid in payload.test_ids or []:
+        if not session.get(Test, tid):
+            raise HTTPException(422, f"test {tid} not found")
+    violation = suite_safety.check_deterministic_violation(
+        session, suite, payload.test_ids if payload.test_ids is not None else before["test_ids"],
+        proposed_deterministic_only=payload.deterministic_only)
+    if violation:
+        raise HTTPException(422, violation)
     for key in ("name", "description", "tags", "deterministic_only", "enabled"):
         if key in data and data[key] is not None:
             setattr(suite, key, data[key])
@@ -97,3 +110,19 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
     record_audit(session, actor=actor, action="suite.update", entity_type="suite", entity_id=suite.id,
                  summary=f"Updated suite {suite.name}", before=before, after=out)
     return out
+
+
+@router.delete("/{suite_id}", status_code=204)
+def delete_suite(suite_id: str, session: Session = Depends(get_session),
+                 actor: str = Query("api-user")) -> None:
+    """Delete a Suite (its Tests and their history are untouched)."""
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        raise HTTPException(404, "suite not found")
+    before = _suite_out(session, suite)
+    for m in session.exec(select(SuiteMember).where(SuiteMember.suite_id == suite_id)).all():
+        session.delete(m)
+    session.delete(suite)
+    session.commit()
+    record_audit(session, actor=actor, action="suite.delete", entity_type="suite", entity_id=suite_id,
+                 summary=f"Deleted suite {before['name']}", before=before)

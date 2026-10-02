@@ -16,25 +16,23 @@ from sqlmodel import Session, select
 
 from app.db.session import get_session
 from app.handlers.registry import OperationBlocked
-from app.models import Suite, SuiteMember, Test, WorkedExample
+from app.models import WorkedExample
 from app.schemas.schemas import (
     AgenticEvalIn,
     AssistantTurnIn,
     DraftCommitIn,
+    EditorTurnIn,
     ExamplePromoteIn,
     RcaRequestIn,
     RunProposalIn,
     RunRequestOut,
-    SuiteComposeConfirmIn,
 )
 from app.core.enums import RequestSource
 from app.schemas.schemas import RunSubmit
 from app.services import agentic_evaluator, assistant, rca, run_service
-from app.services import suite_safety as _suite_safety
 from app.services.assistant import get_model_call
 from app.services.audit import record_audit
-from app.services import pinned_versions, versioning
-from app.core.ids import utcnow
+from app.services import pinned_versions
 
 router = APIRouter()
 
@@ -45,6 +43,27 @@ def assistant_turn(payload: AssistantTurnIn,
                    model_call=Depends(get_model_call)) -> dict:
     """Route one turn to authoring or RCA, grounded in the page context."""
     return assistant.run_turn(session, payload, model_call=model_call)
+
+
+def get_editor_model():
+    """The editor agent's model seam; overridden in tests."""
+    return None
+
+
+@router.post("/editor-turn")
+def editor_turn(payload: EditorTurnIn, session: Session = Depends(get_session),
+                model_call=Depends(get_editor_model)) -> dict:
+    """One turn of the test-editor agent. It may propose a script; it never saves one."""
+    from app.services import editor_agent
+
+    if model_call is None and not editor_agent.model_available():
+        return {"reply": "The assistant needs a Model Serving endpoint. Set MODEL_SERVING_ENDPOINT "
+                         "(the app's serving-endpoint resource) to enable it.",
+                "proposal": None, "steps": [], "dry_run": None, "error": True}
+    return editor_agent.editor_turn(
+        session, messages=[m.model_dump() for m in payload.messages], buffer=payload.script,
+        test_id=payload.test_id, target_id=payload.target_id, last_dry_run=payload.last_dry_run,
+        model_call=model_call)
 
 
 @router.post("/draft", status_code=201)
@@ -138,132 +157,3 @@ def promote_example(payload: ExamplePromoteIn,
         raise HTTPException(404, str(exc))
     return {"id": example.id, "intent": example.intent, "title": example.title,
             "source_test_id": example.source_test_id}
-
-
-# ---------------------------------------------------------------------------
-# Suite composition confirm (issue #63, spec #56 user stories 8-11)
-# ---------------------------------------------------------------------------
-def _suite_snapshot(session: Session, suite: Suite) -> dict:
-    members = session.exec(
-        select(SuiteMember)
-        .where(SuiteMember.suite_id == suite.id)  # type: ignore[arg-type]
-        .order_by(SuiteMember.sort_order)  # type: ignore[arg-type]
-    ).all()
-    return {**suite.model_dump(mode="json"), "test_ids": [m.test_id for m in members]}
-
-
-def _replace_members(session: Session, suite_id: str, test_ids: list[str]) -> None:
-    for m in session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == suite_id)  # type: ignore[arg-type]
-    ).all():
-        session.delete(m)
-    for i, tid in enumerate(test_ids):
-        session.add(SuiteMember(suite_id=suite_id, test_id=tid, sort_order=i))
-
-
-def _confirm_create_suite(session: Session, payload: SuiteComposeConfirmIn, actor: str) -> dict:
-    """Apply a human-confirmed Suite-creation proposal (issue #66) — the missing
-    "start from nothing" counterpart to `confirm_suite_compose`'s existing actions.
-    """
-    if not payload.name:
-        raise HTTPException(422, "name required for action=create")
-    test_ids = list(payload.test_ids or [])
-    for tid in test_ids:
-        if not session.get(Test, tid):
-            raise HTTPException(404, f"test {tid} not found")
-    deterministic_only = bool(payload.deterministic_only)
-
-    draft_suite = Suite(name=payload.name, deterministic_only=deterministic_only)
-    violation = _suite_safety.check_deterministic_violation(
-        session, draft_suite, test_ids, proposed_deterministic_only=deterministic_only
-    )
-    if violation:
-        raise HTTPException(422, violation)
-
-    suite = Suite(name=payload.name, description=payload.description or "",
-                  tags=list(payload.tags or []), deterministic_only=deterministic_only)
-    session.add(suite)
-    session.commit()
-    session.refresh(suite)
-    _replace_members(session, suite.id, test_ids)
-    session.commit()
-    session.refresh(suite)
-
-    out = _suite_snapshot(session, suite)
-    versioning.snapshot(session, "suite", suite.id, suite.version, out, actor)
-    record_audit(session, actor=actor, action="suite.create", entity_type="suite",
-                 entity_id=suite.id, summary=f"Assistant created suite {suite.name}",
-                 before=None, after=out)
-    return out
-
-
-@router.post("/suite-compose/confirm")
-def confirm_suite_compose(
-    payload: SuiteComposeConfirmIn,
-    session: Session = Depends(get_session),
-    actor: str = Query("assistant"),
-) -> dict:
-    """Apply a human-confirmed suite creation/composition proposal (suggest-then-confirm).
-
-    Re-validates the deterministic-only invariant before applying so the safety
-    gate cannot be bypassed even if the proposal was generated without the tool.
-    """
-    if payload.action == "create":
-        return _confirm_create_suite(session, payload, actor)
-
-    suite = session.get(Suite, payload.suite_id)
-    if not suite:
-        raise HTTPException(404, "suite not found")
-
-    existing = session.exec(
-        select(SuiteMember).where(SuiteMember.suite_id == payload.suite_id)  # type: ignore[arg-type]
-    ).all()
-    current_ids = [m.test_id for m in existing]
-    new_test_ids = list(current_ids)
-    new_det_only = suite.deterministic_only
-
-    if payload.action == "add_test":
-        if not payload.test_id:
-            raise HTTPException(422, "test_id required for add_test")
-        if not session.get(Test, payload.test_id):
-            raise HTTPException(404, f"test {payload.test_id} not found")
-        if payload.test_id not in new_test_ids:
-            new_test_ids = current_ids + [payload.test_id]
-    elif payload.action == "remove_test":
-        if not payload.test_id:
-            raise HTTPException(422, "test_id required for remove_test")
-        new_test_ids = [t for t in current_ids if t != payload.test_id]
-    elif payload.action == "reorder":
-        if not payload.test_ids:
-            raise HTTPException(422, "test_ids required for reorder")
-        new_test_ids = payload.test_ids
-    elif payload.action == "toggle_det_only":
-        if payload.deterministic_only is None:
-            raise HTTPException(422, "deterministic_only required for toggle_det_only")
-        new_det_only = payload.deterministic_only
-    else:
-        raise HTTPException(422, f"unknown action {payload.action!r}")
-
-    # Re-validate the deterministic-only invariant (safety gate re-runs).
-    violation = _suite_safety.check_deterministic_violation(
-        session, suite, new_test_ids, proposed_deterministic_only=new_det_only
-    )
-    if violation:
-        raise HTTPException(422, violation)
-
-    before_out = _suite_snapshot(session, suite)
-    _replace_members(session, payload.suite_id, new_test_ids)
-    if payload.action == "toggle_det_only":
-        suite.deterministic_only = new_det_only
-    suite.version += 1
-    suite.updated_at = utcnow()
-    session.add(suite)
-    session.commit()
-    session.refresh(suite)
-    out = _suite_snapshot(session, suite)
-    versioning.snapshot(session, "suite", suite.id, suite.version, out, actor)
-    record_audit(session, actor=actor, action="suite.update", entity_type="suite",
-                 entity_id=suite.id,
-                 summary=f"Assistant composed suite {suite.name} (action={payload.action})",
-                 before=before_out, after=out)
-    return out

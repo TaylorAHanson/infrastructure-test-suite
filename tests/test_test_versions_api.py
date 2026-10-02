@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from helpers import test_id as _test_id
 
-SSO = "SSO enforcement"
+SQL = "SQL Warehouse validation"
 
 
 def _test(client, tid):
@@ -25,7 +25,7 @@ def _first_check_id(client, tid):
 
 
 def test_editing_a_check_through_its_test_is_a_new_test_version(client):
-    tid = _test_id(client, SSO)
+    tid = _test_id(client, SQL)
     cid = _first_check_id(client, tid)
     before = client.get(f"/api/v1/checks/{cid}").json()
 
@@ -54,7 +54,7 @@ def _run_expectations(client, tid):
 
 
 def test_rolling_a_test_back_restores_its_checks_content(client):
-    tid = _test_id(client, SSO)
+    tid = _test_id(client, SQL)
     cid = _first_check_id(client, tid)
     original = client.get(f"/api/v1/checks/{cid}").json()
     assert original["expectation"] == "PASS"
@@ -137,7 +137,7 @@ def test_the_api_exposes_which_other_tests_share_a_check(client):
 
 
 def test_a_refused_check_edit_through_a_test_persists_nothing(client):
-    tid = _test_id(client, SSO)
+    tid = _test_id(client, SQL)
     cid = _first_check_id(client, tid)
     before_check = client.get(f"/api/v1/checks/{cid}").json()
 
@@ -159,10 +159,10 @@ def test_a_refused_check_edit_through_a_test_persists_nothing(client):
 
 
 def test_a_check_edit_through_a_test_is_audited_as_a_test_update_pointer(client):
-    tid = _test_id(client, SSO)
+    tid = _test_id(client, SQL)
     cid = _first_check_id(client, tid)
     client.patch(f"/api/v1/tests/{tid}", json={
-        "check_edits": [{"check_id": cid, "display_name": "SSO enabled (edited)"}]}, params={"actor": "erin"})
+        "check_edits": [{"check_id": cid, "display_name": "SQL warehouse healthcheck (edited)"}]}, params={"actor": "erin"})
 
     updates = client.get("/api/v1/audit", params={"actor": "erin", "event_type": "test.update"}).json()
     assert len(updates) == 1

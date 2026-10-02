@@ -11,6 +11,9 @@ Check's ``params`` so the platform is fully exercisable without a workspace:
 * ``demo_outcome``  — ``"pass"`` (default) | ``"deny"`` (denied at AUTHORIZE,
   the counterfactual path) | ``"fail"`` (operation fails at OPERATE).
 * ``demo_evidence`` — dict merged into the OPERATE evidence (row_count, ...).
+
+Against a real workspace both are ignored: a check passes or fails only on what
+the workspace returned.
 """
 from __future__ import annotations
 
@@ -36,7 +39,9 @@ def _make_workspace_client(host: Optional[str], token: str):
     """Mint a ``WorkspaceClient`` bound to a per-target token (real mode only)."""
     from databricks.sdk import WorkspaceClient
 
-    return WorkspaceClient(host=host, token=token)
+    # Without auth_type the SDK may prefer ambient credentials (a CLI profile from
+    # DATABRICKS_CONFIG_PROFILE, the app's own client id/secret) over this token.
+    return WorkspaceClient(host=host, token=token, auth_type="pat")
 
 
 def _dictify(value):
@@ -52,6 +57,10 @@ def _response_evidence(response) -> dict:
     """Normalize an arbitrary SDK response into JSON-safe evidence."""
     if response is None:
         return {"response": None}
+    from app.script_runtime.sdk_catalog import _is_wait, to_jsonable
+
+    if _is_wait(response):
+        return {"response": to_jsonable(response)}
     if hasattr(response, "as_dict"):
         try:
             return {"response": response.as_dict()}
@@ -117,15 +126,19 @@ class _SpineMixin:
             raise HandlerError(f"Authentication failed: {exc}", failure_bucket="AUTHENTICATION_FAILURE")
 
     def stage_authorize(self, ctx: HandlerContext) -> StageResult:
-        # The identity is the primary blast-radius bound (ADR-0017): a call the
-        # identity isn't granted is denied here. In demo we simulate that denial
-        # for the counterfactual path.
+        # The identity is the primary blast-radius bound (ADR-0017). There is no
+        # dry-run permission check for an arbitrary call, so against a workspace
+        # a denial surfaces at OPERATE (bucket PERMISSION_DENIED); demo mode
+        # simulates it here for the counterfactual path.
+        if not ctx.demo_mode:
+            return StageResult("AUTHORIZE", StageStatus.SKIP,
+                               message="No up-front check: the workspace enforces permissions when the call runs.")
         if _demo_outcome(ctx) == "deny":
             raise HandlerError(
                 "Operation denied for the effective identity (fails closed).",
                 failure_bucket="PERMISSION_DENIED",
             )
-        return StageResult("AUTHORIZE", StageStatus.PASS, message="Identity is authorized for this operation.")
+        return StageResult("AUTHORIZE", StageStatus.PASS, message="Demo mode: identity authorized.")
 
     def stage_verify(self, ctx: HandlerContext) -> StageResult:
         return StageResult("VERIFY", StageStatus.PASS, message="Response verified.")
@@ -140,7 +153,7 @@ class DatabricksSdkHandler(_SpineMixin, Handler):
     def stage_operate(self, ctx: HandlerContext) -> StageResult:
         if ctx.demo_mode:
             outcome = _demo_outcome(ctx)
-            evidence = {"operation": ctx.operation.qualified, **dict(ctx.param("demo_evidence", {}))}
+            evidence = {"operation": ctx.operation.qualified, **dict(ctx.param("demo_evidence") or {})}
             if outcome == "fail":
                 raise HandlerError(
                     f"Operation '{ctx.operation.qualified}' failed.",
@@ -166,10 +179,15 @@ class DatabricksSdkHandler(_SpineMixin, Handler):
         call_params = {k: v for k, v in ctx.operation.params.items() if k not in _CONTROL_PARAM_KEYS}
         try:
             response = method(**call_params)
-        except (PermissionDenied, Unauthenticated) as exc:
+        except PermissionDenied as exc:
             raise HandlerError(
                 f"Operation '{ctx.operation.qualified}' denied for the effective identity: {exc}",
                 failure_bucket="PERMISSION_DENIED",
+            )
+        except Unauthenticated as exc:
+            raise HandlerError(
+                f"Operation '{ctx.operation.qualified}' could not authenticate: {exc}",
+                failure_bucket="AUTHENTICATION_FAILURE",
             )
         except DatabricksError as exc:
             raise HandlerError(f"Operation '{ctx.operation.qualified}' failed: {exc}", failure_bucket="OPERATION_FAILED")

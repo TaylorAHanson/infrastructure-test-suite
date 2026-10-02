@@ -9,7 +9,15 @@ import {
   useUpdateTarget,
   type CreateTargetBody,
 } from '../hooks/queries'
+import { errorMessage } from '../lib/api'
 import type { AssumableRole, SafetyClass, Target } from '../types'
+
+/** The register form collects scope + key separately so a scope-only value
+ *  (the common typo) never gets posted as the identity handle. */
+type TargetForm = Omit<CreateTargetBody, 'identity_handle'> & {
+  identity_scope: string
+  identity_key: string
+}
 
 // The Targets page on the rebuilt model (ADR-0003/0004/0018): a Target is a
 // workspace under test with an authoritative safety class, a per-target identity
@@ -74,12 +82,13 @@ function TagsCell({ target }: { target: Target }) {
   )
 }
 
-const EMPTY: CreateTargetBody = {
+const EMPTY: TargetForm = {
   name: '',
   workspace_name: '',
   host: '',
   safety_class: 'read-only',
-  identity_handle: '',
+  identity_scope: '',
+  identity_key: '',
   assumable_roles: [],
 }
 
@@ -89,7 +98,7 @@ export default function Targets() {
   const del = useDeleteTarget()
   const update = useUpdateTarget()
 
-  const [form, setForm] = useState<CreateTargetBody>(EMPTY)
+  const [form, setForm] = useState<TargetForm>(EMPTY)
   const [error, setError] = useState<string | null>(null)
   // The target whose safety-class downgrade is awaiting the friction ceremony.
   const [ceremony, setCeremony] = useState<{ target: Target; to: SafetyClass } | null>(null)
@@ -123,26 +132,33 @@ export default function Targets() {
     })
   }
 
-  function set<K extends keyof CreateTargetBody>(key: K, value: CreateTargetBody[K]) {
+  function set<K extends keyof TargetForm>(key: K, value: TargetForm[K]) {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
   async function submit() {
     setError(null)
     if (!form.name.trim()) return setError('Name is required.')
-    if (!form.identity_handle?.trim()) return setError('Identity handle (scope/key) is required.')
+    const scope = form.identity_scope.trim()
+    const key = form.identity_key.trim()
+    if (!scope || !key) {
+      return setError('Identity needs both a secret scope and a key (not the app or workspace name).')
+    }
+    if (scope.includes('/') || key.includes('/')) {
+      return setError('Scope and key must not contain slashes.')
+    }
     try {
       await create.mutateAsync({
         name: form.name.trim(),
         workspace_name: form.workspace_name?.trim() || null,
         host: form.host?.trim() || null,
         safety_class: form.safety_class,
-        identity_handle: form.identity_handle.trim(),
+        identity_handle: `${scope}/${key}`,
         assumable_roles: form.assumable_roles ?? [],
       })
       setForm(EMPTY)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to register target.')
+      setError(errorMessage(e) || 'Failed to register target.')
     }
   }
 
@@ -194,19 +210,16 @@ export default function Targets() {
                 </td>
                 <td className="td text-muted">{t.workspace_name ?? '-'}{t.host ? ` · ${t.host}` : ''}</td>
                 <td className="td">
-                  <div className="flex items-center gap-2">
-                    <ClassBadge value={t.safety_class} />
-                    <select
-                      className="input py-1 text-xs"
-                      value={t.safety_class}
-                      disabled={!t.enabled || update.isPending}
-                      onChange={(e) => changeClass(t, e.target.value as SafetyClass)}
-                    >
-                      {CLASSES.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <select
+                    className={`input py-1 text-xs font-medium ${CLASS_BADGE[t.safety_class]}`}
+                    value={t.safety_class}
+                    disabled={!t.enabled || update.isPending}
+                    onChange={(e) => changeClass(t, e.target.value as SafetyClass)}
+                  >
+                    {CLASSES.map((c) => (
+                      <option key={c} value={c} className="bg-ink text-white">{c}</option>
+                    ))}
+                  </select>
                 </td>
                 <td className="td font-mono text-xs text-muted">{t.identity_handle ?? '-'}</td>
                 <td className="td text-muted">
@@ -278,8 +291,8 @@ export default function Targets() {
 function AddTargetForm({
   form, set, submit, pending, error, setRoles,
 }: {
-  form: CreateTargetBody
-  set: <K extends keyof CreateTargetBody>(key: K, value: CreateTargetBody[K]) => void
+  form: TargetForm
+  set: <K extends keyof TargetForm>(key: K, value: TargetForm[K]) => void
   submit: () => void
   pending: boolean
   error: string | null
@@ -308,9 +321,17 @@ function AddTargetForm({
             {CLASSES.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
-        <Field label="Identity handle *" placeholder="secret-scope/key" mono
-               value={form.identity_handle ?? ''} onChange={(v) => set('identity_handle', v)} />
+        <Field label="Secret scope *" placeholder="e.g. validation-platform" mono
+               value={form.identity_scope} onChange={(v) => set('identity_scope', v)} />
+        <Field label="Secret key *" placeholder="e.g. sp-client-secret" mono
+               value={form.identity_key} onChange={(v) => set('identity_key', v)} />
       </div>
+      <p className="mt-2 text-xs text-muted">
+        Identity is a Databricks secret-scope pair, not the app or workspace name.
+        Put the SP client secret at <span className="font-mono text-white">scope/key</span>;
+        the platform reads the client id from the sibling secret named{' '}
+        <span className="font-mono text-white">{'<key>_client_id'}</span>.
+      </p>
 
       <div className="mt-3">
         <div className="mb-1 flex items-center gap-2">
@@ -405,7 +426,7 @@ function Field({
     <div className="flex flex-col gap-1">
       <label className="card-title">{label}</label>
       <input className={`input ${mono ? 'font-mono' : ''}`} placeholder={placeholder}
-             value={value} onChange={(e) => onChange(e.target.value)} />
+             autoComplete="off" value={value} onChange={(e) => onChange(e.target.value)} />
     </div>
   )
 }
