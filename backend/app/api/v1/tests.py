@@ -32,7 +32,7 @@ def create_script_test(payload: ScriptTestCreate, session: Session = Depends(get
     return pinned_versions.test_read(session, test)
 
 
-@router.delete("/{test_id}", status_code=204)
+@router.delete("/{test_id}", status_code=204, response_model=None)
 def delete_draft_test(test_id: str, session: Session = Depends(get_session),
                       actor: str = Depends(actor_handle())) -> None:
     """Delete a Draft Test. An Active Test has run history; disable it instead."""

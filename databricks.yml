@@ -170,6 +170,8 @@ sync:
     - .databricks/**
     - "**/.databricks/**"
     - .git/**
+    # Agent settings and worktrees (full checkouts of other branches)
+    - .claude/**
     # Frontend deps + build output (Databricks reinstalls/rebuilds these)
     - node_modules/**
     - "**/node_modules/**"

@@ -95,7 +95,7 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
     return out
 
 
-@router.delete("/{suite_id}", status_code=204)
+@router.delete("/{suite_id}", status_code=204, response_model=None)
 def delete_suite(suite_id: str, session: Session = Depends(get_session),
                  actor: str = Depends(actor_handle())) -> None:
     """Delete a Suite (its Tests and their history are untouched)."""
