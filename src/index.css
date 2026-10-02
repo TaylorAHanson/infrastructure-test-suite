@@ -66,6 +66,9 @@ body {
   .card-title {
     @apply text-xs font-semibold uppercase tracking-wide text-muted;
   }
+  .row-label {
+    @apply w-24 shrink-0 self-end py-2 text-sm font-semibold text-white;
+  }
   .stat {
     @apply text-2xl font-semibold text-white;
   }
@@ -92,5 +95,73 @@ body {
   }
   .nav-link-active {
     @apply bg-ink-soft text-white;
+  }
+
+  /* Rendered guide markdown (src/guide/Markdown.tsx). */
+  .guide-prose {
+    @apply text-sm leading-relaxed text-gray-200;
+  }
+  .guide-prose h1 {
+    @apply mb-4 text-2xl font-semibold text-white;
+  }
+  .guide-prose h2 {
+    @apply mb-3 mt-10 border-t border-edge pt-6 text-lg font-semibold text-white;
+  }
+  .guide-prose h3 {
+    @apply mb-2 mt-6 text-base font-semibold text-white;
+  }
+  .guide-prose h4 {
+    @apply mb-2 mt-4 text-sm font-semibold text-white;
+  }
+  .guide-prose p,
+  .guide-prose ul,
+  .guide-prose ol,
+  .guide-prose pre,
+  .guide-prose blockquote {
+    @apply my-3;
+  }
+  .guide-prose ul {
+    @apply list-disc pl-5;
+  }
+  .guide-prose ol {
+    @apply list-decimal pl-5;
+  }
+  .guide-prose li {
+    @apply my-1;
+  }
+  .guide-prose li > ul,
+  .guide-prose li > ol {
+    @apply my-1;
+  }
+  .guide-prose a {
+    @apply text-accent hover:underline;
+  }
+  .guide-prose strong {
+    @apply font-semibold text-white;
+  }
+  .guide-prose :not(pre) > code {
+    @apply rounded bg-ink-soft px-1 py-0.5 font-mono text-[0.85em] text-info;
+  }
+  .guide-prose pre {
+    @apply overflow-x-auto rounded-lg border border-edge bg-ink p-3 font-mono text-xs leading-relaxed text-gray-200;
+  }
+  .guide-prose blockquote {
+    @apply border-l-2 border-edge pl-4 text-muted;
+  }
+  .guide-prose table {
+    @apply my-4 w-full border-collapse text-left text-[13px];
+  }
+  .guide-prose th {
+    @apply border-b border-edge px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted;
+  }
+  .guide-prose td {
+    @apply border-b border-edge/60 px-3 py-2 align-top;
+  }
+  .guide-prose hr {
+    @apply my-8 border-edge;
+  }
+  .guide-prose > :first-child > :first-child,
+  .guide-prose h2:first-child {
+    @apply mt-0;
   }
 }

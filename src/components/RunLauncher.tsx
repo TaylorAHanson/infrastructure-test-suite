@@ -18,7 +18,7 @@ import type { Target } from '../types'
 // the override to the same `POST /runs` submission as an ordinary run.
 const CONFIRM_PHRASE = 'i understand'
 
-export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void }) {
+export function RunLauncher({ label, onLaunched }: { label?: string; onLaunched?: (id: string) => void }) {
   const navigate = useNavigate()
   const { data: suites } = useSuites()
   const { data: targets } = useTargets()
@@ -81,6 +81,7 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
 
   return (
     <div className="card flex flex-wrap items-end gap-3">
+      {label && <span className="row-label">{label}</span>}
       <div className="flex flex-col gap-1">
         <label className="card-title">Suite (blank = all Active Tests)</label>
         <select className="input" value={suiteId} onChange={(e) => setSuiteId(e.target.value)}>

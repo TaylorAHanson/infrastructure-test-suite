@@ -6,9 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:all": "./dev.sh",
-    "build": "tsc --noEmit && vite build && vitepress build docs",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
+    "build": "tsc --noEmit && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -30,7 +28,9 @@
     "lucide-react": "^0.408.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.25.1"
+    "react-markdown": "^9.1.0",
+    "react-router-dom": "^6.25.1",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
@@ -41,7 +41,6 @@
     "postcss": "^8.4.40",
     "tailwindcss": "^3.4.7",
     "typescript": "^5.5.4",
-    "vite": "^5.3.5",
-    "vitepress": "^1.6.4"
+    "vite": "^5.3.5"
   }
 }

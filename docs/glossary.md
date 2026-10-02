@@ -1,8 +1,4 @@
----
-title: Glossary
-outline: false
----
+# Glossary
 
-<!-- The glossary is CONTEXT.md at the repo root, included verbatim so there is
-     exactly one source of truth for the platform's vocabulary. Edit it there. -->
-<!--@include: ../CONTEXT.md-->
+The platform's vocabulary lives in [CONTEXT.md](../CONTEXT.md) at the repo root,
+so there is exactly one source of truth. The app's Guide renders it as this page.

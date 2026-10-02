@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
 import { Badge } from '../components/Badge'
 import { PageHeader } from '../components/PageHeader'
@@ -26,6 +26,16 @@ function targetsLabel(ids: string[]): string {
 export default function Runs() {
   const { data: runs, isLoading } = useRuns()
   const [filters, setFilters] = useState<Filters>({})
+  const navigate = useNavigate()
+
+  // Clicks on the inner link, or that end a text selection, are left alone so
+  // the link's own cmd/middle-click behavior and copy-by-drag keep working.
+  const openRun = (id: string) => (e: React.MouseEvent<HTMLTableRowElement>) => {
+    if ((e.target as HTMLElement).closest('a')) return
+    if (window.getSelection()?.toString()) return
+    if (e.metaKey || e.ctrlKey) window.open(`/runs/${id}`, '_blank')
+    else navigate(`/runs/${id}`)
+  }
 
   const set = (key: keyof Filters) => (e: React.ChangeEvent<HTMLSelectElement | HTMLInputElement>) =>
     setFilters((f) => ({ ...f, [key]: e.target.value || undefined }))
@@ -46,10 +56,11 @@ export default function Runs() {
       <PageHeader title="Runs" subtitle="Every run submitted through the shared Run API (CI, GUI, nightly)" />
 
       <div className="mb-4">
-        <RunLauncher />
+        <RunLauncher label="Manual Run" />
       </div>
 
       <div className="card mb-4 flex flex-wrap items-end gap-3">
+        <span className="row-label">Filter by</span>
         <Filter label="Phase">
           <select className="input" onChange={set('phase')}>
             {PHASES.map((s) => <option key={s} value={s}>{s || 'Any'}</option>)}
@@ -88,7 +99,11 @@ export default function Runs() {
             {rows.map((r) => {
               const phase = phaseOf(r.status)
               return (
-                <tr key={r.id} className="border-b border-edge/50 hover:bg-ink-soft">
+                <tr
+                  key={r.id}
+                  className="cursor-pointer border-b border-edge/50 hover:bg-ink-soft"
+                  onClick={openRun(r.id)}
+                >
                   <td className="td">
                     <Link to={`/runs/${r.id}`} className="font-mono text-xs text-accent hover:underline">
                       {r.id}

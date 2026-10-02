@@ -35,6 +35,7 @@ const NAV: NavItem[] = [
   { to: '/runs', label: 'Runs', icon: ListChecks },
   { to: '/tests', label: 'Tests', icon: FlaskConical },
   { to: '/audit', label: 'Audit Log', icon: ClipboardList },
+  { to: '/guide', label: 'Guide', icon: BookOpen },
 ]
 
 // Configuration the day-to-day flow rarely needs, tucked into one collapsible
@@ -122,19 +123,6 @@ export default function Layout() {
             ))}
 
             <div className="mt-auto border-t border-edge pt-3">
-              {/* The operator guide is a separate static site served at /guide/ (not
-                  a client route), so it's a plain link. It opens in a new tab so an
-                  in-progress Assistant conversation or run isn't lost. */}
-              <a
-                href="/guide/"
-                target="_blank"
-                rel="noopener"
-                title={navCollapsed ? 'Docs' : 'Opens in a new tab'}
-                className={`nav-link mb-1 ${navCollapsed ? 'justify-center' : ''}`}
-              >
-                <BookOpen size="16" />
-                {!navCollapsed && 'Docs'}
-              </a>
               <button
                 type="button"
                 onClick={() => setSettingsOpen((o) => !o)}

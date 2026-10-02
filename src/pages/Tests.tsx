@@ -332,15 +332,13 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
         <div className="mb-2 flex items-center gap-2">
           <span className="card-title">Checks ({members.length})</span>
           <span className="text-[11px] text-muted">click a check for its full definition</span>
-          <a
+          <Link
             className="ml-auto text-xs text-muted hover:text-white"
-            href={GUIDE_WRITING_TESTS}
-            target="_blank"
-            rel="noopener"
-            title="How test scripts work (opens the guide in a new tab)"
+            to={GUIDE_WRITING_TESTS}
+            title="How test scripts work"
           >
             <CircleHelp size="12" className="mr-1 inline" /> Help
-          </a>
+          </Link>
           <button className="text-xs text-accent hover:underline" onClick={() => setShowScript((v) => !v)}>
             <FileCode size="12" className="mr-1 inline" /> {showScript ? 'Hide script' : 'View script'}
           </button>
