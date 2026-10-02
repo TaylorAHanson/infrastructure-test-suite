@@ -1,12 +1,12 @@
 """The open-SDK operation model + the R3-never blocklist (ADR-0017).
 
-A Check expresses its operation as an **arbitrary Databricks SDK/API call**,
-*not* a curated per-operation manifest entry. The ground truth for what may be
-expressed is therefore "the SDK/OpenAPI surface **minus the blocklist**" — the
-blocklist is a denylist of the catastrophic, and it is the global **R3-never
-floor** enforced regardless of identity or target.
+A Test script may make **any Databricks SDK/API call**, *not* only the calls
+of a curated manifest. The ground truth for what it may call is therefore "the
+SDK/OpenAPI surface **minus the blocklist**" — the blocklist is a denylist of
+the catastrophic, and it is the global **R3-never floor** enforced regardless
+of identity or target.
 
-An :class:`Operation` is a small normalized descriptor of that call:
+An :class:`Operation` is a small normalized descriptor of one call:
 
     {"service": "clusters", "method": "delete", "verb": "DELETE", "params": {...}}
 
@@ -80,7 +80,8 @@ class BlocklistRule:
 
     id: str
     reason: str
-    #: Match when the operation's ``service`` contains any of these (empty = any).
+    #: Match when the operation's ``service`` is one of these (empty = any). A raw
+    #: REST path matches when any of its ``/`` segments is one of these.
     services: tuple[str, ...] = ()
     #: Match when the operation's ``method`` contains any of these substrings.
     method_contains: tuple[str, ...] = ()
@@ -91,24 +92,38 @@ class BlocklistRule:
 # the blocklist only has to catch the truly unrecoverable.
 BLOCKLIST: list[BlocklistRule] = [
     BlocklistRule("delete-workspace", "Deleting a workspace is catastrophic and irreversible.",
-                  services=("workspaces", "workspace"), method_contains=("delete", "destroy")),
+                  services=("workspaces",), method_contains=("delete", "destroy")),
     BlocklistRule("delete-account", "Account-level deletion is catastrophic.",
-                  services=("account",), method_contains=("delete", "destroy")),
+                  services=("account", "accounts"), method_contains=("delete", "destroy")),
     BlocklistRule("delete-metastore", "Deleting a Unity Catalog metastore destroys all governed data.",
                   services=("metastores", "metastore"), method_contains=("delete",)),
     BlocklistRule("force-delete-catalog", "Force-deleting a catalog cascades to every schema and table.",
                   services=("catalogs", "catalog"), method_contains=("delete",)),
     BlocklistRule("delete-storage-credential", "Removing a storage credential can orphan all governed storage.",
                   services=("storage_credentials", "storage_credential"), method_contains=("delete",)),
+    BlocklistRule("sql-drop-catalog", "DROP CATALOG / SCHEMA / DATABASE cascades to every table inside it.",
+                  services=("statement_execution",), method_contains=("drop_catalog",)),
+    BlocklistRule("dynamic-sql", "EXECUTE IMMEDIATE builds SQL the gate can't read, so it never runs. "
+                  "Build the statement in Python instead; the gate classifies the final text.",
+                  services=("statement_execution",), method_contains=("execute_immediate",)),
+    BlocklistRule("read-secret-value", "Reading a secret's value would copy a credential into run evidence. "
+                  "Test who can read it with w.secrets.get_acl or list_acls instead.",
+                  services=("secrets",), method_contains=("get_secret",)),
     BlocklistRule("purge", "Bulk purge operations are unrecoverable.",
                   method_contains=("purge", "wipe")),
 ]
 
 
+def _service_names(service: str) -> set[str]:
+    """``catalogs`` → {"catalogs"}; ``/api/2.1/unity_catalog/catalogs/main`` → its segments."""
+    service = service.lower()
+    return {s for s in service.split("/") if s} if "/" in service else {service}
+
+
 def _rule_matches(rule: BlocklistRule, op: Operation) -> bool:
-    service = op.service.lower()
+    names = _service_names(op.service)
     method = op.method.lower()
-    if rule.services and not any(s in service for s in rule.services):
+    if rule.services and not names.intersection(rule.services):
         return False
     if rule.method_contains and not any(m in method for m in rule.method_contains):
         return False

@@ -16,7 +16,7 @@ there. Two kinds of module are collected:
   file (this one included) needs an edit.
 
 The one-module-per-slice convention (#108, ADR-0022) is enforced here, not
-just documented: a Check/Test key contributed by two different modules
+just documented: a Test key contributed by two different modules
 raises :class:`SeedKeyCollision` rather than silently clobbering — the merge
 ``seed_all()`` performs (dict keyed by these same strings) would otherwise
 let the second module's row overwrite the first with no error at all.
@@ -36,7 +36,7 @@ from app.services.seed.contribution import Contribution
 
 
 class SeedKeyCollision(ValueError):
-    """Two domain modules contributed the same Check/Test key (#108, ADR-0022)."""
+    """Two domain modules contributed the same Test key (#108, ADR-0022)."""
 
 
 def domain_shape_leaked(module) -> bool:
@@ -69,26 +69,22 @@ def discover_contributions() -> list[Contribution]:
 
     Discovery order is alphabetical by module name — deterministic, but not
     load-bearing: declarative contributions are merged before any
-    cross-module reference (a Test's members, a Suite's test_keys, a
-    counterfactual's counterpart) is resolved, so it doesn't matter which
-    domain lands first. Composed contributions are appended after every
-    declarative one is collected, so a composer sees the complete set.
+    cross-module reference (a Suite's test_keys) is resolved, so it doesn't
+    matter which domain lands first. Composed contributions are appended after
+    every declarative one is collected, so a composer sees the complete set.
 
     Raises :class:`SeedKeyCollision` if two modules (declarative or composed)
-    mint the same Check or Test key — see the module docstring.
+    mint the same Test key — see the module docstring.
     """
     from app.services.seed import domains
 
     contributions: list[Contribution] = []
     composers: list[tuple[str, Callable[[list[Contribution]], Contribution]]] = []
-    check_owners: dict[str, str] = {}
     test_owners: dict[str, str] = {}
     for module_info in sorted(pkgutil.iter_modules(domains.__path__), key=lambda m: m.name):
         module = importlib.import_module(f"{domains.__name__}.{module_info.name}")
         contribution = getattr(module, "CONTRIBUTION", None)
         if isinstance(contribution, Contribution):
-            _claim((key for key, _ in contribution.check_specs), check_owners,
-                   module_info.name, "Check")
             _claim(contribution.tests.keys(), test_owners, module_info.name, "Test")
             contributions.append(contribution)
         composer = getattr(module, "compose_contribution", None)
@@ -96,7 +92,6 @@ def discover_contributions() -> list[Contribution]:
             composers.append((module_info.name, composer))
     for module_name, composer in composers:
         composed = composer(contributions)
-        _claim((key for key, _ in composed.check_specs), check_owners, module_name, "Check")
         _claim(composed.tests.keys(), test_owners, module_name, "Test")
         contributions.append(composed)
     return contributions

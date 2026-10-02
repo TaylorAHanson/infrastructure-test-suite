@@ -8,7 +8,8 @@
 // troubleshooting/RCA help rides on the app-wide Assistant shelf (ADR-0012),
 // which this page grounds by declaring the open finding as its page context.
 import { useState } from 'react'
-import { AlertTriangle, ChevronRight, GitBranch, Moon, Rocket } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { AlertTriangle, ChevronRight, GitBranch, Moon, Pencil, Rocket } from 'lucide-react'
 
 import { PageHeader } from '../components/PageHeader'
 import { useFindings } from '../hooks/queries'
@@ -102,6 +103,51 @@ function ProvenanceThreadView({ thread }: { thread?: ProvenanceThread | null }) 
   )
 }
 
+const LINK = 'text-gray-100 underline decoration-edge underline-offset-2 hover:text-accent hover:decoration-accent'
+
+/** Plain-English names for the canonical stage spine. */
+const STAGE_TEXT: Record<string, string> = {
+  RESOLVE: 'finding the workspace',
+  CONNECT: 'connecting to the workspace',
+  TLS: 'setting up a secure connection',
+  AUTHENTICATE: 'signing in',
+  AUTHORIZE: 'checking permissions',
+  OPERATE: 'running the operation',
+  VERIFY: 'checking the result against the assertion',
+}
+
+function failureSummary(f: Finding): string {
+  const what = f.failure_label ?? (f.verdict === 'BLOCKED_BY_SAFETY' ? 'Blocked by the safety gate' : 'Failed')
+  const stage = f.failure_stage ? STAGE_TEXT[f.failure_stage] : undefined
+  return stage ? `${what}, while ${stage}` : what
+}
+
+function impactText(f: Finding): string {
+  return f.gating ? 'Blocking: a failure here fails the run' : 'Advisory: reported here but never fails a run'
+}
+
+function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <>
+      <dt className="text-muted">{label}</dt>
+      <dd className="text-gray-200">{children}</dd>
+    </>
+  )
+}
+
+function LinkList({ children }: { children: React.ReactNode[] }) {
+  return (
+    <span className="flex flex-wrap gap-x-1">
+      {children.map((c, i) => (
+        <span key={i}>
+          {c}
+          {i < children.length - 1 && <span className="text-muted">,</span>}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 /** One finding — a collapsed fold. Nothing auto-expands; opening it declares the
  *  finding as page context so the Assistant shelf can suggest a cause. */
 function FindingFold({ f, onOpen }: { f: Finding; onOpen: (f: Finding | null) => void }) {
@@ -116,29 +162,59 @@ function FindingFold({ f, onOpen }: { f: Finding; onOpen: (f: Finding | null) =>
         {f.workspace_name && (
           <span className="truncate font-mono text-xs text-muted">{f.workspace_name}</span>
         )}
+        {!!f.suites?.length && (
+          <span className="truncate text-xs text-muted">{f.suites.map((s) => s.name).join(' · ')}</span>
+        )}
         {f.flaky && <span className="badge bg-flaky/15 text-flaky">flaky · advisory</span>}
         <span className="ml-auto whitespace-nowrap text-xs text-muted">{sinceLabel(f)}</span>
         <ChevronRight size={16} className="shrink-0 text-muted transition group-open:rotate-90" />
       </summary>
-      <div className="flex flex-col gap-3 border-t border-edge/60 bg-ink/40 px-4 py-3 pl-9">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-          <span className="badge bg-fail/15 font-mono text-fail">{f.bucket_at_stage ?? f.verdict}</span>
-          <span>
-            check <span className="font-mono text-gray-200">{f.check_id}</span>
-          </span>
-          <span className={`badge ${f.gating ? 'bg-pass/15 text-pass' : 'bg-warn/15 text-warn'}`}>
-            {f.gating ? 'gating' : 'advisory'}
-          </span>
-          <span className="font-mono">{f.evaluator}</span>
-        </div>
+      <div className="flex flex-col gap-4 border-t border-edge/60 bg-ink/40 px-4 py-4 pl-9">
+        <p className="text-sm text-gray-100">{f.message || failureSummary(f)}</p>
         <ProvenanceThreadView thread={f.provenance} />
-        {f.message && <div className="text-xs text-muted">{f.message}</div>}
         {f.flaky && (
           <div className="flex items-center gap-2 text-xs text-flaky">
             <AlertTriangle size={13} className="shrink-0" />
-            Recent deterministic verdicts alternate — advisory only, never gates the pipeline (ADR-0008).
+            This check keeps flipping between passing and failing, so treat it as a hint, not a regression.
           </div>
         )}
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1.5 text-xs">
+          <DetailRow label="What went wrong">{failureSummary(f)}</DetailRow>
+          <DetailRow label="Effect on runs">{impactText(f)}</DetailRow>
+          {!!f.tests?.length && (
+            <DetailRow label={f.tests.length > 1 ? 'Tests' : 'Test'}>
+              <LinkList>
+                {f.tests.map((t) => (
+                  <Link key={t.id} to={`/tests/${t.id}/edit`} className={LINK} title="Open in the test editor">
+                    {t.name}
+                    <Pencil size={11} className="ml-1 inline align-[-1px] text-muted" />
+                  </Link>
+                ))}
+              </LinkList>
+            </DetailRow>
+          )}
+          {!!f.suites?.length && (
+            <DetailRow label={f.suites.length > 1 ? 'Suites' : 'Suite'}>
+              <LinkList>
+                {f.suites.map((s) => (
+                  <Link key={s.id} to={`/tests?suite=${encodeURIComponent(s.id)}`} className={LINK}>
+                    {s.name}
+                  </Link>
+                ))}
+              </LinkList>
+            </DetailRow>
+          )}
+          {f.request_id && (
+            <DetailRow label="Latest run">
+              <Link to={`/runs/${f.request_id}`} className={LINK}>
+                Open run details
+              </Link>
+            </DetailRow>
+          )}
+          <DetailRow label="Check ID">
+            <span className="font-mono text-muted">{f.check_id}</span>
+          </DetailRow>
+        </dl>
       </div>
     </details>
   )

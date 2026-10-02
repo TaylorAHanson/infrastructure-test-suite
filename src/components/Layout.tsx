@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   Bell,
+  BookOpen,
   CalendarClock,
   ChevronRight,
   ClipboardList,
@@ -13,6 +14,7 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
+  Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -34,6 +36,7 @@ const NAV: NavItem[] = [
   { to: '/runs', label: 'Runs', icon: ListChecks },
   { to: '/tests', label: 'Tests', icon: FlaskConical },
   { to: '/audit', label: 'Audit Log', icon: ClipboardList },
+  { to: '/guide', label: 'Guide', icon: BookOpen },
 ]
 
 // Configuration the day-to-day flow rarely needs, tucked into one collapsible
@@ -43,6 +46,7 @@ const SETTINGS_NAV: NavItem[] = [
   { to: '/settings/targets', label: 'Targets', icon: Database },
   { to: '/settings/schedules', label: 'Schedules', icon: CalendarClock },
   { to: '/settings/notifications', label: 'Notifications', icon: Bell },
+  { to: '/settings/assistant', label: 'Assistant', icon: Sparkles },
   { to: '/settings/release-notes', label: 'Release notes', icon: ScrollText },
 ]
 
@@ -62,12 +66,14 @@ function NavItemLink({ item, rail }: { item: NavItem; rail: boolean }) {
 }
 
 export default function Layout() {
-  const { data: admin } = useAdminSettings()
+  const { data: admin, isError: adminFailed } = useAdminSettings()
   const { data: branding } = useBranding()
   // Instant-apply: title, favicon, and theme follow the branding record + poll.
   useApplyBranding(branding)
   const flags = (admin?.feature_flags ?? {}) as Record<string, boolean>
-  const demo = flags.demo_mode
+  const pending = adminFailed ? 'unknown' : '…'
+  const environment = admin ? String(admin.environment ?? 'unknown') : pending
+  const demo = admin ? !!flags.demo_mode : null
   const appName = branding?.app_name ?? 'Validation Platform'
   const footer = branding?.footer_text
 
@@ -76,9 +82,12 @@ export default function Layout() {
   // it, so the sidebar auto-collapses to an icon rail — derived, never toggled.
   const [shelfOpen, setShelfOpen] = useState(false)
   const { width, collapsed, startResize } = useShelfWidth()
-  const navCollapsed = shelfOpen && collapsed
+  const { pathname } = useLocation()
+  // The test editor brings its own assistant and wants the whole width.
+  const inEditor = /^\/tests\/(new|[^/]+\/edit)\/?$/.test(pathname)
+  const navCollapsed = inEditor || (shelfOpen && collapsed)
 
-  const inSettings = useLocation().pathname.startsWith('/settings')
+  const inSettings = pathname.startsWith('/settings')
   const [settingsOpen, setSettingsOpen] = useState(inSettings)
   useEffect(() => {
     if (inSettings) setSettingsOpen(true)
@@ -148,30 +157,40 @@ export default function Layout() {
             <div className="mt-4 rounded-lg border border-edge bg-panel p-3 text-[11px] text-muted">
               <div className="flex items-center justify-between">
                 <span>Environment</span>
-                <span className="text-white">{(admin?.environment as string) ?? '...'}</span>
+                <span className="text-white">{environment}</span>
               </div>
               <div className="mt-1 flex items-center justify-between">
                 <span>Mode</span>
-                <span className={demo ? 'text-warn' : 'text-pass'}>{demo ? 'Demo / mock' : 'Live'}</span>
+                <span className={demo === null ? 'text-muted' : demo ? 'text-warn' : 'text-pass'}>
+                  {demo === null ? pending : demo ? 'Demo / mock' : 'Live'}
+                </span>
               </div>
               {footer && <div className="mt-2 border-t border-edge pt-2 text-muted">{footer}</div>}
             </div>
           )}
         </aside>
-        <main className="min-w-0 flex-1 overflow-auto">
-          <div className="mx-auto max-w-[1400px] p-6">
+        {inEditor ? (
+          <main className="min-w-0 flex-1 overflow-hidden p-4">
             <Outlet />
-          </div>
-        </main>
+          </main>
+        ) : (
+          <main className="min-w-0 flex-1 overflow-auto">
+            <div className="mx-auto max-w-[1400px] p-6">
+              <Outlet />
+            </div>
+          </main>
+        )}
         {/* The one app-wide Assistant, reachable from every page (ADR-0012),
             sharing space with <main> as a resizable push-pane (#58). */}
-        <AssistantShelf
-          open={shelfOpen}
-          onOpen={() => setShelfOpen(true)}
-          onClose={() => setShelfOpen(false)}
-          width={width}
-          onResizeStart={startResize}
-        />
+        {!inEditor && (
+          <AssistantShelf
+            open={shelfOpen}
+            onOpen={() => setShelfOpen(true)}
+            onClose={() => setShelfOpen(false)}
+            width={width}
+            onResizeStart={startResize}
+          />
+        )}
       </div>
     </AssistantProvider>
   )

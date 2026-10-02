@@ -140,8 +140,10 @@ resources:
 # Sync: ship the frontend SOURCE + backend + job code. The Databricks Apps Node
 # buildpack detects package.json and runs `npm install && npm run build` at
 # deploy time; Vite (vite.config.ts build.outDir) emits to backend/static, which
-# the FastAPI `command` then serves. We never build the client locally. The
-# lockfile is intentionally NOT shipped (see exclude note below).
+# the FastAPI `command` then serves. The Guide tab bundles docs/*.md and
+# CONTEXT.md into that build, so they ship too.
+# We never build the client locally. The lockfile is intentionally NOT shipped
+# (see exclude note below).
 #
 # `include` force-syncs the frontend config files that are otherwise gitignored.
 # We only exclude heavy / generated dirs - critically the local `.databricks`
@@ -179,9 +181,12 @@ sync:
     # against the proxy and crash ("Exit handler never called"). Omitting it lets
     # Databricks run plain `npm install` against the default public registry.
     - package-lock.json
-    # Repo docs / infra / tests not needed in the running app
+    # Infra / tests / agent-facing docs not needed in the running app (the
+    # rest of docs/ is the Guide's source - see the sync note above)
     - tests/**
-    - docs/**
+    - docs/agents/**
+    - docs/prototypes/**
+    - docs/research/**
     - infra/**
     - shared/**
     # Python + env cruft
@@ -212,7 +217,7 @@ variables:
       warehouse: "Serverless Starter Warehouse"
   model_serving_endpoint:
     description: "Model Serving endpoint for serving probes"
-    default: "databricks-claude-sonnet-4-6"
+    default: "databricks-claude-sonnet-5"
   seed_on_startup:
     description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets stay off."
     default: "true"

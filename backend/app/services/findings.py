@@ -36,15 +36,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.core.config import get_settings
 from app.core.enums import RunStatus, RequestSource, TERMINAL_STATUSES
 from app.core.ids import utcnow
-from app.core.taxonomy import bucket_at_stage
-from app.models import Check, CheckRun
+from app.core.taxonomy import bucket_at_stage, get_bucket
+from app.models import Check, CheckRun, Suite, SuiteMember, Test, TestCheck
 from app.services import flaky as flaky_service
-from app.services.assistant_tools import commit_provenance_thread
+from app.services.assistant_tools import commit_provenance_thread, commit_provenance_threads
 from app.services.rca import LANE_OVERNIGHT, LANE_RECENT
 
 #: A failing current state that a triager should act on. The other terminal
@@ -65,22 +66,56 @@ def _recent_window_hours() -> int:
     return getattr(get_settings(), "FINDINGS_RECENT_WINDOW_HOURS", 24)
 
 
-def _latest_terminal_per_series(session: Session) -> list[CheckRun]:
+#: The CheckRun columns a series head is classified and rendered from — never the
+#: evidence blob, which the feed doesn't return.
+_HEAD_COLUMNS = (
+    CheckRun.run_id, CheckRun.check_id, CheckRun.target_id, CheckRun.test_id,
+    CheckRun.request_id, CheckRun.workspace_name, CheckRun.verdict,
+    CheckRun.failure_bucket, CheckRun.failure_stage, CheckRun.gating,
+    CheckRun.evaluator, CheckRun.request_source, CheckRun.git_sha,
+    CheckRun.message, CheckRun.finished_at, CheckRun.created_at,
+)
+
+
+def _latest_terminal_per_series(session: Session) -> list:
     """The newest terminal CheckRun for each ``(target_id, check_id)`` series.
 
     A series' *current* state is its most recent terminal run; in-flight runs
     (PENDING/QUEUED/RUNNING) don't change what a triager currently faces, so they
-    are ignored. Newest-first order lets the first row per key win.
+    are ignored. Rows carry :data:`_HEAD_COLUMNS` as attributes.
     """
-    rows = session.exec(
-        select(CheckRun)
-        .where(CheckRun.verdict.in_(list(TERMINAL_STATUSES)))  # type: ignore[attr-defined]
-        .order_by(CheckRun.created_at.desc())  # type: ignore[union-attr]
-    ).all()
-    latest: dict[tuple[Optional[str], str], CheckRun] = {}
-    for run in rows:
-        latest.setdefault((run.target_id, run.check_id), run)
-    return list(latest.values())
+    newest_first = func.row_number().over(
+        partition_by=(CheckRun.target_id, CheckRun.check_id),
+        order_by=(CheckRun.created_at.desc(), CheckRun.run_id.desc()),  # type: ignore[union-attr]
+    ).label("series_rank")
+    ranked = (
+        select(*_HEAD_COLUMNS, newest_first)
+        .where(CheckRun.verdict.in_(sorted(TERMINAL_STATUSES)))  # type: ignore[attr-defined]
+        .subquery()
+    )
+    return list(session.exec(
+        select(*(ranked.c[c.key] for c in _HEAD_COLUMNS)).where(ranked.c.series_rank == 1)
+    ).all())
+
+
+def _spines(session: Session, runs: list) -> tuple[dict, dict]:
+    """Provenance threads + flaky flags for the given series heads, batched.
+
+    A target-less series reads "any target" in the single-series tools, so it
+    keeps that path; every targeted series is answered in a fixed number of
+    statements regardless of how many findings or how much history there is.
+    """
+    targeted = [(r.target_id, r.check_id) for r in runs if r.target_id]
+    provenance = commit_provenance_threads(session, targeted)
+    flaky = flaky_service.flaky_flags(session, targeted)
+    for r in runs:
+        if not r.target_id:
+            key = (r.target_id, r.check_id)
+            provenance[key] = commit_provenance_thread(session, check_id=r.check_id,
+                                                       target_id=r.target_id)
+            flaky[key] = flaky_service.is_flaky(session, check_id=r.check_id,
+                                                target_id=r.target_id)
+    return provenance, flaky
 
 
 def classify_lane(run: CheckRun, *, now: datetime, window: timedelta) -> str:
@@ -101,7 +136,58 @@ def classify_lane(run: CheckRun, *, now: datetime, window: timedelta) -> str:
     return LANE_RECENT if deploy_attributed else LANE_OVERNIGHT
 
 
-def _finding(session: Session, run: CheckRun, check_name: str, lane: str) -> dict:
+def _catalog_index(session: Session) -> dict:
+    """Tests/Suites keyed for finding placement — one pass, then O(1) lookups.
+
+    A finding is a Check result; the triager needs the Test it belongs to (to
+    edit) and the Suites that contain that Test (Suites have no page of their
+    own — they are a filter on Tests). When a Check is shared, the CheckRun's
+    ``test_id`` wins; otherwise every Test that lists the Check.
+    """
+    tests = {t.id: t for t in session.exec(select(Test)).all()}
+    suites = {s.id: s for s in session.exec(select(Suite)).all()}
+    check_to_tests: dict[str, list[str]] = {}
+    for tc in session.exec(select(TestCheck)).all():
+        check_to_tests.setdefault(tc.check_id, []).append(tc.test_id)
+    test_to_suites: dict[str, list[str]] = {}
+    for m in session.exec(select(SuiteMember)).all():
+        test_to_suites.setdefault(m.test_id, []).append(m.suite_id)
+    return {
+        "tests": tests,
+        "suites": suites,
+        "check_to_tests": check_to_tests,
+        "test_to_suites": test_to_suites,
+    }
+
+
+def _placement(run: CheckRun, catalog: dict) -> dict:
+    tests: dict = catalog["tests"]
+    if run.test_id and run.test_id in tests:
+        members = [tests[run.test_id]]
+    else:
+        members = [tests[tid] for tid in catalog["check_to_tests"].get(run.check_id, [])
+                   if tid in tests]
+    suite_ids: list[str] = []
+    seen: set[str] = set()
+    for t in members:
+        for sid in catalog["test_to_suites"].get(t.id, []):
+            if sid not in seen and sid in catalog["suites"]:
+                seen.add(sid)
+                suite_ids.append(sid)
+    return {
+        "tests": [{"id": t.id, "name": t.name} for t in members],
+        "suites": [{"id": sid, "name": catalog["suites"][sid].name} for sid in suite_ids],
+        "request_id": run.request_id,
+    }
+
+
+def _failure_label(bucket_id: Optional[str]) -> Optional[str]:
+    bucket = get_bucket(bucket_id or "")
+    return bucket.label if bucket else None
+
+
+def _finding(run: CheckRun, check_name: str, lane: str, catalog: dict,
+             provenance: dict, flaky: bool) -> dict:
     """Render one finding — the current failing state of a series.
 
     Each finding carries its **troubleshooting spine**: the commit-provenance
@@ -110,10 +196,6 @@ def _finding(session: Session, run: CheckRun, check_name: str, lane: str) -> dic
     changes it — an alternating check is signal, never a hard/gating regression
     (ADR-0008).
     """
-    provenance = commit_provenance_thread(
-        session, check_id=run.check_id, target_id=run.target_id)
-    flaky = flaky_service.is_flaky(
-        session, check_id=run.check_id, target_id=run.target_id)
     return {
         "check_id": run.check_id,
         "check_name": check_name,
@@ -125,8 +207,9 @@ def _finding(session: Session, run: CheckRun, check_name: str, lane: str) -> dic
         "failure_stage": run.failure_stage,
         # Every finding states its failure as `bucket @ stage` (ADR-0001).
         "bucket_at_stage": bucket_at_stage(run.failure_bucket, run.failure_stage),
+        "failure_label": _failure_label(run.failure_bucket),
         "lane": lane,
-        # Gating is decided by the evaluator alone; flaky never flips it.
+        # Gating is decided by the check alone; flaky never flips it.
         "gating": run.gating,
         "evaluator": run.evaluator.value,
         "request_source": run.request_source.value,
@@ -138,6 +221,7 @@ def _finding(session: Session, run: CheckRun, check_name: str, lane: str) -> dic
         "flaky": flaky,
         "finished_at": run.finished_at,
         "created_at": run.created_at,
+        **_placement(run, catalog),
     }
 
 
@@ -155,14 +239,19 @@ def build_feed(session: Session, *, window_hours: Optional[int] = None,
     window = timedelta(hours=hours)
 
     checks = {c.id: c for c in session.exec(select(Check)).all()}
+    catalog = _catalog_index(session)
     lanes: dict[str, dict] = {name: {"findings": [], "everything_else": 0}
                               for name in _LANE_ORDER}
 
-    for run in _latest_terminal_per_series(session):
+    heads = _latest_terminal_per_series(session)
+    provenance, flaky = _spines(session, [r for r in heads if r.verdict in _ACTIONABLE])
+    for run in heads:
         lane = classify_lane(run, now=now, window=window)
         if run.verdict in _ACTIONABLE:
             name = checks[run.check_id].display_name if run.check_id in checks else run.check_id
-            lanes[lane]["findings"].append(_finding(session, run, name, lane))
+            key = (run.target_id, run.check_id)
+            lanes[lane]["findings"].append(
+                _finding(run, name, lane, catalog, provenance[key], flaky[key]))
         else:
             lanes[lane]["everything_else"] += 1
 

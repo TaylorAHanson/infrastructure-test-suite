@@ -1,14 +1,15 @@
 """Suite catalog endpoints (a named selection of Tests for a Run)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.api.deps import actor_handle
 from app.core.ids import utcnow
 from app.db.session import get_session
 from app.models import Suite, SuiteMember, Test
 from app.schemas.schemas import SuiteCreate, SuiteUpdate
-from app.services import versioning, yaml_export
+from app.services import versioning
 from app.services.audit import record_audit
 
 router = APIRouter()
@@ -24,7 +25,8 @@ def _test_ids(session: Session, suite_id: str) -> list[str]:
 def _set_members(session: Session, suite_id: str, test_ids: list[str]) -> None:
     for m in session.exec(select(SuiteMember).where(SuiteMember.suite_id == suite_id)).all():
         session.delete(m)
-    for i, tid in enumerate(test_ids):
+    session.flush()
+    for i, tid in enumerate(dict.fromkeys(test_ids)):
         session.add(SuiteMember(suite_id=suite_id, test_id=tid, sort_order=i))
 
 
@@ -45,22 +47,13 @@ def get_suite(suite_id: str, session: Session = Depends(get_session)) -> dict:
     return _suite_out(session, suite)
 
 
-@router.get("/{suite_id}/yaml")
-def export_suite_yaml(suite_id: str, session: Session = Depends(get_session)) -> dict:
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        raise HTTPException(404, "suite not found")
-    return {"yaml": yaml_export.suite_to_yaml(session, suite)}
-
-
 @router.post("", status_code=201)
 def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
-                 actor: str = Query("api-user")) -> dict:
+                 actor: str = Depends(actor_handle())) -> dict:
     for tid in payload.test_ids:
         if not session.get(Test, tid):
             raise HTTPException(422, f"test {tid} not found")
-    suite = Suite(name=payload.name, description=payload.description, tags=payload.tags,
-                  deterministic_only=payload.deterministic_only)
+    suite = Suite(name=payload.name, description=payload.description, tags=payload.tags)
     session.add(suite)
     session.commit()
     session.refresh(suite)
@@ -76,13 +69,16 @@ def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
 
 @router.patch("/{suite_id}")
 def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends(get_session),
-                 actor: str = Query("api-user")) -> dict:
+                 actor: str = Depends(actor_handle())) -> dict:
     suite = session.get(Suite, suite_id)
     if not suite:
         raise HTTPException(404, "suite not found")
     before = _suite_out(session, suite)
     data = payload.model_dump(exclude_unset=True)
-    for key in ("name", "description", "tags", "deterministic_only", "enabled"):
+    for tid in payload.test_ids or []:
+        if not session.get(Test, tid):
+            raise HTTPException(422, f"test {tid} not found")
+    for key in ("name", "description", "tags", "enabled"):
         if key in data and data[key] is not None:
             setattr(suite, key, data[key])
     if payload.test_ids is not None:
@@ -97,3 +93,19 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
     record_audit(session, actor=actor, action="suite.update", entity_type="suite", entity_id=suite.id,
                  summary=f"Updated suite {suite.name}", before=before, after=out)
     return out
+
+
+@router.delete("/{suite_id}", status_code=204)
+def delete_suite(suite_id: str, session: Session = Depends(get_session),
+                 actor: str = Depends(actor_handle())) -> None:
+    """Delete a Suite (its Tests and their history are untouched)."""
+    suite = session.get(Suite, suite_id)
+    if not suite:
+        raise HTTPException(404, "suite not found")
+    before = _suite_out(session, suite)
+    for m in session.exec(select(SuiteMember).where(SuiteMember.suite_id == suite_id)).all():
+        session.delete(m)
+    session.delete(suite)
+    session.commit()
+    record_audit(session, actor=actor, action="suite.delete", entity_type="suite", entity_id=suite_id,
+                 summary=f"Deleted suite {before['name']}", before=before)

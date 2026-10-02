@@ -7,7 +7,7 @@ shared file. That convention is only real if something enforces it. Two
 failure modes can quietly reintroduce the "one file everyone edits" trampling
 this refactor exists to prevent:
 
-1. Two domain modules mint the same Check/Test key — silently colliding when
+1. Two domain modules mint the same Test key — silently colliding when
    `seed_all()` merges every contribution's dict, so the second write clobbers
    the first with no error (see `app.services.seed.registry.discover_
    contributions`, `app.services.seed.__init__.seed_all`).
@@ -30,6 +30,10 @@ import pytest
 from app.services.seed import contribution as contribution_module
 from app.services.seed import registry
 from app.services.seed.contribution import Contribution
+
+
+def _spec(name: str) -> contribution_module.TestSpec:
+    return contribution_module.TestSpec(name, "desc", 'with check("ok"):\n    assert True\n')
 
 
 def _fake_module_info(name: str):
@@ -63,23 +67,8 @@ def _patch_domains(monkeypatch, modules_by_name: dict[str, types.ModuleType]) ->
 # 1. Cross-module key collisions
 # ---------------------------------------------------------------------------
 
-def test_discover_contributions_rejects_cross_module_check_key_collision(monkeypatch):
-    fake_a = _fake_domain_module("fake_a", Contribution(
-        check_specs=[("dup_check", {"display_name": "A's check"})]))
-    fake_b = _fake_domain_module("fake_b", Contribution(
-        check_specs=[("dup_check", {"display_name": "B's check"})]))
-    _patch_domains(monkeypatch, {"fake_a": fake_a, "fake_b": fake_b})
-
-    with pytest.raises(registry.SeedKeyCollision) as exc:
-        registry.discover_contributions()
-
-    message = str(exc.value)
-    assert "dup_check" in message
-    assert "fake_a" in message and "fake_b" in message
-
-
 def test_discover_contributions_rejects_cross_module_test_key_collision(monkeypatch):
-    spec = contribution_module.TestSpec("Some Test", "desc", [])
+    spec = _spec("Some Test")
     fake_a = _fake_domain_module("fake_a", Contribution(tests={"dup_test": spec}))
     fake_b = _fake_domain_module("fake_b", Contribution(tests={"dup_test": spec}))
     _patch_domains(monkeypatch, {"fake_a": fake_a, "fake_b": fake_b})
@@ -93,15 +82,13 @@ def test_discover_contributions_rejects_cross_module_test_key_collision(monkeypa
 
 
 def test_discover_contributions_allows_disjoint_keys_across_modules(monkeypatch):
-    fake_a = _fake_domain_module("fake_a", Contribution(
-        check_specs=[("a_check", {"display_name": "A's check"})]))
-    fake_b = _fake_domain_module("fake_b", Contribution(
-        check_specs=[("b_check", {"display_name": "B's check"})]))
+    fake_a = _fake_domain_module("fake_a", Contribution(tests={"a_test": _spec("A's test")}))
+    fake_b = _fake_domain_module("fake_b", Contribution(tests={"b_test": _spec("B's test")}))
     _patch_domains(monkeypatch, {"fake_a": fake_a, "fake_b": fake_b})
 
     contributions = registry.discover_contributions()
-    keys = {key for contribution in contributions for key, _ in contribution.check_specs}
-    assert {"a_check", "b_check"} <= keys
+    keys = {key for contribution in contributions for key in contribution.tests}
+    assert {"a_test", "b_test"} <= keys
 
 
 def test_real_domain_modules_have_no_key_collisions():
@@ -128,7 +115,7 @@ def test_domain_shape_leak_detector_flags_a_misplaced_contribution():
     convention forbids."""
     leaked = _fake_domain_module(
         "app.services.seed.build",
-        Contribution(check_specs=[("oops", {"display_name": "Oops"})]),
+        Contribution(tests={"oops": _spec("Oops")}),
     )
     assert registry.domain_shape_leaked(leaked)
 
@@ -160,10 +147,10 @@ def test_a_new_domain_module_is_discovered_with_zero_shared_file_changes(monkeyp
     unmodified) picks it up purely via pkgutil/importlib, so registering a new
     domain never requires touching build.py/registry.py/__init__.py."""
     new_domain = _fake_domain_module("new_posture_domain", Contribution(
-        check_specs=[("new_posture_check", {"display_name": "New posture check"})],
+        tests={"new_posture_test": _spec("New posture test")},
     ))
     _patch_domains(monkeypatch, {"new_posture_domain": new_domain})
 
     contributions = registry.discover_contributions()
-    keys = {key for contribution in contributions for key, _ in contribution.check_specs}
-    assert "new_posture_check" in keys
+    keys = {key for contribution in contributions for key in contribution.tests}
+    assert "new_posture_test" in keys

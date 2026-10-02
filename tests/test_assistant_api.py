@@ -2,9 +2,9 @@
 
 Drives the Assistant endpoint with a page context + a turn against a **stubbed
 model-serving client** (injected via the ``get_model_call`` dependency override),
-asserting Draft creation, validator rejection, blocklist/R3 refusal, a
-run-as-role suggestion grounded on the target's registered roles, version
-creation on edit, draft-never-runs, and advisory RCA — never the LLM's wording.
+asserting the closed tool inventory, catalog answers, the hand-off of a request
+to write a Test to the test editor (never a draft), roles grounded on the
+target's registry, and advisory RCA — never the LLM's wording.
 """
 from __future__ import annotations
 
@@ -15,11 +15,26 @@ import pytest
 from app.main import app
 from app.services.assistant import get_model_call
 
+from helpers import script_test, target_id
+
+READS = 'with check("lists jobs"):\n    w.jobs.list()\n'
+
+#: The model's reply to a request to write a Test: the editor writes the script.
+AUTHOR_PLAN = {"author": True, "answer": "Checks that a SQL query returns rows."}
+
 
 @pytest.fixture(autouse=True)
 def _clear_overrides():
     yield
     app.dependency_overrides.pop(get_model_call, None)
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
 
 
 def set_model(plan):
@@ -35,34 +50,29 @@ def set_model(plan):
     app.dependency_overrides[get_model_call] = factory
 
 
-SQL_PLAN = {
-    "name": "SQL warehouse returns rows",
-    "operation": {"service": "statement_execution", "method": "execute_statement",
-                  "verb": "GET", "params": {"statement": "SELECT 1", "demo_row_count": 1}},
-    "assertion": "the query returns at least one row",
-    "handler_key": "sql_warehouse",
-}
+def _turn(client, turn, **body):
+    r = client.post("/api/v1/assistant/turn", json={
+        "turn": turn, "page_context": {"page": "test-studio"}, **body})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _counts(client):
+    return len(client.get("/api/v1/tests").json()), len(client.get("/api/v1/runs").json())
 
 
 # --------------------------- tool-calling plumbing (#57) ---------------------------
 def test_tool_inventory_is_closed_by_omission():
-    # The registered tool schemas are the read/grounding tools plus search_suites (#64),
-    # suite creation (#66), and 4 suite-composition proposal tools (#63). No schema
-    # exists for a Target write, /admin/*, Branding, or Webhook action — closed by
-    # omission at design time.
+    # The registered tool schemas are the read/grounding tools plus search_suites (#64).
+    # No schema exists for a Target write, /admin/*, Branding, Webhook, Suite write
+    # or run submission — closed by omission at design time.
     from app.services.assistant_graph import TOOL_REGISTRY, TOOL_SCHEMAS
 
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
     assert names == {
-        "search_sdk_surface", "search_targets", "search_roles", "search_examples",
-        "search_tests",
-        "run_history", "commit_provenance_thread", "failure_archive", "operation_reference",
+        "search_targets", "search_roles", "search_tests",
+        "run_history", "commit_provenance_thread", "failure_archive",
         "search_suites",
-        # Suite creation (issue #66)
-        "create_suite",
-        # Suite composition tools (issue #63)
-        "compose_suite_add_test", "compose_suite_remove_test",
-        "compose_suite_reorder", "compose_suite_toggle_det_only",
     }
     assert set(TOOL_REGISTRY) == names
     for forbidden in ("register_target", "edit_target", "delete_target", "target_register",
@@ -80,23 +90,36 @@ def test_turn_resolves_via_scripted_tool_call_sequence(client):
     def script(messages):
         calls["n"] += 1
         if calls["n"] == 1:
-            return {"tool_calls": [{"name": "search_sdk_surface",
-                                    "arguments": {"query": "sql warehouse"}}]}
-        return SQL_PLAN
+            return {"tool_calls": [{"name": "search_tests", "arguments": {"query": "sql warehouse"}}]}
+        return AUTHOR_PLAN
 
     set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "run a SQL query and confirm it returns rows",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["mode"] == "authoring"
-    assert body["draft"]["checks"][0]["compilable"] is True
+    body = _turn(client, "run a SQL query and confirm it returns rows")
+    assert body["mode"] == "authoring" and "draft" not in body
     # Tool-call transparency (additive): the executed tool is surfaced with a result.
-    executed = body.get("tool_calls") or []
-    names = [t["name"] for t in executed]
-    assert "search_sdk_surface" in names
+    assert "search_tests" in [t["name"] for t in body.get("tool_calls") or []]
     assert calls["n"] >= 2  # looped: tool step, then the answering step
+
+
+def test_each_tool_result_answers_a_tool_call_in_the_turn_before_it(client):
+    # Claude rejects a tool result whose id isn't a tool call in the previous message.
+    seen: list[list[dict]] = []
+
+    def script(messages):
+        seen.append(messages)
+        if len(seen) == 1:
+            return {"tool_calls": [{"name": "search_tests", "arguments": {"query": "warehouse"}},
+                                   {"id": "toolu_1", "name": "run_history", "arguments": {}}]}
+        return AUTHOR_PLAN
+
+    set_model(script)
+    _turn(client, "write a test that a warehouse answers")
+    turn, *results = seen[1][-3:]
+    assert turn["role"] == "assistant" and [r["role"] for r in results] == ["tool", "tool"]
+    ids = [c["id"] for c in turn["tool_calls"]]
+    assert ids[1] == "toolu_1" and all(ids)
+    assert [r["tool_call_id"] for r in results] == ids
+    assert [c["function"]["name"] for c in turn["tool_calls"]] == ["search_tests", "run_history"]
 
 
 # --------------------------- tool-call transparency + next actions (#65) --------
@@ -111,36 +134,28 @@ def test_turn_next_actions_are_registry_keyed():
 
 def test_turn_surfaces_navigate_next_action_from_run_history(client):
     # A turn that calls run_history surfaces a "view run history" navigate action,
-    # derived from the tool that ran — additive alongside mode/draft/tool_calls.
+    # derived from the tool that ran — additive alongside mode/answer/tool_calls.
     def script(messages):
         return {"tool_calls": [{"name": "run_history", "arguments": {}}]} \
-            if messages[-1]["role"] != "tool" else SQL_PLAN
+            if messages[-1]["role"] != "tool" else AUTHOR_PLAN
 
     set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "what happened last run?", "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
-    # tool_calls is additive and does not break the mode/draft shape.
-    assert body["mode"] == "authoring" and "draft" in body
+    body = _turn(client, "what happened last run?")
+    assert body["mode"] == "authoring" and "draft" not in body
     assert "run_history" in [t["name"] for t in body["tool_calls"]]
-    actions = body["next_actions"]
-    assert any(a["kind"] == "navigate" and a["href"] == "/runs" for a in actions)
+    assert any(a["kind"] == "navigate" and a["href"] == "/runs" for a in body["next_actions"])
 
 
 def test_empty_search_offers_author_next_action(client):
     # When a grounding search comes back empty, the shelf offers "Author this
     # test" (spec #56 story 7) — generic, from the search tool's empty result.
     def script(messages):
-        return {"tool_calls": [{"name": "search_sdk_surface",
+        return {"tool_calls": [{"name": "search_tests",
                                 "arguments": {"query": "zzzz nonexistent qqqq"}}]} \
-            if messages[-1]["role"] != "tool" else SQL_PLAN
+            if messages[-1]["role"] != "tool" else AUTHOR_PLAN
 
     set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "do we have a test for zzzz nonexistent qqqq?",
-        "page_context": {"page": "test-studio"}})
-    body = r.json()
+    body = _turn(client, "do we have a test for zzzz nonexistent qqqq?")
     author = [a for a in body["next_actions"] if a["kind"] == "author"]
     assert author and author[0]["seed"].startswith("Create a new test that")
 
@@ -156,226 +171,116 @@ def test_next_actions_dedupe_across_repeated_tool_calls():
     assert len([a for a in actions if a["href"] == "/runs"]) == 1
 
 
-# --------------------------- authoring turn ---------------------------
-def test_turn_authoring_returns_valid_draft(client):
-    set_model(SQL_PLAN)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "run a SQL query and confirm it returns rows",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
+# ------------------- a request to write a Test goes to the editor -------------------
+def test_a_request_to_write_a_test_hands_off_to_the_editor_without_a_draft(client):
+    set_model(AUTHOR_PLAN)
+    before = _counts(client)
+    body = _turn(client, "run a SQL query and confirm it returns rows")
     assert body["mode"] == "authoring"
-    draft = body["draft"]
-    assert draft["clarifying_question"] is None
-    assert len(draft["checks"]) == 1
-    assert draft["checks"][0]["compilable"] is True
-    assert draft["max_risk_tier"] == "R0"
+    assert body["answer"] == AUTHOR_PLAN["answer"]
+    assert "draft" not in body and "clarifying_question" not in body
+    # Nothing is created or run: the editor (/tests/new?ask=) writes the script.
+    assert _counts(client) == before
 
 
-def test_turn_asks_a_clarifying_question_when_slot_missing(client):
+def test_a_model_that_gives_nothing_still_hands_off_to_the_editor(client):
     set_model({})  # model yields nothing usable
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "zzzz qwerty", "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    assert r.json()["draft"]["clarifying_question"]
+    body = _turn(client, "check every warehouse auto-stops within an hour")
+    assert body["mode"] == "authoring" and body["answer"] is None
+    assert "draft" not in body
 
 
-def test_turn_conversational_greeting_gets_query_answer_not_draft(client):
-    # A greeting/meta turn is not an authoring request at all — it must land on
-    # mode="query" with a plain capability blurb, never a clarifying-question
-    # Draft (issue #112). No model configured: this is the deterministic
-    # guard's job (`authoring.is_conversational_turn`), the model-free safety
-    # net underneath the live-model system-prompt nudge.
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "hi there, how are you doing today?",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
+def test_turn_conversational_greeting_gets_query_answer_not_a_hand_off(client):
+    # A greeting/meta turn is not a request to write a Test at all — it must land
+    # on mode="query" with a plain capability blurb, never open the editor on
+    # "hi" (issue #112). The model gives nothing usable: this is the deterministic
+    # guard's job (`assistant_graph.is_conversational_turn`), the model-free
+    # safety net underneath the live-model system-prompt nudge.
+    set_model({})
+    body = _turn(client, "hi there, how are you doing today?")
     assert body["mode"] == "query"
     assert body["answer"]
     assert "draft" not in body
 
 
-def test_turn_abstains_on_weak_grounding_match_from_non_conversational_junk(client):
-    # Gibberish that fuzzy-matches a keyword substring (e.g. "are" inside
-    # "warehouse") but isn't recognised as conversational must still fall
-    # through to #111's confidence-gated abstention rather than guessing
-    # *something* — a clarifying question and zero checks, so the shelf never
-    # renders Save as Draft.
-    set_model({})  # model yields nothing usable
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "zzzz are blah blah nonsense",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
+def test_junk_that_fuzzy_matches_a_greeting_word_is_not_answered_as_one(client):
+    # Gibberish with a greeting-ish substring ("are") isn't conversational, so
+    # it doesn't get the capability blurb — it goes to the editor like any ask.
+    set_model({})
+    body = _turn(client, "zzzz are blah blah nonsense")
     assert body["mode"] == "authoring"
-    draft = body["draft"]
-    assert draft["clarifying_question"]
-    assert draft["checks"] == []
+    assert "draft" not in body
 
 
-def test_turn_grounds_on_sdk_surface_operation_not_pre_declared(client):
-    set_model({"operation": {"service": "jobs", "method": "list", "params": {}},
-               "assertion": "the operation succeeds", "name": "list jobs"})
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "list the jobs", "page_context": {"page": "test-studio"}})
-    draft = r.json()["draft"]
-    assert draft["checks"][0]["operation"]["service"] == "jobs"
+def test_a_run_submission_mode_never_proposes_or_submits_a_run(client):
+    # The run-submission mode is gone: an old client asking for it gets an
+    # ordinary turn, and no run is proposed or created.
+    set_model({"run_proposal": {"target_ids": [target_id(client, "read-only")], "suite_ids": [],
+                                "test_ids": [], "depth": "quick", "summary": "Run everything"}})
+    before = _counts(client)
+    body = _turn(client, "run the default suite on the read-only target", mode="run_submission")
+    assert body["mode"] in ("authoring", "query")
+    assert "run_proposal" not in body and "run_id" not in body
+    assert _counts(client) == before
 
 
-def test_blocklisted_operation_refused_in_turn_and_on_commit(client):
-    set_model({"operation": {"service": "workspaces", "method": "delete", "params": {}},
-               "assertion": "the workspace is deleted", "name": "delete ws"})
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "delete the workspace", "page_context": {"page": "test-studio"}})
-    draft = r.json()["draft"]
-    assert draft["checks"] == [] and draft["refusals"]
-
-    # Committing a Draft that names the blocklisted op is refused by the validator.
-    commit = client.post("/api/v1/assistant/draft", json={
-        "name": "danger", "checks": [
-            {"operation": {"service": "workspaces", "method": "delete"},
-             "assertion": "it is deleted", "handler_key": "databricks_sdk"}]})
-    assert commit.status_code == 422
+def test_the_draft_example_agentic_and_run_routes_are_gone(client):
+    tid = script_test(client, READS, "Promotable")["id"]
+    gone = [
+        client.post("/api/v1/assistant/draft", json={"name": "x", "checks": []}),
+        client.get("/api/v1/assistant/examples"),
+        client.post("/api/v1/assistant/examples/promote", json={"test_id": tid}),
+        client.post("/api/v1/assistant/evaluate-agentic", json={"assertion": "ok", "evidence": {}}),
+        client.post("/api/v1/assistant/run", json={"test_ids": [tid], "target_ids": []}),
+    ]
+    assert all(r.status_code in (404, 405) for r in gone), [(r.request.url.path, r.status_code) for r in gone]
 
 
 # --------------------------- run-as-role grounding ---------------------------
-def _make_sandbox_target_with_role(client) -> str:
+def test_roles_come_only_from_the_targets_registry(client):
+    from app.db.session import session_scope
+    from app.services.assistant_graph import dispatch_tool
+
     r = client.post("/api/v1/targets", json={
         "name": "sbx-roles", "workspace_name": "sbx-ws", "safety_class": "sandbox",
         "identity_handle": "sp-scope/analyst-key",
-        "assumable_roles": [{"group_id": "g-analyst", "label": "analyst",
-                             "safety_class": "read-only"}]})
+        "assumable_roles": [{"group_id": "g-analyst", "label": "analyst", "safety_class": "read-only"}]})
     assert r.status_code in (200, 201)
-    return r.json()["id"]
-
-
-def test_run_as_role_only_suggested_when_target_registers_it(client):
-    tid = _make_sandbox_target_with_role(client)
-    base = {"operation": {"service": "clusters", "method": "create", "params": {}},
-            "assertion": "the operation succeeds", "name": "c"}
-
-    set_model({**base, "run_as_role": "analyst"})
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "start a cluster as the analyst",
-        "page_context": {"page": "test-studio", "target_id": tid}})
-    assert r.json()["draft"]["suggested_run_as_role"]["role"]["label"] == "analyst"
-
-    set_model({**base, "run_as_role": "ghost"})  # invented role
-    r2 = client.post("/api/v1/assistant/turn", json={
-        "turn": "start a cluster as ghost",
-        "page_context": {"page": "test-studio", "target_id": tid}})
-    assert r2.json()["draft"]["suggested_run_as_role"] is None
+    with session_scope() as s:
+        roles = dispatch_tool(s, None, "search_roles", {"target_ref": r.json()["id"]})
+        assert [role["label"] for role in roles] == ["analyst"]
+        assert dispatch_tool(s, None, "search_roles", {"target_ref": "no-such-target"}) == []
 
 
 # --------------------------- Draft → accept → runs ---------------------------
-def _commit_sql_draft(client) -> str:
-    r = client.post("/api/v1/assistant/draft", json={
-        "name": "SQL rows", "description": "warehouse returns rows",
-        "checks": [{"operation": SQL_PLAN["operation"], "assertion": SQL_PLAN["assertion"],
-                    "handler_key": "sql_warehouse"}]})
-    assert r.status_code == 201
-    return r.json()["id"]
-
-
-def test_confirmed_suggestions_are_applied_on_commit(client):
-    # Suggest-then-human-confirms: when the human ticks the counterfactual +
-    # run-as-role + suite, committing applies exactly those (user stories 6/7).
-    suites = client.get("/api/v1/suites").json()
-    suite_id = suites[0]["id"]
-    r = client.post("/api/v1/assistant/draft", json={
-        "name": "policy w/ counterfactual",
-        "run_as_role": "analyst",
-        "suite_id": suite_id,
-        "checks": [
-            {"operation": {"service": "clusters", "method": "create"},
-             "assertion": "the operation succeeds", "handler_key": "databricks_sdk"},
-            {"operation": {"service": "clusters", "method": "create",
-                           "params": {"demo_outcome": "deny"}},
-             "assertion": "a non-compliant cluster is denied", "kind": "counterfactual",
-             "counterpart_index": 0, "handler_key": "databricks_sdk"}],
-        "derivation": {"applied": {"run_as_role": {"role": "analyst", "why": "registered"}}}})
-    assert r.status_code == 201
-    body = r.json()
-    assert body["run_as_role"] == "analyst"
-    assert len(body["members"]) == 2
-    cf = [m for m in body["members"] if m["kind"] == "counterfactual"][0]
-    assert cf["counterpart_check_id"] is not None
-    # Filed into the confirmed suite.
-    suite = client.get(f"/api/v1/suites/{suite_id}").json()
-    assert body["id"] in suite["test_ids"]
-
-
-def test_committed_draft_is_a_draft(client):
-    tid = _commit_sql_draft(client)
-    body = client.get(f"/api/v1/tests/{tid}").json()
-    assert body["status"] == "draft"
-    assert body["origin"] == "assistant"
-
-
-def _run_fanout(client, test_id: str) -> list[str]:
-    """Submit a run for one Test and return its fan-out CheckRun ids.
-
-    The Run API is async (ADR-0005): POST returns a run_id, the engine dispatches
-    via a background task (which the TestClient drives to completion), and the
-    fan-out CheckRuns appear on the verdict resource.
-    """
-    run_id = client.post("/api/v1/runs", json={
-        "test_ids": [test_id], "requested_by": "test"}).json()["run_id"]
-    return client.get(f"/api/v1/runs/{run_id}").json()["run_ids"]
-
-
 def test_draft_never_runs_until_accepted(client):
-    tid = _commit_sql_draft(client)
-    # Running the draft produces no CheckRuns (a Draft never runs, user story 9).
-    assert _run_fanout(client, tid) == []
+    tid = script_test(client, READS, "SQL rows", active=False)["id"]
+    # A Draft never runs (user story 9): a selection of only Drafts is refused.
+    r = client.post("/api/v1/runs", json={"test_ids": [tid], "depth": "full", "request_source": "UI_MANUAL"})
+    assert r.status_code == 400 and "Draft" in r.text
 
     # Accept → Active, then it runs (at least one fan-out CheckRun).
     acc = client.post(f"/api/v1/tests/{tid}/accept")
     assert acc.status_code == 200 and acc.json()["status"] == "active"
-    assert len(_run_fanout(client, tid)) >= 1
+    run_id = client.post("/api/v1/runs", json={"test_ids": [tid], "requested_by": "test"}).json()["run_id"]
+    assert len(client.get(f"/api/v1/runs/{run_id}").json()["run_ids"]) >= 1
 
 
 def test_accept_and_edit_create_new_versions(client):
-    tid = _commit_sql_draft(client)  # v1 (draft)
+    tid = script_test(client, READS, "SQL rows", active=False)["id"]  # v1 (draft)
     client.post(f"/api/v1/tests/{tid}/accept")  # v2 (active)
     client.patch(f"/api/v1/tests/{tid}", json={"description": "edited"})  # v3
     versions = client.get(f"/api/v1/tests/{tid}/versions").json()
     assert [v["version"] for v in versions] == [1, 2, 3]
 
 
-# --------------------------- example promotion ---------------------------
-def test_example_library_seeded_and_promotion_is_explicit(client):
-    seeded = client.get("/api/v1/assistant/examples").json()
-    # Gold authoring examples + curated onboarding starter prompts (ADR-0006 §9,
-    # spec #56 stories 30/32); bumped from 4 when onboarding examples landed.
-    assert len(seeded) >= 8
-
-    tid = _commit_sql_draft(client)
-    client.post(f"/api/v1/tests/{tid}/accept")
-    promo = client.post("/api/v1/assistant/examples/promote", json={"test_id": tid})
-    assert promo.status_code == 201
-    after = client.get("/api/v1/assistant/examples").json()
-    assert len(after) == len(seeded) + 1
-    assert any(e.get("source_test_id") == tid for e in after)
+# --------------------------- RCA (advisory) ---------------------------
+def _a_check_id(client):
+    return script_test(client, READS, "RCA subject")["members"][0]["check_id"]
 
 
-def test_onboarding_starter_prompts_are_surfaced_via_search(client):
-    """The shelf's starter prompts come from the WorkedExample library through
-    the existing ``search_examples`` path — 3-4 curated onboarding intents
-    tagged ``onboarding`` (spec #56 stories 30/32, ticket #60)."""
-    starters = client.get("/api/v1/assistant/examples", params={"q": "onboarding"}).json()
-    assert 3 <= len(starters) <= 4
-    # Every surfaced starter is an onboarding-tagged example with clickable text.
-    for ex in starters:
-        assert "onboarding" in ex["tags"]
-        assert ex["intent"].strip()  # the text a click populates the input with
-
-
-# --------------------------- RCA + agentic (advisory) ---------------------------
 def test_rca_endpoint_is_advisory_and_defaults_overnight(client):
-    checks = client.get("/api/v1/checks").json()
-    r = client.post("/api/v1/assistant/rca", json={"check_id": checks[0]["id"]})
+    r = client.post("/api/v1/assistant/rca", json={"check_id": _a_check_id(client)})
     assert r.status_code == 200
     body = r.json()
     assert body["advisory"] is True
@@ -383,201 +288,44 @@ def test_rca_endpoint_is_advisory_and_defaults_overnight(client):
 
 
 def test_turn_routes_to_rca_when_a_finding_is_on_the_page(client):
-    checks = client.get("/api/v1/checks").json()
+    check_id = _a_check_id(client)
     set_model({"cause": "unknown", "lane": "overnight", "confidence": "low"})
     r = client.post("/api/v1/assistant/turn", json={
         "turn": "why did this start failing?",
-        "page_context": {"page": "whats-interesting", "finding": {"check_id": checks[0]["id"]}}})
+        "page_context": {"page": "whats-interesting", "finding": {"check_id": check_id}}})
     assert r.json()["mode"] == "rca"
     assert r.json()["rca"]["advisory"] is True
 
 
-def test_agentic_evaluate_endpoint_cites_field_and_is_advisory(client):
-    set_model({"verdict": "pass", "cited_fields": ["row_count"], "rationale": "3 rows"})
-    r = client.post("/api/v1/assistant/evaluate-agentic", json={
-        "assertion": "the warehouse looks healthy-ish", "evidence": {"row_count": 3}})
-    body = r.json()
-    assert body["cited"] is True and body["cited_fields"] == ["row_count"]
-    assert body["gating"] is False  # advisory: never gates CI (ADR-0008)
-
-
-# --------------------------- run submission tool (#64) ---------------------------
-def test_run_submission_turn_returns_proposal(client):
-    # The assistant's run-submission mode proposes a Run without executing it
-    # (suggest-then-human-confirms — the user must call POST /assistant/run to act).
-    suites = client.get("/api/v1/suites").json()
-    suite_id = suites[0]["id"]
-    targets = client.get("/api/v1/targets").json()
-    target_id = next(t for t in targets if t["safety_class"] == "read-only")["id"]
-
-    set_model({"run_proposal": {
-        "target_ids": [target_id], "suite_ids": [suite_id],
-        "test_ids": [], "depth": "quick",
-        "summary": "Run the default suite on the read-only target",
-    }})
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "run the default suite on the read-only target",
-        "mode": "run_submission",
-        "page_context": {"page": "runs"}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["mode"] == "run_submission"
-    proposal = body["run_proposal"]
-    assert target_id in proposal["target_ids"]
-    assert suite_id in proposal["suite_ids"]
-    # The proposal is NOT a submitted run — no run_id is present in the turn response.
-    assert "run_id" not in body
-
-
-def test_run_submission_turn_asks_clarifying_question_when_slots_missing(client):
-    # When the model can't identify a target or suite it returns a clarifying question.
-    set_model({"clarifying_question": "Which target should I run against?"})
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "run something", "mode": "run_submission",
-        "page_context": {"page": "runs"}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["mode"] == "run_submission"
-    assert body["run_proposal"] is None
-    assert body["clarifying_question"]
-
-
-def test_run_submission_confirm_uses_same_safety_path_as_runs(client):
-    # POST /api/v1/assistant/run is the confirmation half of suggest-then-confirms.
-    # It goes through run_service.submit_request() — the exact same path as POST /runs —
-    # so safety-class/TargetLease checks are enforced identically (issue #64 AC #2).
-    targets = client.get("/api/v1/targets").json()
-    target_id = next(t for t in targets if t["safety_class"] == "read-only")["id"]
-    suites = client.get("/api/v1/suites").json()
-    suite_id = suites[0]["id"]
-
-    r = client.post("/api/v1/assistant/run", json={
-        "target_ids": [target_id], "suite_ids": [suite_id],
-        "test_ids": [], "depth": "quick"})
-    assert r.status_code == 202
-    body = r.json()
-    # Returns the same RunRequestOut shape as POST /runs.
-    assert "run_id" in body
-    assert body["phase"] in ("running", "terminal", "queued")
-
-
-def _register_target(client, name, safety_class):
-    return client.post("/api/v1/targets", json={
-        "name": name, "workspace_name": name, "safety_class": safety_class,
-        "identity_handle": "kv/sp",
-    })
-
-
-def _run_submission_verdict(client, run_id: str) -> str:
-    verdict_resource = client.get(f"/api/v1/runs/{run_id}").json()
-    run_ids = verdict_resource.get("run_ids", [])
-    if not run_ids:
-        return verdict_resource.get("verdict", "")
-    return client.get(f"/api/v1/runs/{run_ids[0]}").json()["verdict"]
-
-
-def test_run_submission_blocked_target_matches_direct_runs_behavior(client):
-    # A run submitted via POST /assistant/run respects the same safety gate as
-    # POST /runs: a prod-for-us target with an R2 operation (delete) is blocked.
-    prod = _register_target(client, "prod-rss", "prod-for-us").json()["id"]
-    # An R2 destructive check — blocked on prod-for-us without an override.
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "delete cluster", "handler_key": "databricks_sdk",
-        "operation": {"service": "clusters", "method": "delete"},
-        "assertion": "the cluster is deleted"}).json()["id"]
-    test_body = client.post("/api/v1/tests", json={"name": "cluster-rss-test",
-                                                    "check_ids": [chk]}).json()
-    test_id = test_body["id"]
-    client.post(f"/api/v1/tests/{test_id}/accept")
-
-    # Direct /runs call → BLOCKED_BY_SAFETY.
-    direct_run_id = client.post("/api/v1/runs", json={
-        "test_ids": [test_id], "target_ids": [prod], "depth": "quick"}).json()["run_id"]
-    direct_verdict = _run_submission_verdict(client, direct_run_id)
-    assert direct_verdict == "BLOCKED_BY_SAFETY"
-
-    # Assistant run confirmation → same BLOCKED_BY_SAFETY outcome (reuses the same gate).
-    r = client.post("/api/v1/assistant/run", json={
-        "target_ids": [prod], "test_ids": [test_id], "suite_ids": [], "depth": "quick"})
-    assert r.status_code == 202
-    assist_verdict = _run_submission_verdict(client, r.json()["run_id"])
-    assert assist_verdict == "BLOCKED_BY_SAFETY"
-
-
-def test_run_submission_readonly_target_allowed_matches_direct_runs(client):
-    # A read-only target (no mutation risk) is allowed by both paths and never locks.
-    targets = client.get("/api/v1/targets").json()
-    ro = next(t for t in targets if t["safety_class"] == "read-only")["id"]
-    suites = client.get("/api/v1/suites").json()
-    suite_id = suites[0]["id"]
-
-    # Direct /runs call.
-    direct_run_id = client.post("/api/v1/runs", json={
-        "target_ids": [ro], "suite_ids": [suite_id], "depth": "quick"}).json()["run_id"]
-    direct_phase = client.get(f"/api/v1/runs/{direct_run_id}").json()["phase"]
-
-    # Assistant confirmation.
-    r = client.post("/api/v1/assistant/run", json={
-        "target_ids": [ro], "suite_ids": [suite_id], "test_ids": [], "depth": "quick"})
-    assert r.status_code == 202
-    assist_run_id = r.json()["run_id"]
-    assist_phase = client.get(f"/api/v1/runs/{assist_run_id}").json()["phase"]
-
-    # Both routes reach a terminal phase (never permanently queued on a read-only target).
-    assert direct_phase == "terminal"
-    assert assist_phase == "terminal"
-
-
-def test_run_submission_unknown_target_returns_400(client):
-    # An unknown target is a hard error (ADR-0005 §3), same as the direct /runs path.
-    r = client.post("/api/v1/assistant/run", json={
-        "target_ids": ["tgt_does_not_exist"], "test_ids": [], "suite_ids": []})
-    assert r.status_code == 400
-
-
-def test_run_submission_queues_on_held_lease_matching_direct_runs(client):
-    # AC #2 — TargetLease parity: a run via POST /assistant/run queues (non-terminal)
-    # when the target's lease is held, exactly as POST /runs does (ADR-0011).
-    from app.db.session import session_scope
-    from app.services import locking
-
-    sandbox = _register_target(client, "sbx-lease-test", "sandbox").json()["id"]
-    suites = client.get("/api/v1/suites").json()
-    suite_id = suites[0]["id"]
-
-    # Simulate another run holding the lease.
-    with session_scope() as s:
-        assert locking.acquire(s, sandbox, holder="req-other") is True
-
-    r = client.post("/api/v1/assistant/run", json={
-        "target_ids": [sandbox], "suite_ids": [suite_id], "test_ids": [], "depth": "quick"})
-    assert r.status_code == 202
-    phase = client.get(f"/api/v1/runs/{r.json()['run_id']}").json()["phase"]
-    # Queued (a non-terminal phase) while the lease is held — never a PASS or refusal.
-    assert phase == "queued"
-
-    # Free the lease and drain: the queued run finishes.
-    with session_scope() as s:
-        locking.release(s, sandbox, holder="req-other")
-    from app.services import run_service
-    run_service.drain_queued()
-    done = client.get(f"/api/v1/runs/{r.json()['run_id']}").json()
-    assert done["phase"] == "terminal"
-
-
 # --------------------------- search_tests (#62) ---------------------------
-def test_search_tests_returns_seeded_checks(client):
-    # search_tests returns existing Tests from the seeded catalog.
+def test_search_tests_returns_matching_tests(client):
     from app.services.assistant_tools import search_tests
     from app.db.session import session_scope
 
+    script_test(client, READS, "Cluster tags audit")
     with session_scope() as s:
         results = search_tests(s, query="cluster")
-    assert results, "Expected at least one seeded test matching 'cluster'"
     names = [r["name"] for r in results]
-    assert any("cluster" in n.lower() for n in names)
+    assert "Cluster tags audit" in names
     for r in results:
         assert "id" in r and "name" in r and "status" in r and "check_count" in r
+
+
+def test_search_tests_matches_script_text_below_name(client):
+    # Script text is searchable, but a hit there ranks below a name/description hit.
+    from app.db.session import session_scope
+    from app.models import Test
+    from app.services.assistant_tools import search_tests
+
+    with session_scope() as s:
+        s.add(Test(name="Zorblax grants audit", description="checks zorblax grants"))
+        s.add(Test(name="Catalog sweep", description="walks catalogs",
+                   script='with check("sweep"):\n    w.grants.get(full_name="zorblax")\n'))
+        s.commit()
+        results = search_tests(s, query="zorblax")
+
+    names = [r["name"] for r in results]
+    assert names[:2] == ["Zorblax grants audit", "Catalog sweep"]
 
 
 def test_search_tests_filters_by_status(client):
@@ -585,14 +333,16 @@ def test_search_tests_filters_by_status(client):
     from app.services.assistant_tools import search_tests
     from app.db.session import session_scope
 
+    script_test(client, READS, "Zorblax active")
+    script_test(client, READS, "Zorblax draft", active=False)
     with session_scope() as s:
-        results = search_tests(s, query="", status="active")
-    assert all(r["status"] == "active" for r in results)
+        results = search_tests(s, query="zorblax", status="active")
+    assert [r["name"] for r in results] == ["Zorblax active"]
 
 
 def test_turn_query_for_existing_test_answers_directly(client):
     # A turn like "Do we have a test for cluster creation?" uses search_tests and
-    # returns mode="query" with an answer — no draft, no clarifying question.
+    # returns mode="query" with an answer — no hand-off, no clarifying question.
     calls = {"n": 0}
 
     def script(messages):
@@ -603,26 +353,25 @@ def test_turn_query_for_existing_test_answers_directly(client):
         return {"answer": "Yes, there is a test for cluster creation."}
 
     set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "Do we have a test for cluster creation?",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
+    body = _turn(client, "Do we have a test for cluster creation?")
     assert body["mode"] == "query"
     assert body["answer"]
     assert "draft" not in body
-    executed = body.get("tool_calls") or []
-    assert any(t["name"] == "search_tests" for t in executed)
+    assert any(t["name"] == "search_tests" for t in body.get("tool_calls") or [])
 
 
 # --------------------------- run_history global (#62) ---------------------------
-def test_run_history_global_returns_most_recent_run_summary(client):
-    # seed at least one run so run_history has something to summarise.
-    checks = client.get("/api/v1/checks").json()
+def _a_run(client):
+    tid = script_test(client, READS, "History subject")["id"]
     run_id = client.post("/api/v1/runs", json={
-        "test_ids": [], "check_ids": [checks[0]["id"]],
+        "test_ids": [tid], "target_ids": [target_id(client, "read-only")],
         "requested_by": "test"}).json()["run_id"]
-    client.get(f"/api/v1/runs/{run_id}")  # drive background task
+    client.get(f"/api/v1/runs/{run_id}")
+    return run_id
+
+
+def test_run_history_global_returns_most_recent_run_summary(client):
+    _a_run(client)
 
     from app.services.assistant_tools import run_history
     from app.db.session import session_scope
@@ -638,13 +387,7 @@ def test_run_history_global_returns_most_recent_run_summary(client):
 
 def test_turn_run_history_global_answers_without_draft(client):
     # "What happened last run?" uses run_history with no ids and answers via mode="query".
-    # Create a run first so there is history to report.
-    checks = client.get("/api/v1/checks").json()
-    run_id = client.post("/api/v1/runs", json={
-        "test_ids": [], "check_ids": [checks[0]["id"]],
-        "requested_by": "test"}).json()["run_id"]
-    client.get(f"/api/v1/runs/{run_id}")  # drive background task
-
+    _a_run(client)
     calls = {"n": 0}
 
     def script(messages):
@@ -654,251 +397,20 @@ def test_turn_run_history_global_answers_without_draft(client):
         return {"answer": "The last run had 1 check."}
 
     set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "What happened last run?",
-        "page_context": {"page": "test-studio"}})
-    assert r.status_code == 200
-    body = r.json()
+    body = _turn(client, "What happened last run?")
     assert body["mode"] == "query"
     assert body["answer"]
-    executed = body.get("tool_calls") or []
-    assert any(t["name"] == "run_history" for t in executed)
+    assert any(t["name"] == "run_history" for t in body.get("tool_calls") or [])
 
 
-# --------------------- suite composition tools (issue #63) ---------------------
+# ------------- suites are composed by hand, not by the Assistant -------------
 
-def test_suite_compose_add_test_returns_proposal(client):
-    # Successful composition: add a Test to a non-deterministic-only Suite.
-    # The tool returns a proposal (not applied) with requires_confirmation=True.
-    suites = client.get("/api/v1/suites").json()
-    suite = next(s for s in suites if not s["deterministic_only"])
-    suite_id = suite["id"]
-    all_tests = client.get("/api/v1/tests").json()
-    available = [t["id"] for t in all_tests
-                 if t["status"] == "active" and t["id"] not in suite["test_ids"]]
-    if not available:
-        pytest.skip("all active tests are already members of the non-det-only suite")
-    test_id = available[0]
+def test_assistant_has_no_suite_writing_tools():
+    from app.services.assistant_graph import TOOL_REGISTRY
 
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": test_id}}]}
-        return {"answer": f"Proposal ready — confirm to add {test_id} to {suite_id}."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {test_id} to suite {suite_id}",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["deterministic_violation"] is None
-    assert result["requires_confirmation"] is True
-    assert test_id in result["proposed_test_ids"]
-    # Suite is unchanged until the human confirms — the tool only proposes.
-    assert client.get(f"/api/v1/suites/{suite_id}").json()["test_ids"] == suite["test_ids"]
+    assert not [n for n in TOOL_REGISTRY if "suite" in n and n != "search_suites"]
 
 
-def test_suite_compose_det_only_violation_refused(client):
-    # Adding a Test with an agentic Check to a deterministic_only Suite is refused
-    # at the tool level and at the confirm endpoint.
-    suites = client.get("/api/v1/suites").json()
-    ci_gate = next(s for s in suites if s["deterministic_only"])
-    suite_id = ci_gate["id"]
-
-    # The seeded "Platform self-check" test contains warehouse_healthy_ish whose
-    # assertion "the warehouse came up healthy-ish" compiles to agentic/non-compilable.
-    all_tests = client.get("/api/v1/tests").json()
-    agentic_test = next(
-        (t for t in all_tests
-         if ("platform" in t["name"].lower() or "self" in t["name"].lower())
-         and t["id"] not in ci_gate["test_ids"]),
-        None,
-    )
-    if agentic_test is None:
-        pytest.skip("no agentic test available as non-member of the CI Gate suite")
-    test_id = agentic_test["id"]
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": test_id}}]}
-        return {"answer": "Refused — that test contains agentic Checks."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {test_id} to the CI gate suite",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["deterministic_violation"] is not None
-    assert "agentic" in result["deterministic_violation"].lower()
-
-    # The confirm endpoint also refuses the same change (safety gate re-runs).
-    cr = client.post("/api/v1/assistant/suite-compose/confirm",
-                     json={"suite_id": suite_id, "action": "add_test", "test_id": test_id})
-    assert cr.status_code == 422
-
-
-def test_suite_compose_job_scheduled_warning_surfaced(client):
-    # A Suite included in a past NIGHTLY run gets job_scheduled=True in the tool result,
-    # making the extra-visible confirmation visible to the caller.
-    suites = client.get("/api/v1/suites").json()
-    suite = suites[0]
-    suite_id = suite["id"]
-
-    # Record a NIGHTLY RunRequest that references this suite explicitly.
-    nr = client.post("/api/v1/runs", json={
-        "suite_ids": [suite_id], "depth": "quick",
-        "requested_by": "nightly-dab", "request_source": "NIGHTLY"})
-    assert nr.status_code in (200, 202)
-
-    all_tests = client.get("/api/v1/tests").json()
-    non_member = next(
-        (t["id"] for t in all_tests
-         if t["id"] not in suite["test_ids"] and t["status"] == "active"),
-        None,
-    )
-    if non_member is None:
-        pytest.skip("all active tests are already members of the first suite")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "compose_suite_add_test",
-                                    "arguments": {"suite_id": suite_id, "test_id": non_member}}]}
-        return {"answer": "⚠ This suite is used by the nightly job — extra confirmation needed."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": f"add test {non_member} to suite {suite_id}",
-        "page_context": {"page": "suites", "suite_id": suite_id}})
-    assert r.status_code == 200
-    executed = r.json().get("tool_calls", [])
-    result = next((t["result"] for t in executed if t["name"] == "compose_suite_add_test"), None)
-    assert result is not None
-    assert result["job_scheduled"] is True
-
-
-# ----------------------- suite creation (issue #66) -----------------------
-# The composition tools above (#63) all require an existing suite_id — they
-# cannot get a first-time user from "Suites page, nothing exists" to "a Suite
-# created via the assistant" on their own. `create_suite` is the missing
-# counterpart; these tests cover the turn (proposal) and confirm (apply) halves.
-
-def test_suite_turn_routes_to_suite_capability_not_test_authoring(client):
-    # A turn on the Suites page (no suite_id — nothing exists yet) must not be
-    # routed through the Test-authoring compiler; it gets mode="suite_authoring"
-    # (or "query") from the dedicated Suite capability, never mode="authoring".
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "create_suite",
-                                    "arguments": {"name": "Smoke suite", "test_ids": [test_id]}}]}
-        return {"answer": "Proposal ready — confirm to create the Suite."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "Create a new suite that runs the smoke test",
-        "page_context": {"page": "suites"}})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["mode"] == "suite_authoring"
-    assert "draft" not in body
-
-
-def test_suite_turn_create_proposal_is_never_auto_applied(client):
-    before = client.get("/api/v1/suites").json()
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    calls = {"n": 0}
-
-    def script(messages):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return {"tool_calls": [{"name": "create_suite",
-                                    "arguments": {"name": "Smoke suite",
-                                                 "description": "Runs the smoke test.",
-                                                 "test_ids": [test_id]}}]}
-        return {"answer": "Proposal ready — confirm to create the Suite."}
-
-    set_model(script)
-    r = client.post("/api/v1/assistant/turn", json={
-        "turn": "Create a new suite that runs the smoke test",
-        "page_context": {"page": "suites"}})
-    assert r.status_code == 200
-    proposal = r.json().get("suite_proposal")
-    assert proposal is not None
-    assert proposal["action"] == "create"
-    assert proposal["name"] == "Smoke suite"
-    assert proposal["proposed_test_ids"] == [test_id]
-    assert proposal["deterministic_violation"] is None
-    assert proposal["requires_confirmation"] is True
-    # Nothing is created until the human confirms.
-    after = client.get("/api/v1/suites").json()
-    assert len(after) == len(before)
-
-
-def test_suite_create_confirm_creates_suite_end_to_end(client):
-    # The confirm half: a first-time user goes from "nothing exists" to "a Suite
-    # created via the assistant" (issue #66 AC #3).
-    all_tests = client.get("/api/v1/tests").json()
-    test_id = next(t["id"] for t in all_tests if t["status"] == "active")
-
-    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
-        "action": "create", "name": "Assistant-created suite",
-        "description": "Created end-to-end via the Assistant.",
-        "test_ids": [test_id], "deterministic_only": False,
-    })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["name"] == "Assistant-created suite"
-    assert body["test_ids"] == [test_id]
-
-    listed = client.get("/api/v1/suites").json()
-    assert any(s["id"] == body["id"] for s in listed)
-
-
-def test_suite_create_confirm_requires_name(client):
-    r = client.post("/api/v1/assistant/suite-compose/confirm",
-                    json={"action": "create", "test_ids": []})
-    assert r.status_code == 422
-
-
-def test_suite_create_confirm_det_only_violation_refused(client):
-    # Creating a deterministic_only Suite whose member Test has an agentic Check
-    # is refused at confirm time — the safety gate applies to creation too.
-    all_tests = client.get("/api/v1/tests").json()
-    agentic_test = next(
-        (t for t in all_tests if "platform" in t["name"].lower() or "self" in t["name"].lower()),
-        None,
-    )
-    if agentic_test is None:
-        pytest.skip("no agentic test available in the seeded catalog")
-
-    before = client.get("/api/v1/suites").json()
-    r = client.post("/api/v1/assistant/suite-compose/confirm", json={
-        "action": "create", "name": "Bad CI gate",
-        "test_ids": [agentic_test["id"]], "deterministic_only": True,
-    })
-    assert r.status_code == 422
-    after = client.get("/api/v1/suites").json()
-    assert len(after) == len(before)
+def test_suite_compose_confirm_endpoint_is_gone(client):
+    r = client.post("/api/v1/assistant/suite-compose/confirm", json={"action": "create", "name": "x"})
+    assert r.status_code in (404, 405)

@@ -1,7 +1,7 @@
 """The safety gate — identity-bounded blast-radius enforcement (ADR-0017/0004).
 
-This is the platform's most important safeguard. It decides, per Check
-operation, whether the operation may run against a given Target, in the
+This is the platform's most important safeguard. It decides, per SDK call a
+Test script makes, whether the call may run against a given Target, in the
 **identity-bounded order of strength** ADR-0017 established (per-op risk tier is
 no longer primary):
 
@@ -15,8 +15,7 @@ no longer primary):
 * **(b) Blocklist — the global R3-never floor.** A blocklisted (catastrophic)
   operation is refused on *every* class, override or not (:mod:`app.core.operations`).
 * **(c) Coarse verb-derived risk tier vs the Target's safety class** — the
-  *secondary* cap. The effective tier (coarse guess, raised by a one-confirm
-  operation-specific tier on mutating targets) must not exceed the class matrix.
+  *secondary* cap. The tier must not exceed the class matrix.
 
 A blocked operation yields :data:`RunStatus.BLOCKED_BY_SAFETY` — never a pass,
 never a functional failure — surfaced loudly. The only escape from (c) is the
@@ -38,7 +37,7 @@ from app.core.enums import (
     SafetyClass,
 )
 from app.core.operations import Operation, is_blocklisted
-from app.services.risk import effective_risk_tier
+from app.services.risk import derive_risk_tier
 
 #: The request sources that represent a **human at the GUI**. The override is
 #: GUI-only (ADR-0004 §5 / ADR-0010): only a manual UI action may carry one.
@@ -123,7 +122,6 @@ def evaluate_operation_safety(
     operation: Any,
     safety_class: Optional[SafetyClass],
     *,
-    confirmed_tier: Optional[RiskTier] = None,
     override: Optional[SafetyOverride] = None,
     request_source: Any = RequestSource.API,
     target_name: Optional[str] = None,
@@ -154,8 +152,8 @@ def evaluate_operation_safety(
             layer="identity", reason="No target safety class: target is not registered.",
         )
 
-    # (c) Coarse verb-derived tier (raised by any one-confirm tier) vs the class.
-    effective = effective_risk_tier(op, confirmed_tier)
+    # (c) Coarse verb-derived tier vs the class.
+    effective = derive_risk_tier(op)
     max_tier = safety_class.max_risk_tier
 
     if effective.order <= max_tier.order:

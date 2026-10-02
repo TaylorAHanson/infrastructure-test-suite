@@ -16,3 +16,17 @@ def test_id(client, name: str) -> str:
 def suite_id(client, name: str) -> str:
     """The id of the seeded Suite with the given name."""
     return next(s for s in client.get("/api/v1/suites").json() if s["name"] == name)["id"]
+
+
+def script_test(client, script: str, name: str = "Script test", *, active: bool = True,
+                headers: dict | None = None, **fields) -> dict:
+    """Create a script Test through the API; ``active`` accepts it so it can run."""
+    r = client.post("/api/v1/tests/script", json={"name": name, "script": script, **fields},
+                    headers=headers or {})
+    assert r.status_code == 201, r.text
+    test = r.json()
+    if active:
+        r = client.post(f"/api/v1/tests/{test['id']}/accept", headers=headers or {})
+        assert r.status_code == 200, r.text
+        test = r.json()
+    return test

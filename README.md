@@ -140,6 +140,19 @@ Build the production frontend bundle (into `backend/static`):
 npm install && npm run build
 ```
 
+### Operator guide
+
+The user-facing docs (quickstarts, operations manual, glossary, ADRs) are the
+markdown in [`docs/`](docs/) plus [`CONTEXT.md`](CONTEXT.md) as the glossary. The
+app's **Guide** tab renders them (`src/pages/Guide.tsx`); they're bundled into the
+frontend build, so the guide always matches the code that's deployed and edits
+show up live under `dev.sh`.
+
+New pages go in `docs/` and get a sidebar entry in `NAV_SECTIONS` in
+[`src/guide/content.ts`](src/guide/content.ts). ADRs are picked up automatically.
+`docs/agents/`, `docs/prototypes/` and `docs/research/` aren't part of the guide.
+`tests/test_guide_links.py` fails on a link to a doc or heading that doesn't exist.
+
 ## Deploy to Databricks (Asset Bundle)
 
 Prerequisites: Databricks CLI `>= 0.283`, an FE-VM **serverless** workspace

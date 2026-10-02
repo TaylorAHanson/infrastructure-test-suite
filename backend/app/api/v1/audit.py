@@ -6,7 +6,8 @@ construction**: it exposes only ``GET`` routes — there is no path here (nor
 anywhere) that edits or deletes an audit record, which is the append-only
 integrity property (ADR-0014 §1).
 
-Scope is **config-plane mutations only** (:data:`CONFIG_PLANE_ACTIONS`): runs
+Scope is **config-plane mutations only** (:data:`CONFIG_PLANE_ACTIONS`, plus the
+purge and catalog-upgrade records in :data:`~app.services.audit.SYSTEM_ACTIONS`): runs
 (``run.trigger``) and run-time blocks (``safety.block``) are filtered out at the
 query, so the view is a config-mutation log, not a run log. Records are
 filterable by **target · actor · event type** and **exportable** (CSV/JSON).
@@ -25,8 +26,11 @@ from sqlmodel import Session, select
 from app.core.enums import CONFIG_PLANE_ACTIONS
 from app.db.session import get_session
 from app.models import AuditEvent
+from app.services.audit import SYSTEM_ACTIONS
 
 router = APIRouter()
+
+_VISIBLE_ACTIONS = CONFIG_PLANE_ACTIONS | SYSTEM_ACTIONS
 
 #: The columns an exported CSV record carries, in order. ``before``/``after``
 #: are kept (JSON-encoded) so a CSV export stays forensically complete — the
@@ -48,7 +52,7 @@ def _query(
     Only config-plane event types are ever returned — the ``in_`` clause is the
     runs-excluded guarantee. Newest first, so the view reads as a timeline.
     """
-    stmt = select(AuditEvent).where(AuditEvent.action.in_(CONFIG_PLANE_ACTIONS))  # type: ignore[attr-defined]
+    stmt = select(AuditEvent).where(AuditEvent.action.in_(_VISIBLE_ACTIONS))  # type: ignore[attr-defined]
     if target:
         # A target's history: the events whose entity is that target.
         stmt = stmt.where(AuditEvent.entity_id == target)
@@ -75,7 +79,7 @@ def list_audit(
 @router.get("/event-types")
 def audit_event_types() -> list[str]:
     """The closed set of config-plane event types, for a filter dropdown."""
-    return sorted(CONFIG_PLANE_ACTIONS)
+    return sorted(_VISIBLE_ACTIONS)
 
 
 @router.get("/export")

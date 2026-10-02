@@ -7,19 +7,29 @@ lease/heartbeat/max-duration matrix lives in ``test_locking.py``.
 """
 from __future__ import annotations
 
+import pytest
 from sqlmodel import select
 
 from app.db.session import session_scope
 from app.models import TargetLease
 from app.services import locking, run_service
 
+from helpers import script_test
 from helpers import target_id as _target
-from helpers import test_id as _test
+
+MUTATES = 'with check("creates a cluster"):\n    w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")\n'
+READS = 'with check("lists warehouses"):\n    w.warehouses.list()\n'
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
 
 
 def test_colliding_sandbox_run_queues_then_runs_after_release(client):
     sandbox = _target(client, "sandbox")
-    policy = _test(client, "Cluster policy enforcement")
+    policy = script_test(client, MUTATES, "mutates")["id"]
 
     # Simulate a first run holding the sandbox target's lease.
     with session_scope() as s:
@@ -46,7 +56,7 @@ def test_colliding_sandbox_run_queues_then_runs_after_release(client):
 
 def test_read_only_run_never_locks(client):
     read_only = _target(client, "read-only")
-    sql = _test(client, "SQL Warehouse validation")
+    sql = script_test(client, READS, "reads")["id"]
 
     run_id = client.post("/api/v1/runs", json={
         "test_ids": [sql], "target_ids": [read_only], "depth": "full"}).json()["run_id"]
@@ -61,7 +71,7 @@ def test_read_only_run_never_locks(client):
 
 def test_sweep_reclaims_a_wedged_lease_and_unblocks_the_queue(client):
     sandbox = _target(client, "sandbox")
-    policy = _test(client, "Cluster policy enforcement")
+    policy = script_test(client, MUTATES, "mutates")["id"]
 
     # A run holds a *valid* lease, so a colliding run queues behind it.
     with session_scope() as s:

@@ -17,6 +17,9 @@ os.environ["SEED_ON_STARTUP"] = "0"
 # retry backoff, so webhook tests observe the POST deterministically and fast.
 os.environ["WEBHOOK_DELIVERY_ASYNC"] = "0"
 os.environ["WEBHOOK_RETRY_BACKOFF_SECONDS"] = "0"
+# Run requests inline on the caller's thread, so GET /runs/{id} right after
+# POST /runs (or after drain_queued) sees the finished run.
+os.environ["RUN_DISPATCH_INLINE"] = "1"
 
 
 @pytest.fixture()

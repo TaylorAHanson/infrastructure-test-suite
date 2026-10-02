@@ -1,6 +1,6 @@
 import { formatDistanceToNow, parseISO } from 'date-fns'
 
-import type { Phase } from '../types'
+import type { Phase, RunRequestSummary, StudioTest, Suite, Target } from '../types'
 
 export function timeAgo(iso?: string | null): string {
   if (!iso) return '-'
@@ -41,10 +41,6 @@ const STATUS_CLASS: Record<string, string> = {
   running: 'bg-info/15 text-info',
   queued: 'bg-info/15 text-info',
   terminal: 'bg-skip/20 text-muted',
-  // Expectation / evaluator chips.
-  DENY: 'bg-info/15 text-info',
-  deterministic: 'bg-pass/15 text-pass',
-  agentic: 'bg-warn/15 text-warn',
   UNKNOWN: 'bg-skip/20 text-muted',
 }
 
@@ -68,6 +64,35 @@ export function phaseOf(status?: string | null): Phase {
   if (status === 'QUEUED') return 'queued'
   if (status && TERMINAL_STATUSES.has(status)) return 'terminal'
   return 'running'
+}
+
+/** A run's git sha, or null when the build didn't record one. */
+export function knownSha(sha?: string | null): string | null {
+  return sha && sha !== 'unknown' ? sha : null
+}
+
+/** A target picker's explicit "All targets" choice (sent as an empty `target_ids`). */
+export const ALL_TARGETS = '__all__'
+
+/** "aws-prod", "aws-prod, sandbox-1", "5 targets" or "all targets". */
+export function targetsLabel(ids: string[], targets?: Target[]): string {
+  if (!ids.length) return 'all targets'
+  if (ids.length > 2) return `${ids.length} targets`
+  return ids.map((id) => targets?.find((t) => t.id === id)?.name ?? id).join(', ')
+}
+
+/** What a run selected, by name: its suites and tests, or every Active Test. */
+export function runScopeLabel(
+  run: Pick<RunRequestSummary, 'suite_ids' | 'test_ids'>,
+  suites?: Suite[],
+  tests?: StudioTest[],
+): string {
+  const names = [
+    ...run.suite_ids.map((id) => suites?.find((s) => s.id === id)?.name ?? id),
+    ...run.test_ids.map((id) => tests?.find((t) => t.id === id)?.name ?? id),
+  ]
+  if (!names.length) return 'All active tests'
+  return names.length > 3 ? `${names.slice(0, 2).join(', ')} +${names.length - 2} more` : names.join(', ')
 }
 
 /** connectable/functional is a tri-state: null = no gating runs (not derivable). */

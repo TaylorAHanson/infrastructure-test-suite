@@ -1,8 +1,22 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { QueryClient } from '@tanstack/react-query'
 
-import { api } from '../lib/api'
+import { api, postStream } from '../lib/api'
 import type {
+  AssistantConfig,
+  AssistantConfigUpdate,
+  AssistantModel,
   AssistantTurnResponse,
+  Depth,
+  DryRunResponse,
+  EditorChatMessage,
+  EditorEvent,
+  ModelTestResult,
+  ReasoningLevel,
+  ScriptAnalysis,
+  SdkIndex,
+  SdkMethodDetail,
+  TestScript,
   AssumableRole,
   AuditEvent,
   Branding,
@@ -17,21 +31,29 @@ import type {
   SafetyClass,
   StudioTest,
   Suite,
-  SuiteProposal,
   Target,
   TestVersion,
   VerdictResource,
-  WorkedExample,
 } from '../types'
 
 // ---------------- Catalog: Checks / Tests / Suites ----------------
-/** The Check catalog — the atomic operation+expectation+evaluator units. */
+/** Every script check (read-only): names, the calls each makes, risk tiers. */
 export const useChecks = () =>
   useQuery({ queryKey: ['checks'], queryFn: () => api.get<Check[]>('/checks') })
 
-/** The Test catalog (`/tests`) — target-agnostic ordered Check bundles. */
+/** The Test catalog (`/tests`, retired Tests excluded) — target-agnostic
+ *  scripts with their Draft/Active status. One cache for every page. */
 export const useTests = () =>
-  useQuery({ queryKey: ['tests'], queryFn: () => api.get<StudioTest[]>('/tests') })
+  useQuery({ queryKey: ['tests'], queryFn: () => api.get<StudioTest[]>('/tests'), retry: 1 })
+
+/** One Test by id — unlike the list, this also finds a retired Test. */
+export const useTest = (testId: string | undefined, enabled = true) =>
+  useQuery({
+    queryKey: ['test', testId],
+    queryFn: () => api.get<StudioTest>(`/tests/${testId}`),
+    enabled: !!testId && enabled,
+    retry: false,
+  })
 
 export const useSuites = () =>
   useQuery({ queryKey: ['suites'], queryFn: () => api.get<Suite[]>('/suites') })
@@ -39,22 +61,12 @@ export const useSuites = () =>
 export const useTargets = () =>
   useQuery({ queryKey: ['targets'], queryFn: () => api.get<Target[]>('/targets') })
 
-// ---------------- The Assistant + Test Studio (spec #22) ----------------
-export const useStudioTests = () =>
-  useQuery({ queryKey: ['studio-tests'], queryFn: () => api.get<StudioTest[]>('/tests') })
-
+// ---------------- Tests + the Assistant shelf ----------------
 export const useTestVersions = (testId?: string) =>
   useQuery({
     queryKey: ['test-versions', testId],
     queryFn: () => api.get<TestVersion[]>(`/tests/${testId}/versions`),
     enabled: !!testId,
-  })
-
-// Keyed on the Test's version so an accept or rollback refetches the export.
-export const useTestYaml = (testId: string, version: number) =>
-  useQuery({
-    queryKey: ['test-yaml', testId, version],
-    queryFn: () => api.get<{ yaml: string }>(`/tests/${testId}/yaml`),
   })
 
 export const useAssistantTurn = () =>
@@ -63,57 +75,190 @@ export const useAssistantTurn = () =>
       api.post<AssistantTurnResponse>('/assistant/turn', body),
   })
 
-export interface DraftCheckBody {
-  operation: { service: string; method: string; verb?: string; params?: Record<string, unknown> }
-  handler_key: string
-  assertion: string
-  kind?: string
-  counterpart_index?: number | null
-  run_as_role?: string | null
-}
-
-export interface CommitDraftBody {
+export interface SuiteBody {
   name: string
   description?: string
   tags?: string[]
-  checks: DraftCheckBody[]
+  test_ids: string[]
+  enabled?: boolean
+}
+
+const suiteChanged = (qc: QueryClient) => {
+  qc.invalidateQueries({ queryKey: ['suites'] })
+  qc.invalidateQueries({ queryKey: ['audit'] })
+}
+
+export const useCreateSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: SuiteBody) => api.post<Suite>('/suites', body),
+    onSuccess: () => suiteChanged(qc),
+  })
+}
+
+export const useUpdateSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...body }: Partial<SuiteBody> & { id: string }) =>
+      api.patch<Suite>(`/suites/${id}`, body),
+    onSuccess: () => suiteChanged(qc),
+  })
+}
+
+export const useDeleteSuite = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.del<void>(`/suites/${id}`),
+    onSuccess: () => suiteChanged(qc),
+  })
+}
+
+// ---------------- Script Tests + the Test editor ----------------
+/** After any Test mutation: write the returned Test into the list (so a page
+ *  that navigates on success sees it immediately), then refetch everything that
+ *  shows Tests — the list, one Test, its checks, script and versions, the
+ *  suites (a delete drops its memberships) and the audit log. */
+const testChanged = (qc: QueryClient, testId?: string, updated?: StudioTest) => {
+  if (updated) {
+    qc.setQueryData<StudioTest[]>(['tests'], (prev) =>
+      prev && [...prev.filter((t) => t.id !== updated.id), updated])
+    qc.setQueryData(['test', updated.id], updated)
+  }
+  qc.invalidateQueries({ queryKey: ['tests'] })
+  qc.invalidateQueries({ queryKey: ['checks'] })
+  qc.invalidateQueries({ queryKey: ['suites'] })
+  qc.invalidateQueries({ queryKey: ['audit'] })
+  if (testId) {
+    qc.invalidateQueries({ queryKey: ['test', testId] })
+    qc.invalidateQueries({ queryKey: ['test-script', testId] })
+    qc.invalidateQueries({ queryKey: ['test-versions', testId] })
+  }
+}
+
+export const useTestScript = (testId?: string) =>
+  useQuery({
+    queryKey: ['test-script', testId],
+    queryFn: () => api.get<TestScript>(`/tests/${testId}/script`),
+    enabled: !!testId,
+    staleTime: Infinity,
+    retry: 1,
+  })
+
+export const useScriptTemplate = (enabled: boolean) =>
+  useQuery({
+    queryKey: ['script-template'],
+    queryFn: () => api.get<{ script: string }>('/scripts/template'),
+    enabled,
+    staleTime: Infinity,
+    retry: 1,
+  })
+
+export interface ScriptTestBody {
+  name: string
+  description?: string
+  tags?: string[]
+  script?: string
   run_as_role?: string | null
-  suite_id?: string | null
-  derivation?: Record<string, unknown>
 }
 
-export const useCommitDraft = () => {
+export const useCreateScriptTest = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: CommitDraftBody) => api.post<StudioTest>('/assistant/draft', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['studio-tests'] }),
+    mutationFn: (body: ScriptTestBody) => api.post<StudioTest>('/tests/script', body),
+    onSuccess: (t) => testChanged(qc, t.id, t),
   })
 }
 
-/** Confirm a Suite-creation proposal from the Assistant (issue #66) — the confirm
- *  half of suggest-then-human-confirms; nothing is created until this is called
- *  with the human's go-ahead. */
-export const useConfirmCreateSuite = () => {
+export const useSaveScript = () => {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (proposal: SuiteProposal) =>
-      api.post<Suite>('/assistant/suite-compose/confirm', {
-        action: 'create',
-        name: proposal.name,
-        description: proposal.description,
-        tags: proposal.tags,
-        test_ids: proposal.proposed_test_ids,
-        deterministic_only: proposal.proposed_deterministic_only,
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['suites'] }),
+    mutationFn: ({ testId, ...body }: Partial<ScriptTestBody> & { testId: string; script: string }) =>
+      api.put<StudioTest>(`/tests/${testId}/script`, body),
+    onSuccess: (t, v) => testChanged(qc, v.testId, t),
   })
 }
+
+export const useDeleteTest = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (testId: string) => api.del<void>(`/tests/${testId}`),
+    onSuccess: (_d, testId) => {
+      qc.setQueryData<StudioTest[]>(['tests'], (prev) => prev?.filter((t) => t.id !== testId))
+      testChanged(qc)
+    },
+  })
+}
+
+export const useAnalyzeScript = () =>
+  useMutation({
+    mutationFn: (script: string) => api.post<ScriptAnalysis>('/scripts/analyze', { script }),
+  })
+
+export interface DryRunBody {
+  script: string
+  target_id: string
+  depth: Depth
+  run_as_role?: string | null
+}
+
+export const useDryRun = () =>
+  useMutation({
+    mutationFn: (body: DryRunBody) => api.post<DryRunResponse>('/scripts/dry-run', body),
+  })
+
+export const useSdkIndex = () =>
+  useQuery({
+    queryKey: ['sdk-index'],
+    queryFn: () => api.get<SdkIndex>('/scripts/sdk/index'),
+    staleTime: Infinity,
+  })
+
+export const fetchSdkMethod = (service: string, method: string) =>
+  api.get<SdkMethodDetail>(`/scripts/sdk/${encodeURIComponent(service)}?method=${encodeURIComponent(method)}`)
+
+export interface EditorTurnBody {
+  messages: EditorChatMessage[]
+  script: string
+  test_id?: string | null
+  target_id?: string | null
+  last_dry_run?: DryRunResponse | null
+}
+
+export const streamEditorTurn = (body: EditorTurnBody, onEvent: (e: EditorEvent) => void, signal?: AbortSignal) =>
+  postStream<EditorEvent>('/assistant/editor-turn/stream', body, onEvent, signal)
+
+export const useAssistantConfig = () =>
+  useQuery({ queryKey: ['assistant-config'], queryFn: () => api.get<AssistantConfig>('/assistant/config') })
+
+export const useUpdateAssistantConfig = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: AssistantConfigUpdate) => api.put<AssistantConfig>('/assistant/config', body),
+    onSuccess: (cfg) => {
+      qc.setQueryData(['assistant-config'], cfg)
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+  })
+}
+
+export const useAssistantModels = () =>
+  useQuery({
+    queryKey: ['assistant-models'],
+    queryFn: () => api.get<{ models: AssistantModel[]; error: string | null }>('/assistant/models'),
+    staleTime: 60_000,
+  })
+
+export const useTestAssistantModel = () =>
+  useMutation({
+    mutationFn: (body: { endpoint: string; reasoning: ReasoningLevel }) =>
+      api.post<ModelTestResult>('/assistant/models/test', body),
+  })
 
 export const useAcceptTest = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (testId: string) => api.post<StudioTest>(`/tests/${testId}/accept`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['studio-tests'] }),
+    onSuccess: (t, testId) => testChanged(qc, testId, t),
   })
 }
 
@@ -122,33 +267,9 @@ export const useRollbackTest = () => {
   return useMutation({
     mutationFn: ({ testId, version }: { testId: string; version: number }) =>
       api.post<StudioTest>(`/tests/${testId}/rollback/${version}`),
-    onSuccess: (_d, v) => {
-      qc.invalidateQueries({ queryKey: ['studio-tests'] })
-      qc.invalidateQueries({ queryKey: ['test-versions', v.testId] })
-    },
+    onSuccess: (t, v) => testChanged(qc, v.testId, t),
   })
 }
-
-export const usePromoteExample = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (testId: string) =>
-      api.post<{ id: string }>('/assistant/examples/promote', { test_id: testId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['examples'] }),
-  })
-}
-
-export const useExamples = () =>
-  useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
-
-/** The curated onboarding starter prompts (spec #56 stories 30/32): the 3-4
- *  clickable examples the Assistant shelf shows a first-time user with an empty
- *  conversation, sourced from the WorkedExample library via `search_examples`. */
-export const useStarterPrompts = () =>
-  useQuery({
-    queryKey: ['examples', 'onboarding'],
-    queryFn: () => api.get<WorkedExample[]>('/assistant/examples?q=onboarding'),
-  })
 
 // ---------------- Targets (rebuilt model + friction ceremony, ADR-0010; #37) ----
 export interface CreateTargetBody {
@@ -177,11 +298,16 @@ export interface UpdateTargetBody {
   ceremony?: SafetyCeremony
 }
 
+const targetChanged = (qc: QueryClient) => {
+  qc.invalidateQueries({ queryKey: ['targets'] })
+  qc.invalidateQueries({ queryKey: ['audit'] })
+}
+
 export const useCreateTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: CreateTargetBody) => api.post<Target>('/targets', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
+    onSuccess: () => targetChanged(qc),
   })
 }
 
@@ -190,7 +316,7 @@ export const useUpdateTarget = () => {
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: UpdateTargetBody }) =>
       api.patch<Target>(`/targets/${id}`, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
+    onSuccess: () => targetChanged(qc),
   })
 }
 
@@ -198,7 +324,7 @@ export const useDeleteTarget = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => api.del(`/targets/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['targets'] }),
+    onSuccess: () => targetChanged(qc),
   })
 }
 
@@ -212,22 +338,40 @@ export const useRuns = () =>
     refetchInterval: 5000,
   })
 
-/** A Run's aggregate verdict resource (`GET /runs/{req_id}`). Polls until terminal. */
+/** A Run's aggregate verdict resource (`GET /runs/{req_id}`). Polls until terminal
+ *  (or until it fails, e.g. no such run). */
 export const useRunResource = (runId?: string) =>
   useQuery({
     queryKey: ['run', runId],
     queryFn: () => api.get<VerdictResource>(`/runs/${runId}`),
     enabled: !!runId,
-    refetchInterval: (q) => ((q.state.data as VerdictResource)?.phase === 'terminal' ? false : 3000),
+    retry: 1,
+    refetchInterval: (q) => (q.state.error || q.state.data?.phase === 'terminal' ? false : 3000),
   })
 
-/** The fan-out CheckRuns for a request (`GET /runs?request_id=…`). */
-export const useRunCheckRuns = (requestId?: string) =>
-  useQuery({
-    queryKey: ['run-checkruns', requestId],
-    queryFn: () => api.get<CheckRunRow[]>(`/runs?request_id=${requestId}`),
+export const CHECK_RUN_PAGE = 200
+
+/** The fan-out CheckRuns for a request (`GET /runs?request_id=…`), a page at a
+ *  time. Polls while the run is live; `terminal` is part of the key so the run
+ *  finishing triggers one last fetch of the final rows, then polling stops. */
+export const useRunCheckRuns = (requestId: string | undefined, terminal: boolean) =>
+  useInfiniteQuery({
+    queryKey: ['run-checkruns', requestId, terminal],
+    queryFn: ({ pageParam }) =>
+      api.get<CheckRunRow[]>(
+        `/runs?request_id=${encodeURIComponent(requestId!)}&limit=${CHECK_RUN_PAGE}&offset=${pageParam}`,
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages, lastOffset) => {
+      if (last.length < CHECK_RUN_PAGE) return undefined
+      // A server that ignores `offset` returns the first page again: stop there.
+      const earlier = new Set(pages.slice(0, -1).flat().map((r) => r.run_id))
+      if (last.every((r) => earlier.has(r.run_id))) return undefined
+      return lastOffset + CHECK_RUN_PAGE
+    },
     enabled: !!requestId,
-    refetchInterval: 4000,
+    refetchInterval: terminal ? false : 4000,
+    placeholderData: keepPreviousData,
   })
 
 /** A single CheckRun's stage outcomes + derived view (`GET /runs/{run_id}`). */
@@ -251,10 +395,8 @@ export interface SafetyOverrideBody {
 export interface SubmitRunBody {
   suite_ids?: string[]
   test_ids?: string[]
-  check_ids?: string[]
   target_ids?: string[]
   depth?: 'quick' | 'full'
-  requested_by?: string
   request_source?: string
   override?: SafetyOverrideBody
 }
@@ -365,7 +507,10 @@ export const useUpdateWebhookConfig = () => {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: WebhookConfigUpdate) => api.put<WebhookConfig>('/webhook/config', body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhook-config'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['webhook-config'] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
   })
 }
 

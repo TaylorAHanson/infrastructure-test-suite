@@ -51,6 +51,7 @@ _SEED: list[FailureBucket] = [
     FailureBucket("FEATURE_NOT_ENABLED", "Feature not enabled", False, "OPERATE"),
     FailureBucket("SERVICE_UNSUPPORTED", "Service unsupported", False, "OPERATE"),
     FailureBucket("CLEANUP_FAILURE", "Cleanup failure", False, "VERIFY"),
+    FailureBucket("SCRIPT_ERROR", "Test script error", False, "OPERATE"),
     # Safety / structural.
     FailureBucket("BLOCKED_BY_SAFETY", "Blocked by safety gate", False, "AUTHORIZE"),
     FailureBucket("COUNTERFACTUAL_NOT_DENIED", "Counterfactual was not denied", False, "AUTHORIZE"),

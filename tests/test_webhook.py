@@ -17,14 +17,20 @@ import httpx
 import pytest
 
 from app.core.enums import RequestSource, RunStatus
-from app.db.session import session_scope
-from app.models import CheckRun, RunRequest, WebhookConfig, WEBHOOK_CONFIG_ID
-from app.services import webhook
+from app.models import CheckRun, RunRequest, WEBHOOK_CONFIG_ID
+from app.services import run_service, webhook
+from helpers import script_test
 
 
 # --------------------------------------------------------------------------
 # capture / stub helpers
 # --------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
+
+
 @pytest.fixture()
 def sink(monkeypatch):
     """Capture every outbound POST instead of hitting the network."""
@@ -227,16 +233,12 @@ def _register_target(client, name, safety_class):
     }).json()
 
 
-def _make_check(client, service, method, params=None):
-    return client.post("/api/v1/checks", json={
-        "display_name": f"{service}.{method}",
-        "operation": {"service": service, "method": method, "params": params or {}},
-        "handler_key": "databricks_sdk", "assertion": "the operation succeeds",
-    }).json()
+_R1 = 'w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")'
 
 
-def _make_test(client, check_id, name):
-    return client.post("/api/v1/tests", json={"name": name, "check_ids": [check_id]}).json()
+def _make_test(client, call, name):
+    """An Active script Test whose one check makes ``call``."""
+    return script_test(client, f'with check("{name}"):\n    {call}\n', name)
 
 
 def _run(client, test_id, target_id):
@@ -268,7 +270,7 @@ def test_run_with_finding_fires_one_post(client, sink):
         "urls": ["https://hook.example/r"], "enabled": True})
     # An R1 mutation on a read-only target is BLOCKED_BY_SAFETY — a finding.
     ro = _register_target(client, "ws-ro", "read-only")
-    test = _make_test(client, _make_check(client, "clusters", "create")["id"], "blocked")
+    test = _make_test(client, _R1, "blocked")
     run_id = _run(client, test["id"], ro["id"])
 
     assert len(sink) == 1
@@ -283,7 +285,7 @@ def test_all_green_run_is_silent(client, sink):
     client.put("/api/v1/webhook/config", json={
         "urls": ["https://hook.example/r"], "enabled": True})
     ro = _register_target(client, "ws-ok", "read-only")
-    test = _make_test(client, _make_check(client, "jobs", "list")["id"], "green")
+    test = _make_test(client, "w.jobs.list()", "green")
     _run(client, test["id"], ro["id"])
     assert sink == []
 
@@ -296,7 +298,7 @@ def test_delivery_failure_does_not_break_the_run(client, monkeypatch):
     client.put("/api/v1/webhook/config", json={
         "urls": ["https://down/hook"], "enabled": True})
     ro = _register_target(client, "ws-fail", "read-only")
-    test = _make_test(client, _make_check(client, "clusters", "create")["id"], "blocked2")
+    test = _make_test(client, _R1, "blocked2")
     run_id = _run(client, test["id"], ro["id"])
 
     # The run still reaches its terminal verdict — the webhook failure is swallowed.

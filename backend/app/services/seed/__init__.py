@@ -1,23 +1,21 @@
-"""Seed data: Check/Test/Suite exemplars so the app is useful on first boot.
+"""Seed data: the bundled Test/Suite catalog, so the app is useful on first boot.
 
-Idempotent: if any Check exists, seeding is skipped. The catalog is composed
-from **auto-discovered domain modules** under
-:mod:`app.services.seed.domains` (#106): a domain module declares a
-:class:`~app.services.seed.contribution.Contribution` of its own Checks/
-Tests/Suites (and, for the worked-example library, WorkedExample rows), and
-:func:`app.services.seed.registry.discover_contributions` picks it up with no
-edit to any shared file. ``seed_all()`` merges every contribution into one
-catalog before building rows, so a cross-module reference — a Test naming a
-Check from another domain, a Suite naming a Test from another domain, a
-counterfactual's counterpart — resolves against the merged whole.
+Idempotent: it first deletes whatever the retired structured-test feature left
+behind (:func:`~app.services.legacy_purge.purge_legacy`), then into an empty
+database it builds the catalog and into a seeded one it runs
+:func:`~app.services.seed.upgrade.upgrade_catalog`, which removes what earlier
+releases seeded and adds what's missing. The catalog is composed from
+**auto-discovered domain modules** under :mod:`app.services.seed.domains`
+(#106): a domain module declares a
+:class:`~app.services.seed.contribution.Contribution` of its own script Tests
+and Suites, and :func:`app.services.seed.registry.discover_contributions` picks
+it up with no edit to any shared file. ``seed_all()`` merges every
+contribution into one catalog before building rows, so a Suite naming a Test
+from another domain resolves against the merged whole.
 
-Every real-catalog domain (Spec #91) — Producer, Processing, Consumer,
-Security Posture, Identity & Access, Governance/Unity Catalog, Sandbox
-Functional — owns its own module under ``.domains``, alongside the tutorial
-exemplars (:mod:`.domains.tutorial`) and the worked/onboarding example
-libraries (:mod:`.domains.examples`) (#107). No domain's content lives in a
-shared structure here; this file only re-exports the tutorial/example
-libraries' constants for the tests that assert against them by name.
+Every domain — connectivity, the quick and compute health tiers, the security
+posture battery and the CI Gate composed from them — owns its own module under
+``.domains``; no domain's content lives in a shared structure here.
 """
 from __future__ import annotations
 
@@ -25,74 +23,42 @@ import logging
 
 from sqlmodel import Session, select
 
-from app.core.enums import Expectation, SafetyClass
-from app.models import Check, Suite, Target, Test, WorkedExample
-from app.services.seed.build import make_check, make_suite, make_test
-from app.services.seed.contribution import Contribution, SuiteSpec
-from app.services.seed.domains.examples import ONBOARDING_EXAMPLES, WORKED_EXAMPLES
-from app.services.seed.domains.tutorial import CHECK_SPECS, TUTORIAL_TAGS
+from app.core.enums import SafetyClass
+from app.models import Check, Suite, Target, Test
+from app.services.legacy_purge import purge_legacy
+from app.services.seed.build import make_suite, make_test
+from app.services.seed.contribution import SuiteSpec
 from app.services.seed.registry import discover_contributions
+from app.services.seed.upgrade import SEED_ACTOR
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "CHECK_SPECS",
-    "ONBOARDING_EXAMPLES",
-    "TUTORIAL_TAGS",
-    "WORKED_EXAMPLES",
-    "seed_all",
-]
-
-
-def _seed_examples(session: Session, contributions: list[Contribution]) -> int:
-    """Seed every domain's worked-example rows (idempotent within a fresh seed)."""
-    if session.exec(select(WorkedExample)).first():
-        return 0
-    specs = [example for contribution in contributions for example in contribution.worked_examples]
-    for spec in specs:
-        session.add(WorkedExample(
-            intent=spec["intent"], title=spec["title"], description=spec["intent"],
-            operation=spec["operation"], handler_key=spec["handler_key"],
-            assertion=spec["assertion"], expectation=Expectation.PASS,
-            counterfactual=spec.get("counterfactual", {}), tags=spec["tags"],
-            curated=True,
-        ))
-    session.commit()
-    return len(specs)
+__all__ = ["seed_all"]
 
 
 def seed_all(session: Session, with_demo_targets: bool = True) -> None:
-    """Seed Check/Test/Suite exemplars (idempotent)."""
+    """Seed the Test/Suite catalog (idempotent)."""
     # Branding is seeded independently of the catalog so an un-branded install
     # always has the finished default record (ADR-0013 §5), even once the catalog
     # already exists. Idempotent by the fixed singleton id.
     from app.services.branding import get_or_seed as seed_branding
 
     seed_branding(session)
-
-    if session.exec(select(Check)).first():
-        logger.info("Seed skipped: checks already present.")
-        return
+    purge_legacy(session, actor=SEED_ACTOR)
 
     contributions = discover_contributions()
+    # The purge can leave a seeded install without Tests or Checks, never without Suites.
+    if any(session.exec(select(model)).first() for model in (Suite, Test, Check)):
+        from app.services.seed.upgrade import upgrade_catalog
 
-    _seed_examples(session, contributions)  # worked-example library (ADR-0006 §9)
-    logger.info("Seeding Check/Test/Suite exemplars...")
+        upgrade_catalog(session, contributions)
+        return
 
-    checks: dict[str, Check] = {}
-    for contribution in contributions:
-        for key, spec in contribution.check_specs:
-            check = make_check(spec, tags=contribution.check_tags or None)
-            session.add(check)
-            checks[key] = check
-    session.commit()
-    for check in checks.values():
-        session.refresh(check)
-
+    logger.info("Seeding the Test/Suite catalog...")
     tests: dict[str, Test] = {}
     for contribution in contributions:
         for key, test_spec in contribution.tests.items():
-            tests[key] = make_test(session, checks, test_spec)
+            tests[key] = make_test(session, test_spec)
 
     for contribution in contributions:
         for suite_spec in contribution.suites:
@@ -115,5 +81,4 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
         session.commit()
 
     suite_count = len(session.exec(select(Suite)).all())
-    logger.info("Seed complete: %d checks, %d tests, %d suites.",
-                len(checks), len(tests), suite_count)
+    logger.info("Seed complete: %d tests, %d suites.", len(tests), suite_count)

@@ -1,6 +1,6 @@
 """The Assistant's Triage / RCA read-path (ADR-0012 §4, ADR-0009).
 
-RCA is the same Assistant as authoring — **different tools** (ADR-0012 §1). Its
+RCA is the same Assistant as the shelf's other turns — **different tools** (ADR-0012 §1). Its
 tools (:mod:`app.services.assistant_tools`) are **strictly read-only**, and its
 output is **advisory** and **suggest-never-assert**: it *proposes* an attributed
 cause and a **lane placement**, and it **defaults to the Overnight lane when it
@@ -86,7 +86,7 @@ def suggest(session: Session, *, check_id: str, target_id: Optional[str] = None,
     except Exception:  # noqa: BLE001 - advisory; degrade to the heuristic
         return _heuristic(evidence, first_bad, has_commit, model_available=False)
 
-    from app.services.authoring import parse_json_object
+    from app.services.assistant import parse_json_object
 
     plan = parse_json_object(reply)
     cause = str(plan.get("cause") or "").strip()

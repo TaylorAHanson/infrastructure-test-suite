@@ -10,6 +10,7 @@ from app.api.v1 import (
     findings,
     health,
     runs,
+    scripts,
     suites,
     targets,
     tests,
@@ -20,6 +21,7 @@ router = APIRouter()
 router.include_router(health.router, tags=["health"])
 router.include_router(checks.router, prefix="/checks", tags=["checks"])
 router.include_router(tests.router, prefix="/tests", tags=["tests"])
+router.include_router(scripts.router, prefix="/scripts", tags=["scripts"])
 router.include_router(suites.router, prefix="/suites", tags=["suites"])
 router.include_router(targets.router, prefix="/targets", tags=["targets"])
 router.include_router(runs.router, prefix="/runs", tags=["runs"])

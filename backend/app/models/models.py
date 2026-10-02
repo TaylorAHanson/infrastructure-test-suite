@@ -3,15 +3,19 @@
 The rebuilt domain (ADR-0001, amended by ADR-0017) is three cleanly separated
 units plus an extensible, data-driven result model:
 
-* **Check** — the atomic assertion: one open-SDK operation + one expectation.
-* **Test**  — a target-agnostic, ordered bundle of Checks (incl. counterfactuals).
+* **Test**  — a target-agnostic Python script.
+* **Check** — one ``with check(...)`` block of a Test's script, the unit results
+  are recorded against (incl. counterfactuals).
 * **Suite** — a named selection of Tests for a Run (grouping only).
 
 Results map onto the **canonical stage spine** (a :class:`StageOutcome` row per
 stage, keyed by the data-backed stage id — *not* a hardcoded ``StepKind``) and
 carry a **failure-taxonomy bucket** (a string id, not a closed enum). The store
 is Lakebase-authoritative: edits version in-app (:class:`EntityVersion`) and roll
-back in-app; YAML is an export format only. All timestamps are naive UTC.
+back in-app. All timestamps are naive UTC.
+
+``Check.compiled_predicate``, ``compilable`` and ``confirmed_risk_tier`` are
+left from retired structured Tests; script checks leave them at their defaults.
 """
 from __future__ import annotations
 
@@ -47,7 +51,7 @@ def _json_list() -> Any:
 # Catalog: Check / Test / Suite
 # ---------------------------------------------------------------------------
 class Check(SQLModel, table=True):
-    """The atomic unit: one operation + its expectation."""
+    """One ``with check(...)`` block of a script Test: what its results key on."""
 
     __tablename__ = "checks"
 
@@ -55,14 +59,10 @@ class Check(SQLModel, table=True):
     display_name: str
     description: str = ""
 
-    # Open-SDK operation: an arbitrary Databricks SDK/API call (ADR-0017),
-    # {"service", "method", "verb", "params"}. Ground truth is the SDK surface
-    # minus the blocklist — never a curated manifest allowlist.
     operation: dict = _json_col()
-    #: Registry key of the handler that performs the operation on the spine.
-    handler_key: str = Field(default="databricks_sdk", index=True)
+    #: ``script`` for every Check a Test's script declares.
+    handler_key: str = Field(default="script", index=True)
 
-    # Assertion authored in plain text + its compiled form.
     assertion: str = ""
     expectation: Expectation = Field(default=Expectation.PASS)
     evaluator: Evaluator = Field(default=Evaluator.DETERMINISTIC, index=True)
@@ -71,13 +71,12 @@ class Check(SQLModel, table=True):
     #: For a counterfactual: the canonical stage the denial is expected at.
     expected_stage: Optional[str] = Field(default=None)
 
-    # Coarse verb/category-derived tier (ADR-0017); confirmed_risk_tier is the
-    # one-confirm operation-specific tier captured only for mutating targets.
+    #: The highest tier of the SDK calls the check makes (ADR-0017).
     risk_tier: str = Field(default=RiskTier.R0.value, index=True)
     confirmed_risk_tier: Optional[str] = Field(default=None)
 
-    # Optional grounding hints (what remains of the "handler manifest"): the
-    # canonical stages the op maps to, counterfactual pair, evidence schema.
+    #: What the script declares for the check: its Test, name, SDK calls, role
+    #: and ``advisory`` flag.
     hints: dict = _json_col()
 
     version: int = Field(default=1)
@@ -87,7 +86,7 @@ class Check(SQLModel, table=True):
 
 
 class Test(SQLModel, table=True):
-    """A target-agnostic, ordered bundle of Checks (with counterfactuals)."""
+    """A target-agnostic Python script; its ``with check(...)`` blocks are its Checks."""
 
     __tablename__ = "tests"
 
@@ -100,17 +99,20 @@ class Test(SQLModel, table=True):
     run_as_role: Optional[str] = Field(default=None)
 
     #: Test Studio lifecycle (ADR-0006 §8): a ``draft`` never runs until a human
-    #: accepts it into ``active``. Defaults to ``active`` so hand-authored and
-    #: seeded Tests are runnable; the Assistant's write-path creates ``draft``.
+    #: accepts it into ``active``. Defaults to ``active`` so seeded Tests are
+    #: runnable; a Test created in the editor starts as a ``draft``.
     status: TestStatus = Field(default=TestStatus.ACTIVE, index=True)
     #: How the Test was authored — "human" | "assistant" — for the derivation
-    #: panel. The Assistant sets "assistant"; manual/seed paths leave "human".
+    #: panel. Tests the retired draft flow produced carry "assistant".
     origin: str = Field(default="human")
-    #: The Assistant's derivation record for an AI-produced Test: chosen SDK
-    #: operation, param provenance, grounding example, coarse risk tier, chosen
-    #: run-as-role + why, suggested counterfactuals/suite + why. What makes an
-    #: AI-produced Test auditable by a stranger (ADR-0006 §8, user story 11).
+    #: The retired draft flow's derivation record for an AI-produced Test
+    #: (ADR-0006 §8, user story 11); empty for script Tests.
     derivation: dict = _json_col()
+    #: The Test as a Python script, its source of truth: its ``with check(...)``
+    #: blocks are synced to Check rows (handler_key ``script``) so results,
+    #: history and provenance key on stable Check ids. A Test with no script
+    #: (a retired structured Test) never runs.
+    script: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
 
     version: int = Field(default=1)
     enabled: bool = Field(default=True, index=True)
@@ -146,7 +148,7 @@ class Suite(SQLModel, table=True):
     name: str = Field(index=True)
     description: str = ""
     tags: list[str] = _json_list()
-    #: Fail-closed verdict computed from deterministic Checks alone (ADR-0008).
+    #: Fail-closed verdict computed from gating Checks alone (ADR-0008).
     #: This spec defines the flag; CI-gate enforcement is Spec 3.
     deterministic_only: bool = Field(default=False)
     version: int = Field(default=1)
@@ -209,41 +211,6 @@ class EntityVersion(SQLModel, table=True):
 
 
 # ---------------------------------------------------------------------------
-# Worked-example library (ADR-0006 §9) — the gold Tests the Assistant grounds on
-# ---------------------------------------------------------------------------
-class WorkedExample(SQLModel, table=True):
-    """A gold worked example the Assistant grounds on via ``search_examples``.
-
-    A **curated seed set ships in the repo** (open-source day-one), and the
-    library is **grown by curated suggest-then-confirm promotion** of accepted
-    Tests (ADR-0006 §9). Each example pairs a plain-English **intent** with the
-    open-SDK operation + assertion it should compile to, so the Assistant can
-    retrieve a close prior for a new sentence.
-    """
-
-    __tablename__ = "worked_examples"
-
-    id: str = Field(default_factory=lambda: new_id("ex"), primary_key=True)
-    #: The plain-English sentence this example teaches ("start a cluster …").
-    intent: str = Field(index=True)
-    title: str = ""
-    description: str = ""
-    #: The open-SDK operation the intent compiles to ({service, method, verb, params}).
-    operation: dict = _json_col()
-    handler_key: str = Field(default="databricks_sdk")
-    assertion: str = ""
-    expectation: Expectation = Field(default=Expectation.PASS)
-    #: A paired counterfactual intent/assertion, when the example teaches one.
-    counterfactual: dict = _json_col()
-    tags: list[str] = _json_list()
-    #: True for the repo-seeded gold set; promoted examples are also curated.
-    curated: bool = Field(default=True)
-    #: Set when this example was promoted from an accepted Test (provenance).
-    source_test_id: Optional[str] = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
-
-
-# ---------------------------------------------------------------------------
 # Execution: request → check runs → stage outcomes
 # ---------------------------------------------------------------------------
 class RunRequest(SQLModel, table=True):
@@ -266,10 +233,17 @@ class RunRequest(SQLModel, table=True):
     #: ``{target_name, reason, confirmed}``. Honored by the gate only for a human
     #: GUI caller; never for CI/automation.
     override: dict = _json_col()
+    #: Run params a Test script reads (``params`` / ``setting()``); a run param
+    #: wins over the Target's tag of the same name.
+    params: dict = _json_col()
 
     status: RunStatus = Field(default=RunStatus.PENDING, index=True)
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
+    #: Identifies the dispatch that currently owns the request. Each claim sets a
+    #: fresh token; a worker writes the roll-up only while its token is current,
+    #: so a run the reaper re-queued can't be overwritten by its late worker.
+    claim_token: Optional[str] = None
 
     git_sha: str = "unknown"
     #: A non-deploy event reference (e.g. "metastore grant change · 21:14")
@@ -304,7 +278,7 @@ class CheckRun(SQLModel, table=True):
 
     evaluator: Evaluator = Field(default=Evaluator.DETERMINISTIC, index=True)
     expectation: Expectation = Field(default=Expectation.PASS)
-    #: True = this result gates (deterministic); False = advisory (agentic).
+    #: True = this result gates; False = an ``advisory=True`` check's.
     gating: bool = Field(default=True)
     run_as_role: Optional[str] = Field(default=None)
     risk_tier: str = Field(default=RiskTier.R0.value)
@@ -474,5 +448,32 @@ class WebhookConfig(SQLModel, table=True):
     enabled: bool = Field(default=False)
     urls: list[str] = _json_list()
     fire_on_all_completions: bool = Field(default=False)
+    updated_by: str = Field(default="system")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Assistant settings
+# ---------------------------------------------------------------------------
+ASSISTANT_CONFIG_ID = "assistant"
+
+
+class AssistantConfig(SQLModel, table=True):
+    """The assistant's model and loop limits — a single global row.
+
+    ``endpoint`` empty means the deployment default (``MODEL_SERVING_ENDPOINT``).
+    """
+
+    __tablename__ = "assistant_config"
+
+    id: str = Field(default=ASSISTANT_CONFIG_ID, primary_key=True)
+    endpoint: Optional[str] = Field(default=None)
+    reasoning: str = Field(default="off")
+    max_tool_calls: int = Field(default=30)
+    max_output_tokens: int = Field(default=6000)
+    temperature: float = Field(default=0.1)
+    turn_timeout_seconds: int = Field(default=300)
+    allow_live_reads: bool = Field(default=True)
+    allow_dry_run: bool = Field(default=True)
     updated_by: str = Field(default="system")
     updated_at: datetime = Field(default_factory=utcnow)

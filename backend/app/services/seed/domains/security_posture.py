@@ -1,99 +1,154 @@
-"""Security Posture (issue #93), split from the monolithic real-catalog
-module (#107): the platform's SAT-style posture battery — SSO/isolation/
-exfiltration/token-hygiene settings Checks plus one deliberately agentic
-admin-count Check.
+"""Security posture: drift checks, kept out of the health gate.
 
-Every settings Check declares ``verb="GET"`` explicitly (R0) and asserts a
-specific evidence value via a field-comparison ("field == N"), seeded via
-``demo_evidence`` so every Check stays runnable without a workspace binding —
-both compile deterministically via ``compile_assertion``. ``admin_count_sane``
-is the one exception: an agentic advisory read, non-deterministic by design,
-so it stays out of ``ci_gate_tests`` below.
-
-``sso``/``isolation``/``exfiltration``/``token_hygiene`` volunteer for the CI
-Gate via ``ci_gate_tests``; ``admin_count`` deliberately does not.
+These say whether a workspace is configured the way security wants, not whether
+it works, so they live in their own Suite and never join the CI Gate. Most read
+admin-only APIs (workspace settings, every user's tokens, IP access lists), so
+run them with an identity that is a workspace admin; a non-admin gets
+PERMISSION_DENIED, which is reported as a failure rather than hidden. For a
+broader battery, Databricks' Security Analysis Tool (SAT) covers far more.
 """
 from __future__ import annotations
 
 from app.services.seed.contribution import Contribution, SuiteSpec, TestSpec
 
-CHECK_SPECS: list[tuple[str, dict]] = [
-    ("sso_enabled", dict(
-        display_name="SSO enabled",
-        description="Confirm federated single sign-on is enabled for the workspace, "
-                    "so authentication doesn't fall back to local passwords.",
-        operation=dict(service="workspace_conf", method="get_status", verb="GET",
-                       params={"keys": "ssoEnabled", "demo_evidence": {"sso_enabled": 1}}),
-        handler_key="databricks_sdk",
-        assertion="sso_enabled == 1")),
-    ("no_isolation_clusters", dict(
-        display_name="No unisolated ('No Isolation Shared') clusters",
-        description="Confirm no cluster in the workspace runs under the permissive "
-                    "No Isolation Shared access mode, so user isolation is enforced workspace-wide.",
-        operation=dict(service="clusters", method="list", verb="GET",
-                       params={"demo_evidence": {"no_isolation_clusters": 0}}),
-        handler_key="databricks_sdk",
-        assertion="no_isolation_clusters == 0")),
-    ("exfiltration_controls_off", dict(
-        display_name="Exfiltration controls disabled",
-        description="Confirm notebook export, results download, and notebook/table clipboard "
-                    "copy are all disabled, closing the primary data-exfiltration surface.",
-        operation=dict(service="workspace_conf", method="get_status", verb="GET",
-                       params={"keys": "enableExportNotebook,enableResultsDownloading,"
-                                       "enableNotebookTableClipboard",
-                               "demo_evidence": {"exfiltration_controls_enabled": 0}}),
-        handler_key="databricks_sdk",
-        assertion="exfiltration_controls_enabled == 0")),
-    ("pat_expiry_bounded", dict(
-        display_name="Personal access tokens are expiry-bounded",
-        description="Confirm no personal access token is non-expiring and a workspace "
-                    "max-lifetime policy is set, so a leaked PAT can't be used indefinitely.",
-        operation=dict(service="token_management", method="list", verb="GET",
-                       params={"demo_evidence": {"non_expiring_pats": 0}}),
-        handler_key="databricks_sdk",
-        assertion="non_expiring_pats == 0")),
-    ("admin_count_sane", dict(
-        display_name="Workspace-admin count is sane",
-        description="An agentic advisory read: judges whether the number of workspace admins "
-                    "looks reasonable for the workspace, rather than an objective pass/fail. "
-                    "Non-deterministic by design, so it stays advisory and never gates CI.",
-        operation=dict(service="users", method="list", verb="GET",
-                       params={"demo_evidence": {"admin_count": 3}}),
-        handler_key="databricks_sdk",
-        assertion="the workspace-admin count is sane")),
-]
+EXFILTRATION = '''"""Exfiltration controls
+
+Notebook export, results download and notebook/table clipboard copy are all
+switched off. An unset setting means the platform default, which is on.
+Needs a workspace-admin identity to read workspace settings.
+"""
+KEYS = ["enableExportNotebook", "enableResultsDownloading", "enableNotebookTableClipboard"]
+
+with check("notebook export, results download and clipboard copy are off"):
+    conf = w.workspace_conf.get_status(keys=",".join(KEYS))
+    record("settings", conf)
+    still_on = [k for k in KEYS if str(conf.get(k)).lower() != "false"]
+    assert not still_on, "still enabled (unset means on): " + ", ".join(still_on)
+'''
+
+TOKEN_HYGIENE = '''"""Token hygiene
+
+A maximum lifetime is set for new personal access tokens, and no existing token
+is non-expiring. Needs a workspace-admin identity (token management is admin-only).
+
+Target tags (or run params):
+  max_token_lifetime_days   the most a policy may allow (default 90)
+"""
+LIMIT_DAYS = int(setting("max_token_lifetime_days", 90))
+
+with check("new tokens have a bounded lifetime"):
+    conf = w.workspace_conf.get_status(keys="maxTokenLifetimeDays")
+    days = conf.get("maxTokenLifetimeDays")
+    record("max_token_lifetime_days", days)
+    assert days and int(days) > 0, "no maximum token lifetime is set, so new tokens can live forever"
+    assert int(days) <= LIMIT_DAYS, f"tokens may live {days} days; the limit is {LIMIT_DAYS}"
+
+with check("no personal access token is non-expiring"):
+    tokens = w.token_management.list()
+    forever = [t for t in tokens if (t.expiry_time or -1) <= 0]
+    record("tokens", len(tokens))
+    record("non_expiring", [{"owner": t.created_by_username, "comment": t.comment} for t in forever])
+    assert not forever, f"{len(forever)} of {len(tokens)} tokens never expire"
+'''
+
+NETWORK_ACCESS = '''"""Network access controls
+
+IP access lists are switched on and at least one ALLOW list is enabled, so the
+workspace only accepts traffic from known networks. The quick-tier identity
+check already catches the dangerous direction (a list that locks out automation).
+Needs a workspace-admin identity.
+"""
+with check("IP access lists are enforced"):
+    conf = w.workspace_conf.get_status(keys="enableIpAccessLists")
+    record("enabled", conf.get("enableIpAccessLists"))
+    assert str(conf.get("enableIpAccessLists")).lower() == "true", "IP access lists are switched off"
+    lists = w.ip_access_lists.list()
+    record("lists", [{"label": l.label, "type": l.list_type, "enabled": l.enabled,
+                      "addresses": l.address_count} for l in lists])
+    allow = [l for l in lists if l.list_type == "ALLOW" and l.enabled]
+    assert allow, "IP access lists are on, but no ALLOW list is enabled"
+'''
+
+USER_ISOLATION = '''"""User isolation
+
+No cluster runs in the No Isolation Shared access mode, where users on the same
+cluster can read each other's data and credentials. Clusters without an access
+mode are legacy clusters with no isolation. Pipeline clusters are managed by
+Databricks and left out. A non-admin identity only sees clusters it can access,
+so run this as a workspace admin.
+"""
+UNISOLATED = (None, "NONE", "LEGACY_PASSTHROUGH")
+
+with check("no cluster runs without user isolation"):
+    clusters = [c for c in w.clusters.list()
+                if c.cluster_source not in ("PIPELINE", "PIPELINE_MAINTENANCE")]
+    unisolated = [c for c in clusters if c.data_security_mode in UNISOLATED]
+    record("clusters", len(clusters))
+    record("unisolated", [{"name": c.cluster_name, "id": c.cluster_id, "mode": c.data_security_mode}
+                          for c in unisolated])
+    assert not unisolated, f"{len(unisolated)} cluster(s) have no user isolation: " + ", ".join(
+        c.cluster_name or c.cluster_id for c in unisolated[:10])
+'''
+
+ADMIN_FOOTPRINT = '''"""Admin footprint
+
+The workspace admins group stays small, and few service principals hold admin.
+The service-principal count is advisory: a validation identity that runs the
+posture suite is itself an admin, and some automation legitimately needs it.
+
+Target tags (or run params):
+  max_workspace_admins           default 10
+  max_admin_service_principals   default 2
+"""
+admins = w.groups.list(filter='displayName eq "admins"', attributes="id,displayName,members")
+members = (admins[0].members or []) if admins else []
+
+with check("the workspace admins group stays small"):
+    limit = int(setting("max_workspace_admins", 10))
+    assert admins, "the workspace has no admins group"
+    record("admins", sorted(m.display or m.value for m in members))
+    assert len(members) <= limit, f"{len(members)} workspace admins; the limit is {limit}"
+
+with check("few service principals are workspace admins", advisory=True):
+    limit = int(setting("max_admin_service_principals", 2))
+    sp_ids = {sp.id for sp in w.service_principals.list(attributes="id,displayName")}
+    admin_sps = [m.display or m.value for m in members
+                 if m.value in sp_ids or str(m.get("$ref") or "").startswith("ServicePrincipals/")]
+    record("admin_service_principals", sorted(admin_sps))
+    assert len(admin_sps) <= limit, f"{len(admin_sps)} service principals are admins; the limit is {limit}"
+'''
 
 
 TESTS: dict[str, TestSpec] = {
-    "sso": TestSpec("SSO enforcement", "Federated single sign-on is enabled.",
-                    [("sso_enabled", "assertion")], ["security", "identity", "posture"]),
-    "isolation": TestSpec("User isolation enforcement",
-                          "No cluster runs under the permissive No Isolation Shared mode.",
-                          [("no_isolation_clusters", "assertion")], ["security", "compute", "posture"]),
     "exfiltration": TestSpec("Exfiltration controls",
                              "Notebook export, results download, and clipboard copy are off.",
-                             [("exfiltration_controls_off", "assertion")], ["security", "posture"]),
+                             tags=["security", "posture"], script=EXFILTRATION),
     "token_hygiene": TestSpec("Token hygiene",
-                              "No non-expiring PATs; a max-lifetime policy is set.",
-                              [("pat_expiry_bounded", "assertion")], ["security", "identity", "posture"]),
-    "admin_count": TestSpec("Workspace-admin count (advisory)",
-                            "Judgement read on whether the admin count looks sane.",
-                            [("admin_count_sane", "assertion")], ["security", "posture", "advisory"]),
+                              "New tokens have a bounded lifetime and no existing token is non-expiring.",
+                              tags=["security", "identity", "posture"], script=TOKEN_HYGIENE),
+    "network_access": TestSpec("Network access controls",
+                               "IP access lists are on and an ALLOW list is enabled.",
+                               tags=["security", "network", "posture"], script=NETWORK_ACCESS),
+    "isolation": TestSpec("User isolation",
+                          "No cluster runs in the permissive No Isolation Shared mode.",
+                          tags=["security", "compute", "posture"], script=USER_ISOLATION),
+    "admin_footprint": TestSpec("Admin footprint",
+                                "The admins group stays small; few service principals are admins.",
+                                tags=["security", "identity", "posture"], script=ADMIN_FOOTPRINT),
 }
 
 
 SUITES: list[SuiteSpec] = [
-    SuiteSpec("Security Posture Suite",
-             "SSO, user isolation, exfiltration controls, and token hygiene — "
-             "plus an advisory read on the workspace-admin count.",
-             ["sso", "isolation", "exfiltration", "token_hygiene", "admin_count"],
-             tags=["seeded", "security", "posture"]),
+    SuiteSpec("Security posture (drift)",
+              "Configuration drift security cares about: exfiltration settings, token hygiene, IP "
+              "access lists, user isolation, admin footprint. Needs a workspace-admin identity; "
+              "never part of the health gate.",
+              ["exfiltration", "token_hygiene", "network_access", "isolation", "admin_footprint"],
+              tags=["seeded", "security", "posture"]),
 ]
 
 
 CONTRIBUTION = Contribution(
-    check_specs=CHECK_SPECS,
     tests=TESTS,
     suites=SUITES,
-    ci_gate_tests=["sso", "isolation", "exfiltration", "token_hygiene"],
 )

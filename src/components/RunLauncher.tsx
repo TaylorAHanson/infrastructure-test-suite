@@ -3,12 +3,14 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, Play, ShieldAlert } from 'lucide-react'
 
 import { useChecks, useSubmitRun, useSuites, useTargets, useTests } from '../hooks/queries'
+import { errorMessage } from '../lib/api'
+import { ALL_TARGETS } from '../lib/format'
 import type { Target } from '../types'
 
-// Launch a Run against the rebuilt Run API (ADR-0005): pick a Suite (blank =
-// every Active Test), a Target (blank = all registered targets — the per-target
-// safety gate still fires per target), and a depth. Depth defaults to `quick`;
-// `full` is an explicit opt-in (ADR-0007).
+// Launch a Run against the rebuilt Run API (ADR-0005): pick a Suite (default:
+// every Active Test), a Target — always an explicit choice, "All targets" or
+// one target (the per-target safety gate still fires per target) — and a depth.
+// Depth defaults to `quick`; `full` is an explicit opt-in (ADR-0007).
 //
 // The friction ceremony for the R2-on-`prod-for-us` safety override (ADR-0004
 // §5/§0010, #81) lives here — the run control — mirroring the safety-class
@@ -18,7 +20,7 @@ import type { Target } from '../types'
 // the override to the same `POST /runs` submission as an ordinary run.
 const CONFIRM_PHRASE = 'i understand'
 
-export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void }) {
+export function RunLauncher({ label, onLaunched }: { label?: string; onLaunched?: (id: string) => void }) {
   const navigate = useNavigate()
   const { data: suites } = useSuites()
   const { data: targets } = useTargets()
@@ -62,29 +64,32 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
   const overrideEligible = !!selectedTarget && selectedTarget.safety_class === 'prod-for-us' && scopeHasR2
 
   async function doSubmit(override?: { target_name: string; reason: string; confirmed: boolean }) {
+    if (!targetId) return
     setError(null)
     try {
       const res = await submit.mutateAsync({
         suite_ids: suiteId ? [suiteId] : [],
-        target_ids: targetId ? [targetId] : [],
+        target_ids: targetId === ALL_TARGETS ? [] : [targetId],
         depth,
-        requested_by: 'ui-user',
         request_source: 'UI_MANUAL',
         ...(override ? { override } : {}),
       })
       if (onLaunched) onLaunched(res.run_id)
       else navigate(`/runs/${res.run_id}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to submit run.')
+      setError(`Couldn't start the run: ${errorMessage(e)}`)
     }
   }
 
+  const enabledTargets = (targets ?? []).filter((t) => t.enabled)
+
   return (
     <div className="card flex flex-wrap items-end gap-3">
+      {label && <span className="row-label">{label}</span>}
       <div className="flex flex-col gap-1">
-        <label className="card-title">Suite (blank = all Active Tests)</label>
-        <select className="input" value={suiteId} onChange={(e) => setSuiteId(e.target.value)}>
-          <option value="">All Tests</option>
+        <label className="card-title" htmlFor="run-suite">Suite</label>
+        <select id="run-suite" className="input" value={suiteId} onChange={(e) => setSuiteId(e.target.value)}>
+          <option value="">All active tests</option>
           {suites?.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}
@@ -93,10 +98,11 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
         </select>
       </div>
       <div className="flex flex-col gap-1">
-        <label className="card-title">Target (blank = all)</label>
-        <select className="input" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
-          <option value="">All targets</option>
-          {targets?.map((t) => (
+        <label className="card-title" htmlFor="run-target">Target</label>
+        <select id="run-target" className="input" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+          <option value="" disabled>Pick a target…</option>
+          <option value={ALL_TARGETS}>All targets ({enabledTargets.length})</option>
+          {enabledTargets.map((t) => (
             <option key={t.id} value={t.id}>
               {t.name}
             </option>
@@ -114,7 +120,12 @@ export function RunLauncher({ onLaunched }: { onLaunched?: (id: string) => void 
           <option value="full">Full (through OPERATE / VERIFY)</option>
         </select>
       </div>
-      <button className="btn btn-accent" onClick={() => doSubmit()} disabled={submit.isPending}>
+      <button
+        className="btn btn-accent"
+        onClick={() => doSubmit()}
+        disabled={submit.isPending || !targetId}
+        title={targetId ? undefined : 'Pick a target first'}
+      >
         <Play size="16" />
         {submit.isPending ? 'Submitting...' : 'Run'}
       </button>

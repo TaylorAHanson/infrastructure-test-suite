@@ -233,11 +233,16 @@ class AuditAction(str, Enum):
     TEST_UPDATE = "test.update"
     TEST_ROLLBACK = "test.rollback"
     TEST_ACCEPT = "test.accept"
+    TEST_DELETE = "test.delete"
+    # A full-depth dry run on a mutating target makes real calls outside any
+    # Run, so the audit log is its only record.
+    TEST_DRY_RUN = "test.dry_run"
     CHECK_CREATE = "check.create"
     CHECK_UPDATE = "check.update"
     CHECK_ROLLBACK = "check.rollback"
     SUITE_CREATE = "suite.create"
     SUITE_UPDATE = "suite.update"
+    SUITE_DELETE = "suite.delete"
     # The human-only safety override, carrying its typed ceremony reason.
     SAFETY_OVERRIDE = "safety.override"
     # Branding edit (presentation-only, no ceremony, but audited — ADR-0013 §6).
@@ -246,6 +251,8 @@ class AuditAction(str, Enum):
     EXAMPLE_PROMOTE = "example.promote"
     # Run-completion webhook sink edit (the sink is itself config, ADR-0016 §2).
     WEBHOOK_CONFIG_CHANGE = "webhook.config.change"
+    # Assistant model / loop settings edit (which model reads targets and drafts code).
+    ASSISTANT_CONFIG_CHANGE = "assistant.config.change"
 
 
 #: The config-plane event types the audit log surfaces. Membership here — not a

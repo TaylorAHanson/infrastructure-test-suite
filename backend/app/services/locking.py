@@ -24,8 +24,10 @@ OSS story clean and correct across replicas.
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Iterator, Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -128,6 +130,72 @@ def heartbeat(
     session.add(lease)
     session.commit()
     return True
+
+
+def restart_deadline(
+    session: Session, target_id: str, holder: str, *, max_duration_seconds: Optional[int] = None
+) -> bool:
+    """Restart ``holder``'s max-run-duration clock as its next unit of work begins.
+
+    The deadline bounds one unit of work (one CheckRun, or one script run) — the
+    same span the reaper times — so a Run working through many units keeps its
+    lease while each unit stays bounded. Returns ``False`` if ``holder`` no longer
+    holds the lease (it was reclaimed); the caller must not start the unit.
+    """
+    settings = _settings()
+    max_dur = (settings.MAX_RUN_DURATION_SECONDS
+               if max_duration_seconds is None else max_duration_seconds)
+    lease = session.get(TargetLease, target_id)
+    if lease is None or lease.holder != holder:
+        return False
+    now = utcnow()
+    lease.heartbeat_at = now
+    lease.expires_at = now + timedelta(seconds=settings.LEASE_TTL_SECONDS)
+    lease.deadline_at = now + timedelta(seconds=max_dur)
+    session.add(lease)
+    session.commit()
+    return True
+
+
+@contextmanager
+def held(target_id: str, holder: str) -> Iterator[bool]:
+    """Hold ``target_id``'s lease for the body, renewing it by heartbeat.
+
+    Yields whether the lease was acquired (``False`` → the caller queues or
+    refuses). On exit the heartbeat stops and the lease is released — a no-op if
+    it was reclaimed meanwhile, so a late holder never frees someone else's lock.
+    """
+    from app.db.session import session_scope
+
+    with session_scope() as session:
+        acquired = acquire(session, target_id, holder)
+    if not acquired:
+        yield False
+        return
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat_until, args=(target_id, holder, stop),
+                            name=f"lease-{target_id}", daemon=True)
+    beat.start()
+    try:
+        yield True
+    finally:
+        stop.set()
+        beat.join(timeout=5)
+        with session_scope() as session:
+            release(session, target_id, holder)
+
+
+def _heartbeat_until(target_id: str, holder: str, stop: threading.Event) -> None:
+    from app.db.session import session_scope
+
+    interval = max(0.1, float(_settings().LEASE_HEARTBEAT_SECONDS))
+    while not stop.wait(interval):
+        try:
+            with session_scope() as session:
+                if not heartbeat(session, target_id, holder):
+                    return  # reclaimed: nothing left to renew
+        except Exception as exc:  # noqa: BLE001 - heartbeat is best-effort
+            logger.warning("Lease heartbeat failed for %s: %s", target_id, exc)
 
 
 def release(session: Session, target_id: str, holder: str) -> bool:

@@ -60,7 +60,7 @@ export default function Audit() {
         />
       </div>
 
-      <div className="card overflow-hidden p-0">
+      <div className="card overflow-x-auto p-0">
         <table className="w-full">
           <thead className="border-b border-edge bg-ink">
             <tr>

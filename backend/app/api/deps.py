@@ -56,31 +56,47 @@ class Actor:
 
     handle: str
     kind: str = "user"
+    #: True when the identity came from a header the Databricks App proxy sets,
+    #: False for the ``actor`` query param or the dev fallback.
+    verified: bool = False
 
     @property
     def is_human(self) -> bool:
         return self.kind == "user"
 
 
-def resolve_actor(request: Request) -> Actor:
+def resolve_actor(request: Request, default: str = DEFAULT_ACTOR) -> Actor:
     """Resolve the caller's host identity (see module docstring for precedence)."""
     for header in _HUMAN_IDENTITY_HEADERS:
         value = request.headers.get(header)
         if value:
-            return Actor(handle=value.strip(), kind="user")
+            return Actor(handle=value.strip(), kind="user", verified=True)
 
     for header in _MACHINE_IDENTITY_HEADERS:
         value = request.headers.get(header)
         if value:
-            return Actor(handle=value.strip(), kind="machine")
+            return Actor(handle=value.strip(), kind="machine", verified=True)
 
     explicit = request.query_params.get("actor")
     if explicit:
         return Actor(handle=explicit, kind="user")
 
-    return Actor(handle=DEFAULT_ACTOR, kind="user")
+    return Actor(handle=default, kind="user")
 
 
 def current_actor(request: Request) -> Actor:
     """FastAPI dependency: the host-identity :class:`Actor` for this request."""
     return resolve_actor(request)
+
+
+def actor_handle(default: str = DEFAULT_ACTOR):
+    """FastAPI dependency factory: the audit handle for this request.
+
+    The forwarded identity always wins, so a deployed app records who really
+    made the change; ``?actor=`` and ``default`` only apply when no proxy header
+    is present (local dev, tests).
+    """
+    def dependency(request: Request) -> str:
+        return resolve_actor(request, default=default).handle
+
+    return dependency

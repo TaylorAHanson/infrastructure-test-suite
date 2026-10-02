@@ -84,7 +84,7 @@ if [ "${RV_LOCAL_DEMO}" != "1" ]; then
   export DATABRICKS_PROFILE="${DATABRICKS_PROFILE:-myenv}"
   export DATABRICKS_CONFIG_PROFILE="${DATABRICKS_PROFILE}"
   export DATABRICKS_WAREHOUSE_ID="${DATABRICKS_WAREHOUSE_ID:-238e4114cdfd555f}"
-  export MODEL_SERVING_ENDPOINT="${MODEL_SERVING_ENDPOINT:-databricks-claude-sonnet-4-5}"
+  export MODEL_SERVING_ENDPOINT="${MODEL_SERVING_ENDPOINT:-databricks-claude-sonnet-5}"
   echo -e "${CYAN}-> live workspace: profile '${DATABRICKS_PROFILE}' (warehouse ${DATABRICKS_WAREHOUSE_ID})${NC}"
   echo -e "${YELLOW}   (set RV_LOCAL_DEMO=1 to force offline/simulated mode)${NC}"
 else

@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from sqlmodel import select
+
 from app.core.enums import Evaluator, RequestSource, RunStatus
 from app.core.ids import utcnow
 from app.db.session import session_scope
-from app.models import Check, CheckRun, Target
+from app.models import Check, CheckRun, Suite, SuiteMember, Target, Test as CatalogTest, TestCheck
 from app.services import findings, retention
 from app.services.rca import LANE_OVERNIGHT, LANE_RECENT
 
@@ -140,6 +142,50 @@ def test_ci_without_commit_or_outside_window_defaults_overnight(client):
     assert {f["check_name"] for f in _lane(feed, LANE_OVERNIGHT)["findings"]} == {"ci no commit", "ci stale"}
 
 
+def test_finding_names_the_test_and_suites_so_a_triager_can_open_them(client):
+    # A finding is a Check result; the triager needs the Test it belongs to
+    # (to edit the assertion / limit) and the Suite it ran in.
+    with session_scope() as s:
+        check, target = _series(s, "few service principals are workspace admins", [_FAIL])
+        test = CatalogTest(name="Admin footprint")
+        suite = Suite(name="Security posture (drift)")
+        s.add(test)
+        s.add(suite)
+        s.commit()
+        s.refresh(test)
+        s.refresh(suite)
+        s.add(TestCheck(test_id=test.id, check_id=check.id, sort_order=0))
+        s.add(SuiteMember(suite_id=suite.id, test_id=test.id, sort_order=0))
+        s.commit()
+        test_id, suite_id = test.id, suite.id
+
+    finding = _lane(_feed(client), LANE_OVERNIGHT)["findings"][0]
+    assert finding["tests"] == [{"id": test_id, "name": "Admin footprint"}]
+    assert finding["suites"] == [{"id": suite_id, "name": "Security posture (drift)"}]
+
+
+def test_finding_prefers_the_test_that_ran_when_a_check_is_shared(client):
+    with session_scope() as s:
+        check, target = _series(s, "shared check", [_FAIL])
+        ran = CatalogTest(name="The test that ran")
+        other = CatalogTest(name="Another test sharing the check")
+        s.add(ran)
+        s.add(other)
+        s.commit()
+        s.refresh(ran)
+        s.refresh(other)
+        s.add(TestCheck(test_id=ran.id, check_id=check.id, sort_order=0))
+        s.add(TestCheck(test_id=other.id, check_id=check.id, sort_order=0))
+        run = s.exec(select(CheckRun).where(CheckRun.check_id == check.id)).one()
+        run.test_id = ran.id
+        s.add(run)
+        s.commit()
+        ran_id = ran.id
+
+    finding = _lane(_feed(client), LANE_OVERNIGHT)["findings"][0]
+    assert finding["tests"] == [{"id": ran_id, "name": "The test that ran"}]
+
+
 def test_finding_exposes_bucket_at_stage(client):
     with session_scope() as s:
         _series(s, "bucketed", [
@@ -148,6 +194,7 @@ def test_finding_exposes_bucket_at_stage(client):
 
     finding = _lane(_feed(client), LANE_OVERNIGHT)["findings"][0]
     assert finding["bucket_at_stage"] == "PERMISSION_DENIED @ AUTHORIZE"
+    assert finding["failure_label"] == "Permission denied"
     assert finding["failure_bucket"] == "PERMISSION_DENIED"
     assert finding["failure_stage"] == "AUTHORIZE"
 
