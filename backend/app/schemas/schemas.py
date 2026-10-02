@@ -68,6 +68,12 @@ class TestCreate(BaseModel):
     check_ids: list[str] = Field(default_factory=list)
 
 
+class TestCheckEdit(CheckUpdate):
+    """A member Check's content edit made *through* its Test (#118)."""
+
+    check_id: str
+
+
 class TestUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -76,6 +82,9 @@ class TestUpdate(BaseModel):
     members: Optional[list[TestCheckIn]] = None
     check_ids: Optional[list[str]] = None
     enabled: Optional[bool] = None
+    #: Content edits to member Checks, applied with the Test edit as one new
+    #: Test version that pins the edited Checks' new versions.
+    check_edits: Optional[list[TestCheckEdit]] = None
 
 
 # --------------------------- Suites ----------------------------

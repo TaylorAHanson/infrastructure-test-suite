@@ -33,7 +33,7 @@ from app.services import agentic_evaluator, assistant, rca, run_service
 from app.services import suite_safety as _suite_safety
 from app.services.assistant import get_model_call
 from app.services.audit import record_audit
-from app.services import versioning
+from app.services import pinned_versions, versioning
 from app.core.ids import utcnow
 
 router = APIRouter()
@@ -56,7 +56,7 @@ def commit_draft(payload: DraftCommitIn,
         test = assistant.commit_draft(session, payload, actor=actor)
     except OperationBlocked as exc:
         raise HTTPException(422, str(exc))
-    return assistant.test_snapshot(session, test)
+    return pinned_versions.test_read(session, test)
 
 
 @router.post("/rca")
