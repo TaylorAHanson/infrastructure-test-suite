@@ -1,16 +1,16 @@
-import { Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 
 import Layout from './components/Layout'
 import WhatsInteresting from './pages/WhatsInteresting'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
-import TestCatalog from './pages/TestCatalog'
-import TestStudio from './pages/TestStudio'
-import Suites from './pages/Suites'
+import Tests from './pages/Tests'
 import Targets from './pages/Targets'
 import Schedules from './pages/Schedules'
 import Audit from './pages/Audit'
-import Admin from './pages/Admin'
+import Branding from './pages/Branding'
+import Notifications from './pages/Notifications'
+import ReleaseNotes from './pages/ReleaseNotes'
 
 export default function App() {
   return (
@@ -19,17 +19,26 @@ export default function App() {
         <Route index element={<WhatsInteresting />} />
         <Route path="runs" element={<Runs />} />
         <Route path="runs/:runId" element={<RunDetail />} />
-        <Route path="tests" element={<TestCatalog />} />
-        <Route path="studio" element={<TestStudio />} />
-        <Route path="authoring" element={<TestStudio />} />
-        <Route path="suites" element={<Suites />} />
-        <Route path="targets" element={<Targets />} />
-        <Route path="schedules" element={<Schedules />} />
+        <Route path="tests" element={<Tests />} />
+        <Route path="audit" element={<Audit />} />
+        <Route path="settings">
+          <Route index element={<Navigate to="branding" replace />} />
+          <Route path="branding" element={<Branding />} />
+          <Route path="targets" element={<Targets />} />
+          <Route path="schedules" element={<Schedules />} />
+          <Route path="notifications" element={<Notifications />} />
+          <Route path="release-notes" element={<ReleaseNotes />} />
+        </Route>
         {/* Legacy /analytics path kept as an alias so the run-completion webhook's
             deep link (ADR-0016) still lands on the "What's Interesting" view. */}
         <Route path="analytics" element={<WhatsInteresting />} />
-        <Route path="audit" element={<Audit />} />
-        <Route path="admin" element={<Admin />} />
+        {/* Pages folded into Tests or Settings — kept as redirects so old links land. */}
+        <Route path="studio" element={<Navigate to="/tests" replace />} />
+        <Route path="authoring" element={<Navigate to="/tests" replace />} />
+        <Route path="suites" element={<Navigate to="/tests" replace />} />
+        <Route path="targets" element={<Navigate to="/settings/targets" replace />} />
+        <Route path="schedules" element={<Navigate to="/settings/schedules" replace />} />
+        <Route path="admin" element={<Navigate to="/settings" replace />} />
       </Route>
     </Routes>
   )

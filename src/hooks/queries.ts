@@ -11,6 +11,7 @@ import type {
   CheckRunRow,
   FindingsFeed,
   PageContext,
+  ReleaseNotes,
   RunRequestOut,
   RunRequestSummary,
   SafetyClass,
@@ -292,6 +293,14 @@ export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): s
 
 export const useAdminSettings = () =>
   useQuery({ queryKey: ['admin'], queryFn: () => api.get<Record<string, unknown>>('/admin/settings') })
+
+/** Release notes ship with the code, so they only change on a deploy — fetch once. */
+export const useReleaseNotes = () =>
+  useQuery({
+    queryKey: ['release-notes'],
+    queryFn: () => api.get<ReleaseNotes>('/admin/release-notes'),
+    staleTime: Infinity,
+  })
 
 // ---------------- Branding (runtime white-label; ADR-0013 / #38) ----------------
 /** The global branding record. The shell reads it on load and this **poll**

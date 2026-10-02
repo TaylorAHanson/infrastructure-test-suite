@@ -103,6 +103,8 @@ tests/              backend tests (registry, safety gate, locking, run
 databricks.yml      Databricks Asset Bundle (Lakebase, App, Job, targets)
 app.yaml            direct-deploy app config (bundle config.command supersedes)
 dev.sh              local dev (backend + Vite, auto-selecting free ports)
+RELEASE_NOTES.md    per-version release notes (rendered under Settings → Release
+                    notes; newest must match APP_VERSION)
 ```
 
 ## Local development
@@ -179,5 +181,5 @@ Four Handlers ship live — `databricks_sdk` (open-SDK: any Databricks SDK/API
 call, bounded by the blocklist), `sql_warehouse`, `outbound_http`, and
 `lakebase` (see [`backend/app/handlers/builtin`](backend/app/handlers/builtin)).
 The repo ships a worked-example library of Checks, Tests, and Suites built on
-those four Handlers — Test Studio and the Assistant are how you grow the
+those four Handlers — the Tests page and the Assistant are how you grow the
 catalog from there; a new Test does not require a new Handler.

@@ -1,17 +1,20 @@
-import { useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
+  Bell,
   CalendarClock,
+  ChevronRight,
   ClipboardList,
   Compass,
   Database,
   FlaskConical,
-  Layers,
   ListChecks,
+  Palette,
+  ScrollText,
   Settings,
   ShieldAlert,
-  Sparkles,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 
 import { useAdminSettings, useBranding } from '../hooks/queries'
 import { AssistantProvider } from '../lib/assistantContext'
@@ -19,17 +22,44 @@ import { useApplyBranding } from '../lib/branding'
 import { useShelfWidth } from '../hooks/useShelfWidth'
 import AssistantShelf from './AssistantShelf'
 
-const NAV = [
+interface NavItem {
+  to: string
+  label: string
+  icon: LucideIcon
+  end?: boolean
+}
+
+const NAV: NavItem[] = [
   { to: '/', label: "What's Interesting", icon: Compass, end: true },
   { to: '/runs', label: 'Runs', icon: ListChecks },
-  { to: '/tests', label: 'Test Catalog', icon: FlaskConical },
-  { to: '/studio', label: 'Test Studio', icon: Sparkles },
-  { to: '/suites', label: 'Suites', icon: Layers },
-  { to: '/targets', label: 'Targets & Catalogs', icon: Database },
-  { to: '/schedules', label: 'Schedules', icon: CalendarClock },
+  { to: '/tests', label: 'Tests', icon: FlaskConical },
   { to: '/audit', label: 'Audit Log', icon: ClipboardList },
-  { to: '/admin', label: 'Admin & Settings', icon: Settings },
 ]
+
+// Configuration the day-to-day flow rarely needs, tucked into one collapsible
+// group (collapsed by default; it opens itself while you're on a settings page).
+const SETTINGS_NAV: NavItem[] = [
+  { to: '/settings/branding', label: 'Branding', icon: Palette },
+  { to: '/settings/targets', label: 'Targets', icon: Database },
+  { to: '/settings/schedules', label: 'Schedules', icon: CalendarClock },
+  { to: '/settings/notifications', label: 'Notifications', icon: Bell },
+  { to: '/settings/release-notes', label: 'Release notes', icon: ScrollText },
+]
+
+function NavItemLink({ item, rail }: { item: NavItem; rail: boolean }) {
+  const { to, label, icon: Icon, end } = item
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      title={rail ? label : undefined}
+      className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''} ${rail ? 'justify-center' : ''}`}
+    >
+      <Icon size="16" />
+      {!rail && label}
+    </NavLink>
+  )
+}
 
 export default function Layout() {
   const { data: admin } = useAdminSettings()
@@ -47,6 +77,12 @@ export default function Layout() {
   const [shelfOpen, setShelfOpen] = useState(false)
   const { width, collapsed, startResize } = useShelfWidth()
   const navCollapsed = shelfOpen && collapsed
+
+  const inSettings = useLocation().pathname.startsWith('/settings')
+  const [settingsOpen, setSettingsOpen] = useState(inSettings)
+  useEffect(() => {
+    if (inSettings) setSettingsOpen(true)
+  }, [inSettings])
 
   return (
     <AssistantProvider>
@@ -77,20 +113,36 @@ export default function Layout() {
             )}
           </div>
           <nav className="flex flex-1 flex-col gap-1">
-            {NAV.map(({ to, label, icon: Icon, end }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={end}
-                title={navCollapsed ? label : undefined}
-                className={({ isActive }) =>
-                  `nav-link ${isActive ? 'nav-link-active' : ''} ${navCollapsed ? 'justify-center' : ''}`
-                }
-              >
-                <Icon size="16" />
-                {!navCollapsed && label}
-              </NavLink>
+            {NAV.map((item) => (
+              <NavItemLink key={item.to} item={item} rail={navCollapsed} />
             ))}
+
+            <div className="mt-auto border-t border-edge pt-3">
+              <button
+                type="button"
+                onClick={() => setSettingsOpen((o) => !o)}
+                aria-expanded={settingsOpen}
+                title={navCollapsed ? 'Settings' : undefined}
+                className={`nav-link w-full ${inSettings && !settingsOpen ? 'nav-link-active' : ''} ${
+                  navCollapsed ? 'justify-center' : ''
+                }`}
+              >
+                <Settings size="16" />
+                {!navCollapsed && (
+                  <>
+                    Settings
+                    <ChevronRight size="14" className={`ml-auto transition-transform ${settingsOpen ? 'rotate-90' : ''}`} />
+                  </>
+                )}
+              </button>
+              {settingsOpen && (
+                <div className={`mt-1 flex flex-col gap-1 ${navCollapsed ? '' : 'ml-4 border-l border-edge pl-2'}`}>
+                  {SETTINGS_NAV.map((item) => (
+                    <NavItemLink key={item.to} item={item} rail={navCollapsed} />
+                  ))}
+                </div>
+              )}
+            </div>
           </nav>
           {!navCollapsed && (
             <div className="mt-4 rounded-lg border border-edge bg-panel p-3 text-[11px] text-muted">

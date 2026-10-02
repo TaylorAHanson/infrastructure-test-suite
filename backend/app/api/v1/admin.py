@@ -1,9 +1,11 @@
-"""Admin / settings endpoints: seed + purge + registry introspection."""
+"""Admin / settings endpoints: seed + purge + registry introspection + release notes."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
+from app.core.config import get_settings
+from app.core.release_notes import load_release_notes
 from app.core.stages import ordered_stages
 from app.core.taxonomy import all_buckets
 from app.db.session import get_session
@@ -38,6 +40,16 @@ def get_admin_settings(session: Session = Depends(get_session)) -> dict:
             "targets": len(session.exec(select(Target)).all()),
             "check_runs": len(session.exec(select(CheckRun)).all()),
         },
+    }
+
+
+@router.get("/release-notes")
+def get_release_notes() -> dict:
+    """The shipped ``RELEASE_NOTES.md``, newest release first, plus the running
+    version so the page can mark which release is deployed."""
+    return {
+        "current_version": get_settings().APP_VERSION,
+        "releases": [r.to_dict() for r in load_release_notes()],
     }
 
 

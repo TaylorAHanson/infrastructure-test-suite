@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 
 import { useAssistantContext } from '../lib/assistantContext'
+import type { AssistantMode } from '../lib/assistantContext'
 import {
   useAssistantTurn,
   useBranding,
@@ -45,6 +46,10 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   // Set when a seed request arrives while the input isn't mounted yet; the
   // focus effect below consumes it once the shelf has opened and rendered.
   const pendingFocus = useRef(false)
+  // The capability a seeded conversation asked for (e.g. "New suite" → suite
+  // mode). It sticks across follow-up turns until another entry point re-seeds
+  // with a different mode, or the user moves to another page.
+  const [mode, setMode] = useState<AssistantMode>('auto')
   const turn = useAssistantTurn()
   const commit = useCommitDraft()
   const confirmSuite = useConfirmCreateSuite()
@@ -70,7 +75,10 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   const [applyRole, setApplyRole] = useState(false)
   const [applySuite, setApplySuite] = useState(false)
 
-  // A seed request from any entry point (e.g. Test Studio's "New" button) opens
+  // Declared before the seed effect so a seed that lands with a page change wins.
+  useEffect(() => setMode('auto'), [pageContext.page])
+
+  // A seed request from any entry point (e.g. the Tests page's "Describe a new test" button) opens
   // the shelf and pre-fills the input with an editable starting sentence — not
   // gated on the conversation being empty, so it works mid-session too. Prior
   // results are cleared so the seeded turn starts clean; we never auto-send, so
@@ -79,6 +87,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     if (!seedPrompt) return
     onOpen()
     setText(seedPrompt.text)
+    if (seedPrompt.mode) setMode(seedPrompt.mode)
     setDraft(null)
     setRca(null)
     setSuiteProposal(null)
@@ -122,7 +131,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     setApplyRole(false)
     setApplySuite(false)
     try {
-      const res = await turn.mutateAsync({ turn: text, page_context: pageContext })
+      const res = await turn.mutateAsync({ turn: text, page_context: pageContext, mode })
       if (res.mode === 'authoring') setDraft(res.draft ?? null)
       else if (res.mode === 'suite_authoring') {
         setSuiteProposal(res.suite_proposal ?? null)
@@ -237,7 +246,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
       <div className="flex items-center gap-2 border-b border-edge p-4">
         <Sparkles size="18" className="text-accent" />
         <span className="text-sm font-semibold text-white">{assistantName}</span>
-        <span className="badge bg-panel text-muted">{pageContext.page || 'app'}</span>
+        <span className="badge bg-panel text-muted">{mode === 'suite' ? 'suite' : pageContext.page || 'app'}</span>
         <button className="ml-auto text-muted hover:text-white" onClick={onClose}>
           <X size="18" />
         </button>
@@ -501,7 +510,7 @@ function DraftView({
 
       {draft.checks.length > 0 && (
         <button className="btn btn-accent w-full" onClick={onSave} disabled={saving || !!savedId}>
-          {savedId ? 'Saved as Draft ✓ (accept it in Test Studio to run)' : saving ? 'Saving…' : 'Save as Draft'}
+          {savedId ? 'Saved as Draft ✓ (accept it on the Tests page to run)' : saving ? 'Saving…' : 'Save as Draft'}
         </button>
       )}
     </div>
