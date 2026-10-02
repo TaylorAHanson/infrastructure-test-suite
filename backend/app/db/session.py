@@ -138,14 +138,19 @@ def get_engine() -> Engine:
 
 
 def create_all() -> None:
-    """Create tables for local/dev convenience.
+    """Bring the schema up to date.
 
-    Production schema changes go through Alembic migrations; this is a
-    safety net so SQLite local dev and first-boot demo mode just work.
+    On Postgres the Alembic migrations run first (``app.db.migrate``). Creating
+    missing tables and nullable columns follows as a safety net, and is all
+    SQLite local dev and the tests use.
     """
     import app.models  # noqa: F401  ensure models are registered
 
     engine = get_engine()
+    if engine.dialect.name == "postgresql":
+        from app.db.migrate import migrate_schema
+
+        migrate_schema(engine)
     SQLModel.metadata.create_all(engine)
     _add_missing_nullable_columns(engine)
 

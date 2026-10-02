@@ -1,8 +1,9 @@
 """Alembic environment.
 
-Resolves the database URL from app settings so migrations target SQLite locally
-and Lakebase Postgres on Databricks. For Lakebase, the OAuth token is injected
-via the same ``do_connect`` listener the app uses.
+The app migrates at startup (``app.db.migrate``) and hands over its connection
+in ``config.attributes["connection"]``. Run from the CLI, this uses the app's
+engine, so migrations target SQLite locally and Lakebase Postgres on Databricks
+with the same OAuth token injection and ``search_path`` the app uses.
 """
 from __future__ import annotations
 
@@ -11,35 +12,27 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, event, pool
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
 
-from app.core.config import settings  # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.db.migrate import version_table_schema  # noqa: E402
 from sqlmodel import SQLModel  # noqa: E402
 import app.models  # noqa: F401,E402  register all tables
 
 config = context.config
-if config.config_file_name is not None:
+# Only the CLI configures logging; the app has its own.
+if config.config_file_name is not None and "connection" not in config.attributes:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", settings.sqlalchemy_url())
 target_metadata = SQLModel.metadata
-
-
-def _maybe_attach_token(engine) -> None:
-    if not settings.using_postgres:
-        return
-    from app.db.session import _fresh_lakebase_token
-
-    @event.listens_for(engine, "do_connect")
-    def _inject(dialect, conn_rec, cargs, cparams):  # noqa: ANN001
-        cparams["password"] = _fresh_lakebase_token()
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.sqlalchemy_url(),
+        url=get_settings().sqlalchemy_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -48,17 +41,22 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run(connection) -> None:  # noqa: ANN001
+    context.configure(connection=connection, target_metadata=target_metadata,
+                      version_table_schema=version_table_schema(connection))
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-    _maybe_attach_token(connectable)
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+    connection = config.attributes.get("connection")
+    if connection is not None:
+        _run(connection)
+        return
+    from app.db.session import get_engine
+
+    with get_engine().connect() as connection:
+        _run(connection)
 
 
 if context.is_offline_mode():

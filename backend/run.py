@@ -15,8 +15,10 @@ import sys
 def main() -> None:
     # Resolve the python executable to an ABSOLUTE path BEFORE chdir. On
     # Databricks Apps sys.executable is a relative path (".venv/bin/python"),
-    # which breaks once we change directories - so capture it up front.
+    # which breaks once we change directories - so capture it up front, and
+    # replace sys.executable so the script runtime's subprocesses find it too.
     python_exe = os.path.abspath(sys.executable)
+    sys.executable = python_exe
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)

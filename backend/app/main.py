@@ -50,7 +50,7 @@ def _start_poller_thread() -> None:
 async def lifespan(app: FastAPI):
     logger.info("Starting %s v%s (env=%s)", settings.PROJECT_NAME, settings.APP_VERSION, settings.ENVIRONMENT)
 
-    # Ensure schema exists (Alembic owns prod migrations; this is a safety net).
+    # Bring the schema up to date (Alembic migrations on Postgres, then a safety net).
     try:
         from app.db.session import create_all
 

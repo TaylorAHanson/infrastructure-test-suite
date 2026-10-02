@@ -61,6 +61,8 @@ resources:
             value: "/api/v1"
           - name: SEED_ON_STARTUP
             value: "${var.seed_on_startup}"
+          - name: DB_SCHEMA
+            value: "${var.db_schema}"
           - name: POLLER_ENABLED
             value: "true"
           - name: POLLER_INTERVAL_SECONDS
@@ -197,6 +199,7 @@ sync:
     - backend/__pycache__/**
     - backend/**/__pycache__/**
     - backend/**/*.pyc
+    - "**/.pytest_cache/**"
     - backend/*.db
     - backend/.env
     - backend/.env.*
@@ -223,6 +226,9 @@ variables:
   seed_on_startup:
     description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets stay off."
     default: "true"
+  db_schema:
+    description: "Postgres schema the app creates its tables in, inside the Lakebase database"
+    default: "regression"
   otel_enabled:
     description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
     default: "true"
@@ -246,3 +252,6 @@ targets:
     variables:
       app_name: "regression-validation-dev"
       environment: "dev"
+      # `regression` holds tables from releases older than the current models,
+      # which startup can't migrate; it's left in place and can be dropped.
+      db_schema: "regression_v2"
