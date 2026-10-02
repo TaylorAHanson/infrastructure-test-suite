@@ -28,7 +28,7 @@ import sys
 import time
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import AlreadyExists, NotFound, ResourceAlreadyExists
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service import catalog as uc
 from databricks.sdk.service.sql import State, StatementState
 
@@ -91,10 +91,11 @@ def main() -> None:
     health, scratch = f"{cat}.{args.health_schema}", f"{cat}.{args.scratch_schema}"
     for schema in (args.health_schema, args.scratch_schema):
         try:
+            w.schemas.get(f"{cat}.{schema}")
+            print(f"  schema {cat}.{schema} exists")
+        except NotFound:
             w.schemas.create(name=schema, catalog_name=cat)
             print(f"  created schema {cat}.{schema}")
-        except (AlreadyExists, ResourceAlreadyExists):
-            print(f"  schema {cat}.{schema} exists")
 
     _sql(w, warehouse, f"CREATE TABLE IF NOT EXISTS {health}.ping (id INT, note STRING)")
     _sql(w, warehouse, f"INSERT OVERWRITE {health}.ping VALUES (1, 'canary')")
