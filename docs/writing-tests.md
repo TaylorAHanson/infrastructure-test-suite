@@ -26,13 +26,17 @@ workspace; the run supplies one.
 - an `assert` is false. This is how you say "this must be true", e.g.
   `assert "payroll" in names`. Add a message after a comma to explain the
   failure, e.g. `assert "payroll" in names, f"found only {names}"`.
-- a Databricks call fails. For example, a permission error fails the check at
-  the AUTHORIZE stage, and any other API error fails it at OPERATE.
+- a Databricks call fails. A permission error fails the check at the
+  AUTHORIZE stage, an expired or invalid identity at AUTHENTICATE, and any other
+  API error at OPERATE.
 
 A failed check doesn't stop the script: the next check still runs. If a check
 only calls an API and never asserts anything, it only proves the call works.
 Name it for that ("warehouses can be listed"), or add the assert that proves its
-name.
+name. The bundled health Tests are good models: open any of them in the editor.
+
+The editor warns about a check with no `assert` (or `skip()`), because its
+name usually claims more than "the call worked".
 
 A check's name is its identity. Its run history follows the name, so rename a
 check only when it now means something different. Names must be unique literal
@@ -56,7 +60,11 @@ refusal you expect:
 | --- | --- |
 | `"AUTHORIZE"` (default) | a permission is denied |
 | `"CONNECT"` | the network refuses: DNS, connection or TLS |
-| `"OPERATE"` | any API error |
+| `"OPERATE"` | a permission denial or any other API error |
+
+An authentication failure or an outage never counts as the denial you asked
+for: if the identity's token has expired, or DNS is down, the check fails and
+says so instead of passing.
 
 ```python
 with expect_deny("the public internet is blocked", at="CONNECT"):
@@ -69,7 +77,7 @@ with expect_deny("the public internet is blocked", at="CONNECT"):
 | --- | --- |
 | `w` | The Databricks SDK `WorkspaceClient`, signed in as the Target's identity. Use keyword arguments: `w.clusters.get(cluster_id="…")`. |
 | `w.api.get(path, query=…)` | Raw REST for anything the SDK doesn't cover. Also `post`, `put`, `patch` and `delete`. Paths start with `/api/`. |
-| `sql(statement)` | Runs a statement on a SQL warehouse and returns rows as dicts. It uses `warehouse_id=` if given, then the Target's `warehouse_id` tag, then the first running warehouse. |
+| `sql(statement)` | Runs a statement on a SQL warehouse and returns rows as dicts (values are strings). It uses `warehouse_id=` if given, then the Target's `warehouse_id` tag, then a running or serverless warehouse. A statement still running after `timeout` (30 s) is polled until it finishes or `max_wait` (300 s) passes, so a cold warehouse doesn't fail the check. A permission error raises `PermissionDenied` and a missing table `NotFound`. |
 | `http(url, method="GET")` | Makes a request from the platform's network to prove an egress path is open. Returns `status_code`, `headers` and `text`. |
 
 Results behave like dicts with attribute access, so `cluster.cluster_id` and
@@ -97,11 +105,33 @@ instead, and `print()` output appears under **Output** in a dry run.
 | --- | --- |
 | `target` | The Target being tested: `name`, `workspace_name`, `host`, `safety_class`, `tags` and `roles`. |
 | `depth` | `"quick"` or `"full"`. |
-| `params` | Per-run parameters. Empty unless the run supplies some, so read them with a default: `params.get("catalog", "main")`. |
+| `params` | Per-run parameters. Empty unless the run supplies some. |
+
+## Settings and skipping
+
+One script serves every Target, so anything that differs between workspaces (a
+catalog name, an expected metastore id, a warehouse) belongs in the Target's
+**tags**, read with `setting()`:
+
+```python
+CATALOG = setting("canary_catalog", "validation_canary")
+
+with check("the expected metastore is assigned"):
+    expected = setting("expected_metastore_id")
+    if not expected:
+        skip("set an expected_metastore_id tag on the target")
+    assert w.metastores.current().metastore_id == expected
+```
+
+`setting(key, default)` returns the run parameter `key` if the run supplies
+one, else the Target's tag `key`, else `default`. `skip(reason)` ends the
+current check as **skipped**. A skipped check neither passes nor fails a run,
+and its reason is shown with the result. Use it when a Target isn't configured
+for a check, rather than letting the check pass vacuously.
 
 You can catch these exceptions to handle an expected failure yourself:
-`ApiError`, `PermissionDenied`, `NotFound`, `ConnectionFailed`, `SafetyBlocked`
-and `DepthSkipped`.
+`ApiError`, `PermissionDenied`, `Unauthenticated`, `NotFound`,
+`ConnectionFailed`, `SafetyBlocked` and `DepthSkipped`.
 
 ## Safety
 

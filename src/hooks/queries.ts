@@ -248,15 +248,6 @@ export const useRollbackTest = () => {
   })
 }
 
-export const usePromoteExample = () => {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (testId: string) =>
-      api.post<{ id: string }>('/assistant/examples/promote', { test_id: testId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['examples'] }),
-  })
-}
-
 export const useExamples = () =>
   useQuery({ queryKey: ['examples'], queryFn: () => api.get<WorkedExample[]>('/assistant/examples') })
 

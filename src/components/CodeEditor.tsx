@@ -107,11 +107,19 @@ const GLOBALS: Completion[] = [
   }),
   snippetCompletion('record("${key}", ${value})', { label: 'record', type: 'function', detail: 'record(key, value)', info: 'Attach evidence to the current check.' }),
   snippetCompletion('log(${})', { label: 'log', type: 'function', detail: 'log(*parts)', info: 'A run-log line.' }),
+  snippetCompletion('setting("${key}", ${default})', {
+    label: 'setting', type: 'function', detail: 'setting(key, default)',
+    info: "A run param, else the target's tag of the same name, else the default.",
+  }),
+  snippetCompletion('skip("${reason}")', {
+    label: 'skip', type: 'function', detail: 'skip(reason)',
+    info: "End the current check as skipped, e.g. the target isn't configured for it.",
+  }),
   { label: 'w', type: 'variable', detail: 'WorkspaceClient', info: 'Databricks SDK client, as the target identity. Keyword args only.' },
   { label: 'target', type: 'variable', detail: '{name, host, safety_class, tags, roles}' },
   { label: 'depth', type: 'variable', detail: '"quick" | "full"' },
   { label: 'params', type: 'variable', detail: 'per-run parameters' },
-  ...['ApiError', 'PermissionDenied', 'NotFound', 'ConnectionFailed', 'SafetyBlocked', 'DepthSkipped'].map(
+  ...['ApiError', 'PermissionDenied', 'Unauthenticated', 'NotFound', 'ConnectionFailed', 'SafetyBlocked', 'DepthSkipped'].map(
     (label) => ({ label, type: 'class' }) as Completion,
   ),
 ]

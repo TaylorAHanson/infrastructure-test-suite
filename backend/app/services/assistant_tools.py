@@ -137,9 +137,16 @@ def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:
     } for ex in hits[:limit]]
 
 
+#: Per-field weight for :func:`search_tests` ranking. Each query term scores the
+#: best field it appears in, so script text only breaks ties and surfaces Tests
+#: that nothing more descriptive matched.
+_TEST_FIELD_WEIGHTS = (("name", 4), ("tags", 3), ("description", 2), ("checks", 2), ("script", 1))
+
+
 def search_tests(session: Session, query: str = "", status: Optional[str] = None,
                  limit: int = 10) -> list[dict]:
-    """Search Tests (and their member Checks) by name, description, operation, tags, status.
+    """Search Tests (and their member Checks) by name, description, operation, tags,
+    script text and status, ranked by where the terms matched (:data:`_TEST_FIELD_WEIGHTS`).
 
     ``operation_summary`` reflects the first member Check's operation; use
     ``check_count`` to know when a Test has more.
@@ -154,30 +161,38 @@ def search_tests(session: Session, query: str = "", status: Optional[str] = None
             checks_by_test.setdefault(tc.test_id, []).append(all_checks[tc.check_id])
 
     terms = _tokenize_query(query)
-    results: list[dict] = []
+    scored: list[tuple[int, dict]] = []
     for test in tests:
         if status and status != "all" and test.status.value != status:
             continue
         checks = checks_by_test.get(test.id, [])
-        ops_text = " ".join(
-            f"{c.operation.get('service', '')}.{c.operation.get('method', '')} "
-            f"{c.display_name} {c.description}"
-            for c in checks
-        )
-        hay = " ".join([test.name, test.description, " ".join(test.tags or []),
-                        ops_text]).lower()
-        if terms and not any(t in hay for t in terms):
+        fields = {
+            "name": test.name,
+            "tags": " ".join(test.tags or []),
+            "description": test.description,
+            "checks": " ".join(
+                f"{c.operation.get('service', '')}.{c.operation.get('method', '')} "
+                f"{c.display_name} {c.description}"
+                for c in checks),
+            "script": test.script or "",
+        }
+        fields = {k: v.lower() for k, v in fields.items()}
+        score = sum(
+            max((weight for field, weight in _TEST_FIELD_WEIGHTS if term in fields[field]), default=0)
+            for term in terms)
+        if terms and score == 0:
             continue
         op_summary = None
         if checks:
             op = checks[0].operation or {}
             op_summary = f"{op.get('service', '')}.{op.get('method', '')}".strip(".")
-        results.append({
+        scored.append((score, {
             "id": test.id, "name": test.name, "description": test.description,
             "tags": test.tags or [], "status": test.status.value,
             "operation_summary": op_summary, "check_count": len(checks),
-        })
-    return results[:limit]
+        }))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [result for _, result in scored[:limit]]
 
 
 def operation_reference(service: str, method: str) -> Optional[dict]:

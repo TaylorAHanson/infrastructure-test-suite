@@ -13,7 +13,6 @@ import {
   Plus,
   Search,
   Sparkles,
-  Star,
   Undo2,
 } from 'lucide-react'
 
@@ -24,7 +23,6 @@ import {
   useAcceptTest,
   useAdminSettings,
   useChecks,
-  usePromoteExample,
   useRollbackTest,
   useStudioTests,
   useSuites,
@@ -290,9 +288,7 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
   const navigate = useNavigate()
   const accept = useAcceptTest()
   const rollback = useRollbackTest()
-  const promote = usePromoteExample()
   const { data: versions } = useTestVersions(test.id)
-  const [promoted, setPromoted] = useState(false)
   const [showScript, setShowScript] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const toggle = (checkId: string) =>
@@ -314,23 +310,14 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
           <span className="badge bg-ink-soft text-muted">v{test.version}</span>
           {test.run_as_role && <span className="badge bg-ink-soft text-accent">run-as: {test.run_as_role}</span>}
           <div className="ml-auto flex gap-2">
-            <button className="btn" onClick={() => navigate(`/tests/${test.id}/edit`)}>
-              <Code2 size="15" /> {test.script ? 'Open in editor' : 'Edit as script'}
-            </button>
             {test.status === 'draft' && (
-              <button className="btn btn-accent" onClick={() => accept.mutate(test.id)} disabled={accept.isPending}>
+              <button className="btn" onClick={() => accept.mutate(test.id)} disabled={accept.isPending}>
                 <CheckCircle2 size="15" /> Accept → Active
               </button>
             )}
-            {test.status === 'active' && (
-              <button
-                className="btn"
-                onClick={() => promote.mutate(test.id, { onSuccess: () => setPromoted(true) })}
-                disabled={promote.isPending || promoted}
-              >
-                <Star size="15" /> {promoted ? 'Promoted ✓' : 'Promote to examples'}
-              </button>
-            )}
+            <button className="btn btn-accent" onClick={() => navigate(`/tests/${test.id}/edit`)}>
+              <Code2 size="15" /> {test.script ? 'Open in editor' : 'Edit as script'}
+            </button>
           </div>
         </div>
         {test.description && <p className="mt-2 text-sm text-muted">{test.description}</p>}

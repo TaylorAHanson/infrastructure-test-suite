@@ -574,6 +574,23 @@ def test_search_tests_returns_seeded_checks(client):
         assert "id" in r and "name" in r and "status" in r and "check_count" in r
 
 
+def test_search_tests_matches_script_text_below_name(client):
+    # Script text is searchable, but a hit there ranks below a name/description hit.
+    from app.db.session import session_scope
+    from app.models import Test
+    from app.services.assistant_tools import search_tests
+
+    with session_scope() as s:
+        s.add(Test(name="Zorblax grants audit", description="checks zorblax grants"))
+        s.add(Test(name="Catalog sweep", description="walks catalogs",
+                   script='with check("sweep"):\n    w.grants.get(full_name="zorblax")\n'))
+        s.commit()
+        results = search_tests(s, query="zorblax")
+
+    names = [r["name"] for r in results]
+    assert names[:2] == ["Zorblax grants audit", "Catalog sweep"]
+
+
 def test_search_tests_filters_by_status(client):
     # status filter works: passing "active" returns only active tests.
     from app.services.assistant_tools import search_tests

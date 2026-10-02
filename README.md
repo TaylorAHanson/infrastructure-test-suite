@@ -140,6 +140,22 @@ Build the production frontend bundle (into `backend/static`):
 npm install && npm run build
 ```
 
+### Operator guide
+
+The user-facing docs (quickstarts, operations manual, glossary, ADRs) are a
+[VitePress](https://vitepress.dev) site whose source is [`docs/`](docs/). The app
+serves it at **`/guide/`** (the **Docs** link in the sidebar); `npm run build`
+renders it into `backend/static/guide`. `dev.sh` runs it with live reload, or
+standalone:
+
+```bash
+npm run docs:dev
+```
+
+New pages go in `docs/` and get a sidebar entry in
+[`docs/.vitepress/config.mts`](docs/.vitepress/config.mts). ADRs are picked up
+automatically. `docs/agents/` and `docs/prototypes/` are excluded from the site.
+
 ## Deploy to Databricks (Asset Bundle)
 
 Prerequisites: Databricks CLI `>= 0.283`, an FE-VM **serverless** workspace

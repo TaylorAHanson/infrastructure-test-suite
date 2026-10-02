@@ -1,0 +1,35 @@
+/* Match the app's seeded default palette (src/index.css): the lava accent on
+   the ink background. The guide is static, so runtime branding doesn't apply. */
+:root {
+  --vp-c-brand-1: rgb(214 78 36);
+  --vp-c-brand-2: rgb(235 92 48);
+  --vp-c-brand-3: rgb(255 107 61);
+  --vp-c-brand-soft: rgb(255 107 61 / 0.14);
+}
+
+.dark {
+  --vp-c-brand-1: rgb(255 107 61);
+  --vp-c-brand-2: rgb(255 133 94);
+  --vp-c-brand-3: rgb(214 78 36);
+  --vp-c-bg: rgb(11 18 32);
+  --vp-c-bg-alt: rgb(17 26 43);
+  --vp-c-bg-elv: rgb(27 36 53);
+  --vp-c-bg-soft: rgb(17 26 43);
+  --vp-c-divider: rgb(34 48 74);
+  --vp-c-gutter: rgb(34 48 74);
+}
+
+.back-to-app {
+  display: flex;
+  align-items: center;
+  margin-left: 16px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--vp-c-text-2);
+  white-space: nowrap;
+  transition: color 0.25s;
+}
+
+.back-to-app:hover {
+  color: var(--vp-c-brand-1);
+}

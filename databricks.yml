@@ -140,8 +140,10 @@ resources:
 # Sync: ship the frontend SOURCE + backend + job code. The Databricks Apps Node
 # buildpack detects package.json and runs `npm install && npm run build` at
 # deploy time; Vite (vite.config.ts build.outDir) emits to backend/static, which
-# the FastAPI `command` then serves. We never build the client locally. The
-# lockfile is intentionally NOT shipped (see exclude note below).
+# the FastAPI `command` then serves. The same build renders the operator guide
+# (VitePress, source in docs/) into backend/static/guide, so docs/ ships too.
+# We never build the client locally. The lockfile is intentionally NOT shipped
+# (see exclude note below).
 #
 # `include` force-syncs the frontend config files that are otherwise gitignored.
 # We only exclude heavy / generated dirs - critically the local `.databricks`
@@ -173,15 +175,18 @@ sync:
     - "**/node_modules/**"
     - dist/**
     - .vite/**
+    - docs/.vitepress/cache/**
     # NEVER ship package-lock.json: its `resolved` URLs are pinned to the
     # internal npm-proxy.dev.databricks.com registry, which the Databricks Apps
     # build sandbox can't reach. Shipping it makes the buildpack run `npm ci`
     # against the proxy and crash ("Exit handler never called"). Omitting it lets
     # Databricks run plain `npm install` against the default public registry.
     - package-lock.json
-    # Repo docs / infra / tests not needed in the running app
+    # Infra / tests / agent-facing docs not needed in the running app (the
+    # rest of docs/ is the guide's source - see the sync note above)
     - tests/**
-    - docs/**
+    - docs/agents/**
+    - docs/prototypes/**
     - infra/**
     - shared/**
     # Python + env cruft

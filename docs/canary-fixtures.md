@@ -51,7 +51,15 @@ The script is idempotent, so you can re-run it to repair drift. It warns if the 
 
 ## Tell the app where they are
 
-Both options print a set of **target tags**. Add them to the workspace's Target in **Targets → Edit → Tags**. Each test reads them through `setting("name", default)`. A run parameter wins, then the target tag, then the default.
+Both options print a set of **target tags**. Set them on the workspace's Target. The Targets page can't edit tags yet, so use the API. `PATCH` replaces the whole tag set:
+
+```bash
+curl -X PATCH "$APP_URL/api/v1/targets/<target-id>" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tags": {"canary_catalog": "validation_canary", "canary_schema": "health", "scratch_schema": "scratch", "warehouse_id": "<warehouse-id>"}}'
+```
+
+Each test reads them through `setting("name", default)`. A run parameter wins, then the target tag, then the default. A test whose tag isn't set skips the part that needs it and says which tag to set.
 
 | Tag | Default | Read by |
 |---|---|---|
@@ -61,6 +69,7 @@ Both options print a set of **target tags**. Add them to the workspace's Target 
 | `expected_metastore_id` | *(only presence is checked)* | workspace access |
 | `warehouse_id` | a running or serverless warehouse | every SQL check |
 | `classic_warehouse_id` | *(test skipped)* | SQL warehouse cold start |
+| `max_workspace_admins`, `max_admin_service_principals`, `max_token_lifetime_days` | 10, 2, 90 | security posture |
 | `egress_allowed_url` | `https://pypi.org/simple/` | compute probes |
 | `egress_blocked_url` | *(deny check skipped)* | compute probes |
 | `probe_hosts` | *(none)* | compute probes: extra `host:port` pairs, comma-separated |

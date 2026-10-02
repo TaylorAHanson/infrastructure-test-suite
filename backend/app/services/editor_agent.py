@@ -344,7 +344,8 @@ TOOLS: dict[str, tuple[Callable[[EditorState, dict], Any], dict]] = {
         "get_test_script", "Read another Test's script (as an example or to reuse its checks).",
         {"test_id": _S}, ["test_id"])),
     "search_tests": (_t_search_tests, _fn(
-        "search_tests", "Search existing Tests by name, description or tags.", {"query": _S, "limit": {"type": "integer"}})),
+        "search_tests", "Search existing Tests by name, description, tags, check names or script code "
+        "(e.g. an SDK method like 'grants.get'). Best matches first.", {"query": _S, "limit": {"type": "integer"}})),
     "search_targets": (_t_targets, _fn("search_targets", "List registered targets (workspaces).", {"query": _S})),
     "search_roles": (_t_roles, _fn(
         "search_roles", "Roles registered on a target (usable as check(..., role=...)). Defaults to the selected target.",
