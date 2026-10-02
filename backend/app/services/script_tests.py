@@ -347,7 +347,7 @@ def _unreached(name: str, result: ScriptResult) -> CheckResult:
 
 
 def _write_result(session: Session, run: CheckRun, res: CheckResult, result: ScriptResult,
-                  logs_on: Optional[str] = None) -> None:
+                  logs_on: Optional[str] = None, override: Any = None) -> None:
     """Record one check's result. The script's logs/output go on one CheckRun of the
     group; the others point at it with ``script_logs_run_id`` (``logs_on``)."""
     now = utcnow()
@@ -382,7 +382,9 @@ def _write_result(session: Session, run: CheckRun, res: CheckResult, result: Scr
         record_audit(session, actor=actor, action="safety.override", entity_type="check_run",
                      entity_id=run.run_id, summary="A script call ran under a safety override",
                      request_source=run.request_source.value, commit=False,
-                     after={"calls": [c for c in res.calls if c.get("overridden")]})
+                     after={"override_reason": getattr(override, "reason", None),
+                            "confirmed_target": getattr(override, "target_name", None),
+                            "calls": [c for c in res.calls if c.get("overridden")]})
 
 
 def _dynamic_check(session: Session, test: Test, res: CheckResult) -> Check:
@@ -473,7 +475,8 @@ def execute_script_group(run_ids: list[str]) -> None:
             if res is None or res.outcome == "not_reached":
                 res = _unreached(name, result)
             run.workspace_name = run.workspace_name or header.workspace_name
-            _write_result(session, run, res, result, logs_on=None if run.run_id == logs_on else logs_on)
+            _write_result(session, run, res, result, logs_on=None if run.run_id == logs_on else logs_on,
+                          override=override)
         session.commit()
 
         # Checks the script produced that weren't declared literally (e.g. in a loop).
@@ -496,7 +499,7 @@ def execute_script_group(run_ids: list[str]) -> None:
                     started_at=started, verdict=RunStatus.RUNNING)
                 session.add(run)
                 session.flush()
-                _write_result(session, run, res, result, logs_on=logs_on)
+                _write_result(session, run, res, result, logs_on=logs_on, override=override)
             session.commit()
 
 

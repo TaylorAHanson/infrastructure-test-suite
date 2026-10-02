@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.core.enums import Depth, RequestSource, SafetyClass
+from app.core.enums import Depth, SafetyClass
 from app.script_runtime.analysis import analyze
 from app.script_runtime.runner import RunContext, run_script
 from helpers import target_id as tid
@@ -206,34 +206,36 @@ def test_an_invalid_script_is_refused_with_its_analysis(client):
     assert r.json()["detail"]["analysis"]["ok"] is False
 
 
-def _structured_tests(client):
-    tests = [t for t in client.get("/api/v1/tests").json() if not t.get("script")]
-    assert tests, "the tutorial Tests should still seed structured"
-    return tests
-
-
-def test_structured_tests_render_as_valid_scripts(client):
-    for test in _structured_tests(client):
-        out = client.get(f"/api/v1/tests/{test['id']}/script").json()
-        assert out["converted"] is True
-        assert out["analysis"]["ok"], (test["name"], out["analysis"]["errors"], out["script"])
-        assert len(out["analysis"]["checks"]) == len(test["members"]), test["name"]
-
-
-def test_converting_a_structured_test_by_saving_its_script(client):
-    test = _structured_tests(client)[0]
-    script = client.get(f"/api/v1/tests/{test['id']}/script").json()["script"]
-    r = client.put(f"/api/v1/tests/{test['id']}/script", json={"script": script})
-    assert r.status_code == 200, r.text
-    assert r.json()["script"] == script
-    assert client.get(f"/api/v1/tests/{test['id']}/script").json()["converted"] is False
-
-
-def test_structured_edits_are_refused_on_a_script_test(client):
+def test_the_script_endpoint_returns_the_script_and_its_analysis(client):
     test = _create(client)
-    r = client.patch(f"/api/v1/tests/{test['id']}", json={"check_ids": []})
-    assert r.status_code == 409
-    assert client.patch(f"/api/v1/tests/{test['id']}", json={"name": "Renamed"}).status_code == 200
+    out = client.get(f"/api/v1/tests/{test['id']}/script").json()
+    assert set(out) == {"script", "analysis"}
+    assert out["script"] == SCRIPT and out["analysis"]["ok"]
+
+
+def test_a_test_without_a_script_opens_as_the_new_test_template(client):
+    from app.db.session import session_scope
+    from app.models import Test
+
+    with session_scope() as s:
+        legacy = Test(name="Legacy", description="from before scripts")
+        s.add(legacy)
+        s.commit()
+        legacy_id = legacy.id
+    out = client.get(f"/api/v1/tests/{legacy_id}/script").json()
+    assert out["analysis"]["ok"] and "Legacy" in out["script"]
+
+
+def test_patch_edits_a_tests_fields_never_its_checks(client):
+    test = _create(client)
+    members = test["members"]
+    for body in ({"check_ids": []}, {"members": []},
+                 {"check_edits": [{"check_id": members[0]["check_id"], "assertion": "x"}]}):
+        assert client.patch(f"/api/v1/tests/{test['id']}", json=body).status_code == 422
+    r = client.patch(f"/api/v1/tests/{test['id']}", json={"name": "Renamed", "tags": ["t"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Renamed" and r.json()["tags"] == ["t"]
+    assert r.json()["members"] == members and r.json()["script"] == SCRIPT
 
 
 def test_rollback_restores_the_script_and_its_checks(client):
@@ -389,26 +391,3 @@ def test_suites_are_created_edited_and_deleted_by_hand(client):
     assert client.get(f"/api/v1/tests/{a['id']}").status_code == 200
     actions = {e["action"] for e in client.get("/api/v1/audit", params={"target": suite["id"]}).json()}
     assert {"suite.create", "suite.update", "suite.delete"} <= actions
-
-
-def test_manual_suite_edits_keep_the_deterministic_only_invariant(client):
-    from app.core.enums import Evaluator
-    from app.db.session import session_scope
-    from app.models import Check, Test, TestCheck
-
-    with session_scope() as s:
-        check = Check(display_name="judged", operation={"service": "jobs", "method": "list"},
-                      handler_key="databricks_sdk", assertion="looks right", evaluator=Evaluator.AGENTIC,
-                      compiled_predicate={})
-        test = Test(name="agentic one", description="")
-        s.add(check)
-        s.add(test)
-        s.flush()
-        s.add(TestCheck(test_id=test.id, check_id=check.id, sort_order=0))
-        s.commit()
-        agentic_id = test.id
-    r = client.post("/api/v1/suites", json={"name": "Strict", "test_ids": [agentic_id], "deterministic_only": True})
-    assert r.status_code == 422 and "agentic" in r.text
-    suite = client.post("/api/v1/suites", json={"name": "Loose", "test_ids": [agentic_id]}).json()
-    r = client.patch(f"/api/v1/suites/{suite['id']}", json={"deterministic_only": True})
-    assert r.status_code == 422

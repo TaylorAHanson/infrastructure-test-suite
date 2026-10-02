@@ -211,41 +211,6 @@ class EntityVersion(SQLModel, table=True):
 
 
 # ---------------------------------------------------------------------------
-# Worked-example library (ADR-0006 §9) — the gold Tests the Assistant grounds on
-# ---------------------------------------------------------------------------
-class WorkedExample(SQLModel, table=True):
-    """A gold worked example the Assistant grounds on via ``search_examples``.
-
-    A **curated seed set ships in the repo** (open-source day-one), and the
-    library is **grown by curated suggest-then-confirm promotion** of accepted
-    Tests (ADR-0006 §9). Each example pairs a plain-English **intent** with the
-    open-SDK operation + assertion it should compile to, so the Assistant can
-    retrieve a close prior for a new sentence.
-    """
-
-    __tablename__ = "worked_examples"
-
-    id: str = Field(default_factory=lambda: new_id("ex"), primary_key=True)
-    #: The plain-English sentence this example teaches ("start a cluster …").
-    intent: str = Field(index=True)
-    title: str = ""
-    description: str = ""
-    #: The open-SDK operation the intent compiles to ({service, method, verb, params}).
-    operation: dict = _json_col()
-    handler_key: str = Field(default="databricks_sdk")
-    assertion: str = ""
-    expectation: Expectation = Field(default=Expectation.PASS)
-    #: A paired counterfactual intent/assertion, when the example teaches one.
-    counterfactual: dict = _json_col()
-    tags: list[str] = _json_list()
-    #: True for the repo-seeded gold set; promoted examples are also curated.
-    curated: bool = Field(default=True)
-    #: Set when this example was promoted from an accepted Test (provenance).
-    source_test_id: Optional[str] = Field(default=None, index=True)
-    created_at: datetime = Field(default_factory=utcnow)
-
-
-# ---------------------------------------------------------------------------
 # Execution: request → check runs → stage outcomes
 # ---------------------------------------------------------------------------
 class RunRequest(SQLModel, table=True):

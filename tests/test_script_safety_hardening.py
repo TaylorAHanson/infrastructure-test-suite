@@ -13,7 +13,6 @@ import pytest
 
 from app.core.enums import Depth, SafetyClass
 from app.core.operations import Operation, is_blocklisted
-from app.script_runtime import codegen
 from app.script_runtime.analysis import analyze
 from app.script_runtime.demo_workspace import DemoWorkspace
 from app.script_runtime.runner import (RunContext, _internal_destination, _sql_operation, raw_api_operation,
@@ -325,25 +324,3 @@ def test_the_new_test_template_is_served_and_analyzes_clean(client):
     assert r.status_code == 200, r.text
     out = analyze(r.json()["script"])
     assert out["ok"], out["errors"]
-
-
-def _legacy_check(**kw):
-    base = dict(id="c1", display_name="analyst cannot delete", expectation="DENY", evaluator="agentic",
-                assertion="Analysts are denied.\nEven on Fridays.", expected_stage=None,
-                operation={"service": "clusters", "method": "permanent_delete", "params": {"cluster_id": "x"}},
-                handler_key="databricks_sdk", compiled_predicate=None)
-    return SimpleNamespace(**{**base, **kw})
-
-
-def test_conversion_keeps_a_multiline_assertion_commented_and_advisory_counterfactuals():
-    test = SimpleNamespace(name="Legacy", description="")
-    member = SimpleNamespace(run_as_role=None, kind="counterfactual")
-    script = codegen.structured_to_script(test, [(member, _legacy_check())])
-    out = analyze(script)
-    assert out["ok"], (out["errors"], script)
-    assert "# Even on Fridays." in script
-    assert out["checks"][0]["kind"] == "counterfactual" and out["checks"][0]["advisory"] is True
-
-    plain = codegen.structured_to_script(test, [(SimpleNamespace(run_as_role=None, kind="assertion"),
-                                                 _legacy_check(expectation="ALLOW", evaluator="deterministic"))])
-    assert analyze(plain)["ok"], plain

@@ -17,7 +17,6 @@ from app.models.models import (  # noqa: F401
     TestCheck,
     WebhookConfig,
     WEBHOOK_CONFIG_ID,
-    WorkedExample,
 )
 
 __all__ = [
@@ -29,7 +28,6 @@ __all__ = [
     "Target",
     "TargetLease",
     "EntityVersion",
-    "WorkedExample",
     "RunRequest",
     "CheckRun",
     "StageOutcome",

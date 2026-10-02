@@ -8,10 +8,12 @@ from datetime import timedelta
 import pytest
 from sqlmodel import select
 
+from app import models
+from app.core import enums
 from app.core.enums import RunStatus, SafetyClass
 from app.core.ids import utcnow
 from app.db.session import session_scope
-from app.models import Check, CheckRun, RunRequest, Target, TargetLease
+from app.models import CheckRun, RunRequest, Target, TargetLease
 from app.services import locking, run_service, script_tests
 
 from helpers import target_id as _target
@@ -45,14 +47,17 @@ def _leases():
 
 
 def _request_on(targets):
-    """A PENDING request with one waiting CheckRun per target."""
+    """A PENDING request with one waiting CheckRun of a script Test per target."""
     with session_scope() as s:
-        check = Check(display_name="lists jobs", operation={"service": "jobs", "method": "list", "verb": "GET"})
+        test, _ = script_tests.create_script_test(s, name="lists jobs", actor="tester",
+                                                  status=enums.TestStatus.ACTIVE,
+                                                  script='with check("lists jobs"):\n    w.jobs.list()\n')
+        (member,) = s.exec(select(models.TestCheck).where(models.TestCheck.test_id == test.id)).all()
         req = RunRequest(status=RunStatus.PENDING)
-        s.add_all([check, req, *targets])
+        s.add_all([req, *targets])
         s.flush()
-        s.add_all([CheckRun(request_id=req.id, check_id=check.id, target_id=t.id, gating=True,
-                            verdict=RunStatus.PENDING) for t in targets])
+        s.add_all([CheckRun(request_id=req.id, test_id=test.id, check_id=member.check_id, target_id=t.id,
+                            gating=True, verdict=RunStatus.PENDING) for t in targets])
         s.commit()
         return req.id, [t.id for t in targets]
 
@@ -66,7 +71,8 @@ def test_each_mutating_target_is_locked_only_while_its_own_work_runs(db, fast_le
     held_during: dict[str, set[str]] = {}
     beats: dict[str, bool] = {}
 
-    def fake_execute(run_id):
+    def fake_execute(run_ids):
+        (run_id,) = run_ids
         with session_scope() as s:
             target_id = s.get(CheckRun, run_id).target_id
         start = _leases().get(target_id)
@@ -80,7 +86,7 @@ def test_each_mutating_target_is_locked_only_while_its_own_work_runs(db, fast_le
             s.add(run)
             s.commit()
 
-    monkeypatch.setattr(run_service, "execute_check_run", fake_execute)
+    monkeypatch.setattr(script_tests, "execute_script_group", fake_execute)
     run_service.run_request(req_id)
 
     assert held_during[sb1] == {sb1} and held_during[sb2] == {sb2}

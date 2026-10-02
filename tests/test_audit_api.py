@@ -8,6 +8,18 @@ or deletes an audit record (append-only).
 """
 from __future__ import annotations
 
+import pytest
+
+from helpers import script_test
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
+
 
 # --------------------------------- helpers ---------------------------------
 def register_target(client, name, safety_class, *, actor=None,
@@ -19,16 +31,9 @@ def register_target(client, name, safety_class, *, actor=None,
     })
 
 
-def make_check(client, service, method):
-    return client.post("/api/v1/checks", json={
-        "display_name": f"{service}.{method}",
-        "operation": {"service": service, "method": method},
-        "handler_key": "databricks_sdk", "assertion": "the operation succeeds",
-    }).json()
-
-
-def make_test(client, check_id, name):
-    return client.post("/api/v1/tests", json={"name": name, "check_ids": [check_id]}).json()
+def make_test(client, call, name, *, active=True):
+    """A script Test whose one check makes ``call``."""
+    return script_test(client, f'with check("{name}"):\n    {call}\n', name, active=active)
 
 
 def submit_run(client, test_id, target_id, *, request_source="API", override=None):
@@ -50,7 +55,7 @@ def actions(events):
 # -------------------- config-plane recorded, runs excluded -------------------
 def test_config_plane_mutations_recorded_runs_are_not(client):
     tgt = register_target(client, "ws-ro", "read-only").json()
-    test = make_test(client, make_check(client, "jobs", "list")["id"], "ro-list")
+    test = make_test(client, "w.jobs.list()", "ro-list")
     # A real run: this emits a run.trigger event, which must NOT surface here.
     submit_run(client, test["id"], tgt["id"])
 
@@ -68,8 +73,10 @@ def test_config_plane_mutations_recorded_runs_are_not(client):
 def test_blocked_run_does_not_appear_in_audit_view(client):
     ro = register_target(client, "ro-block", "read-only").json()
     # An R1 mutation on a read-only target is blocked — a run-plane event, not audit.
-    test = make_test(client, make_check(client, "clusters", "create")["id"], "ro-create")
-    submit_run(client, test["id"], ro["id"])
+    test = make_test(client, 'w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")',
+                     "ro-create")
+    run_id = submit_run(client, test["id"], ro["id"])
+    assert client.get(f"/api/v1/runs/{run_id}").json()["verdict"] == "BLOCKED_BY_SAFETY"
     assert "safety.block" not in actions(audit(client))
 
 
@@ -91,7 +98,7 @@ def test_downgrade_is_flagged_in_audit(client):
 # --------------------------- override ceremony reason ------------------------
 def test_override_records_its_ceremony_reason(client):
     prod = register_target(client, "prod-ov", "prod-for-us").json()
-    test = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-del")
+    test = make_test(client, 'w.clusters.delete(cluster_id="x")', "ov-del")
     override = {"target_name": "prod-ov", "reason": "incident-4821 remediation",
                 "confirmed": True}
     submit_run(client, test["id"], prod["id"], request_source="UI_MANUAL", override=override)
@@ -115,14 +122,13 @@ def test_deregister_is_audited(client):
 
 # ------------------------ Test create/edit → version pointer -----------------
 def test_test_create_and_edit_recorded_as_version_pointer(client):
-    check = make_check(client, "jobs", "list")
-    test = make_test(client, check["id"], "vp-test")
+    test = make_test(client, "w.jobs.list()", "vp-test", active=False)
     client.patch(f"/api/v1/tests/{test['id']}", json={"description": "edited"})
 
-    created = audit(client, event_type="test.create")[0]
+    [created] = audit(client, target=test["id"], event_type="test.create")
     assert created["after"] == {"entity_type": "test", "entity_id": test["id"], "version": 1}
 
-    edited = audit(client, event_type="test.update")[0]
+    [edited] = audit(client, target=test["id"], event_type="test.update")
     # A pointer to the new version, not a duplicated diff of the Test body.
     assert edited["after"]["version"] == 2
     assert edited["before"]["version"] == 1

@@ -75,7 +75,6 @@ class SuiteCreate(BaseModel):
     name: str
     description: str = ""
     tags: list[str] = Field(default_factory=list)
-    deterministic_only: bool = False
     test_ids: list[str] = Field(default_factory=list)
 
 
@@ -83,7 +82,6 @@ class SuiteUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     tags: Optional[list[str]] = None
-    deterministic_only: Optional[bool] = None
     enabled: Optional[bool] = None
     test_ids: Optional[list[str]] = None
 

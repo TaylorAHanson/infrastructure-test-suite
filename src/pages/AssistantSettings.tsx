@@ -97,7 +97,8 @@ export default function AssistantSettings() {
         </div>
         <p className="text-xs text-muted">
           Lets the model think before it answers: slower and more tokens, often better on hard edits. Claude gets a
-          thinking budget; GPT, Gemini and the open models get a reasoning effort. If a model won't reason while
+          thinking budget (adaptive thinking on the newer models); GPT, Gemini and the open models get a reasoning
+          effort. If a model won't reason while
           calling tools, the assistant runs without it and says so. The reasoning shows in the assistant's work log.
         </p>
       </div>

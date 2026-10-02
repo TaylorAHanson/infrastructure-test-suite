@@ -1,12 +1,28 @@
 """HTTP API seam for target registration + safety enforcement (spec #20).
 
 Drives the real contract through ``TestClient`` + SQLite: register a Target with
-each safety class, submit runs whose operations carry each risk tier, and assert
-the verdict / ``BLOCKED_BY_SAFETY`` on ``GET /runs/{id}``; exercise the
-test-connection guard, the role-registration guard, and the override flow.
-Assertions are on outcomes, not on which of the three layers fired.
+each safety class, submit runs of script Tests whose SDK calls carry each risk
+tier, and assert the verdict / ``BLOCKED_BY_SAFETY`` on ``GET /runs/{id}``;
+exercise the test-connection guard, the role-registration guard, and the
+override flow. Assertions are on outcomes, not on which of the three layers fired.
 """
 from __future__ import annotations
+
+import pytest
+
+from helpers import script_test
+
+R0 = "w.jobs.list()"
+R1 = 'w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")'
+R2 = 'w.clusters.delete(cluster_id="x")'
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
 
 
 # --------------------------------- helpers ---------------------------------
@@ -22,20 +38,10 @@ def register_target(client, name, safety_class, *, workspace_name=None,
     return resp
 
 
-def make_check(client, service, method, assertion="the operation succeeds"):
-    return client.post("/api/v1/checks", json={
-        "display_name": f"{service}.{method}",
-        "operation": {"service": service, "method": method},
-        "handler_key": "databricks_sdk",
-        "assertion": assertion,
-    }).json()
-
-
-def make_test(client, check_id, name, run_as_role=None):
-    body = {"name": name, "check_ids": [check_id]}
-    if run_as_role:
-        body["run_as_role"] = run_as_role
-    return client.post("/api/v1/tests", json=body).json()
+def make_test(client, call, name, run_as_role=None):
+    """An Active script Test whose one check makes ``call``."""
+    fields = {"run_as_role": run_as_role} if run_as_role else {}
+    return script_test(client, f'with check("{name}"):\n    {call}\n', name, **fields)
 
 
 def run_verdict(client, test_id, target_id, *, request_source="API",
@@ -101,9 +107,9 @@ def test_safety_class_is_authoritative_not_name_derived(client):
     target = resp.json()
     assert target["safety_class"] == "prod-for-us"
 
-    r2 = make_check(client, "clusters", "delete")
-    assert r2["risk_tier"] == "R2"
-    t = make_test(client, r2["id"], "delete-on-dev")
+    t = make_test(client, R2, "delete-on-dev")
+    checks = {c["id"]: c for c in client.get("/api/v1/checks").json()}
+    assert checks[t["members"][0]["check_id"]]["risk_tier"] == "R2"
     assert run_verdict(client, t["id"], target["id"]) == "BLOCKED_BY_SAFETY"
 
 
@@ -128,42 +134,42 @@ def test_registering_role_within_class_is_accepted(client):
 # ------------------------------- tier gating ---------------------------------
 def test_operation_above_class_cap_is_blocked(client):
     ro = register_target(client, "ro-1", "read-only").json()
-    r0 = make_test(client, make_check(client, "jobs", "list")["id"], "r0-t")
-    r1 = make_test(client, make_check(client, "clusters", "create")["id"], "r1-t")
+    r0 = make_test(client, R0, "r0-t")
+    r1 = make_test(client, R1, "r1-t")
 
-    assert run_verdict(client, r0["id"], ro["id"]) != "BLOCKED_BY_SAFETY"   # read allowed
+    assert run_verdict(client, r0["id"], ro["id"]) == "PASS"                # read allowed
     assert run_verdict(client, r1["id"], ro["id"]) == "BLOCKED_BY_SAFETY"   # mutation blocked
 
 
 def test_prod_for_us_allows_r1_blocks_r2(client):
     prod = register_target(client, "prod-1", "prod-for-us").json()
-    r1 = make_test(client, make_check(client, "clusters", "create")["id"], "p-r1")
-    r2 = make_test(client, make_check(client, "clusters", "delete")["id"], "p-r2")
+    r1 = make_test(client, R1, "p-r1")
+    r2 = make_test(client, R2, "p-r2")
 
-    assert run_verdict(client, r1["id"], prod["id"]) != "BLOCKED_BY_SAFETY"
+    assert run_verdict(client, r1["id"], prod["id"]) == "PASS"
     assert run_verdict(client, r2["id"], prod["id"]) == "BLOCKED_BY_SAFETY"
 
 
 def test_sandbox_allows_r2(client):
     sbx = register_target(client, "sbx-1", "sandbox").json()
-    r2 = make_test(client, make_check(client, "clusters", "delete")["id"], "s-r2")
-    assert run_verdict(client, r2["id"], sbx["id"]) != "BLOCKED_BY_SAFETY"
+    r2 = make_test(client, R2, "s-r2")
+    assert run_verdict(client, r2["id"], sbx["id"]) == "PASS"
 
 
 # --------------------------------- override ----------------------------------
 def test_override_authorizes_one_r2_on_prod_for_us_via_gui(client):
     prod = register_target(client, "prod-ov", "prod-for-us").json()
-    r2 = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-r2")
+    r2 = make_test(client, R2, "ov-r2")
     override = {"target_name": "prod-ov", "reason": "incident", "confirmed": True}
 
     verdict = run_verdict(client, r2["id"], prod["id"],
                           request_source="UI_MANUAL", override=override)
-    assert verdict != "BLOCKED_BY_SAFETY"
+    assert verdict == "PASS"
 
 
 def test_override_is_rejected_for_ci(client):
     prod = register_target(client, "prod-ci", "prod-for-us").json()
-    r2 = make_test(client, make_check(client, "clusters", "delete")["id"], "ci-r2")
+    r2 = make_test(client, R2, "ci-r2")
     override = {"target_name": "prod-ci", "reason": "incident", "confirmed": True}
 
     # Same override payload, but a machine (CI) caller can never escalate.
@@ -175,8 +181,7 @@ def test_override_is_rejected_for_ci(client):
 # ------------------------------- run-as-role ---------------------------------
 def test_unregistered_run_as_role_is_blocked_before_dispatch(client):
     ro = register_target(client, "ro-role", "read-only").json()
-    r0 = make_check(client, "jobs", "list")
-    t = make_test(client, r0["id"], "ghost-role-test", run_as_role="ghost")
+    t = make_test(client, R0, "ghost-role-test", run_as_role="ghost")
     assert run_verdict(client, t["id"], ro["id"]) == "BLOCKED_BY_SAFETY"
 
 
@@ -184,9 +189,8 @@ def test_registered_run_as_role_is_permitted(client):
     ro = register_target(
         client, "ro-analyst", "read-only",
         roles=[{"group_id": "g-analyst", "label": "analyst", "safety_class": "read-only"}]).json()
-    r0 = make_check(client, "jobs", "list")
-    t = make_test(client, r0["id"], "analyst-test", run_as_role="analyst")
-    assert run_verdict(client, t["id"], ro["id"]) != "BLOCKED_BY_SAFETY"
+    t = make_test(client, R0, "analyst-test", run_as_role="analyst")
+    assert run_verdict(client, t["id"], ro["id"]) == "PASS"
 
 
 # --------------------------- edit + audit trail ------------------------------
@@ -217,32 +221,26 @@ def test_over_privileged_run_as_role_blocked_before_dispatch(session):
     # Belt-and-braces: even if a role that out-runs its target's class somehow
     # lands in the store (the API guard normally prevents it), the run engine
     # refuses it before dispatch (ADR-0018). Insert such a target directly.
-    from app.models import Check, CheckRun, RunRequest, Target
-    from app.core.enums import RequestSource, RunStatus, SafetyClass
-    from app.services import run_service
+    from app.models import CheckRun, RunRequest, Target
+    from app.core.enums import RequestSource, RunStatus, SafetyClass, TestStatus
+    from app.services import run_service, script_tests
 
     target = Target(name="ro-bad", safety_class=SafetyClass.READ_ONLY,
                     assumable_roles=[{"group_id": "g-admin", "label": "admin",
                                       "safety_class": "sandbox"}])
-    check = Check(display_name="read", operation={"service": "jobs", "method": "list", "verb": "GET"},
-                  risk_tier="R0")
     session.add(target)
-    session.add(check)
     session.commit()
-    session.refresh(target)
-    session.refresh(check)
+    test, _ = script_tests.create_script_test(
+        session, name="read as admin", actor="pytest", run_as_role="admin", status=TestStatus.ACTIVE,
+        script=f'with check("read"):\n    {R0}\n')
 
-    req = RunRequest(request_source=RequestSource.NIGHTLY)
+    req = RunRequest(test_ids=[test.id], target_ids=[target.id], request_source=RequestSource.NIGHTLY)
     session.add(req)
     session.commit()
-    run = CheckRun(request_id=req.id, check_id=check.id, target_id=target.id,
-                   run_as_role="admin", verdict=RunStatus.PENDING)
-    session.add(run)
-    session.commit()
-    session.refresh(run)
+    run_ids = [r.run_id for r in run_service.expand_request(session, req)]
+    assert run_ids
 
-    run_service.execute_check_run(run.run_id)
+    script_tests.execute_script_group(run_ids)
 
     session.expire_all()
-    refreshed = session.get(CheckRun, run.run_id)
-    assert refreshed.verdict == RunStatus.BLOCKED_BY_SAFETY
+    assert {session.get(CheckRun, rid).verdict for rid in run_ids} == {RunStatus.BLOCKED_BY_SAFETY}

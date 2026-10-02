@@ -2,8 +2,7 @@
 
 The gate is composed from every domain's ``ci_gate_tests`` opt-in, re-derived
 before it's trusted: a script Test joins only if its analysis is read-only with
-no advisory checks, a structured Test only if every member compiles
-deterministic and R0. Today that is the quick health tier.
+no advisory checks. Today that is the quick health tier.
 """
 from __future__ import annotations
 
@@ -40,10 +39,6 @@ def _ci_gate_checks(session) -> list[Check]:
     return [session.get(Check, cid) for cid in check_ids]
 
 
-def test_ci_gate_is_deterministic_only(seeded_session):
-    assert _ci_gate_suite(seeded_session).deterministic_only is True
-
-
 def test_ci_gate_contains_exactly_the_quick_health_checks(seeded_session):
     assert {c.display_name for c in _ci_gate_checks(seeded_session)} == _CI_GATE_CHECK_NAMES
 
@@ -55,10 +50,10 @@ def test_ci_gate_checks_are_all_deterministic_read_only_and_gating(seeded_sessio
         assert not (check.hints or {}).get("advisory"), check.display_name
 
 
-def test_ci_gate_excludes_tutorial_exemplars(seeded_session):
-    tutorial_names = {"SQL warehouse healthcheck", "Cluster create is allowed",
-                      "Non-compliant cluster create is denied"}
-    assert not ({c.display_name for c in _ci_gate_checks(seeded_session)} & tutorial_names)
+def test_read_only_tests_that_did_not_volunteer_stay_out(seeded_session):
+    connectivity = {"a SQL warehouse returns the healthcheck row", "the identity can see at least one catalog",
+                    "an external HTTPS endpoint answers without an error status"}
+    assert not ({c.display_name for c in _ci_gate_checks(seeded_session)} & connectivity)
 
 
 def _gate_keys(*tests: tuple[str, TestSpec]) -> list[str]:

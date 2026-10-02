@@ -3,6 +3,7 @@ worker that can't overwrite the reaper, per-target FIFO, the process-wide
 concurrency cap, a non-blocking hand-off, and bulk loads."""
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 from contextlib import contextmanager
@@ -12,17 +13,19 @@ import pytest
 from sqlalchemy import event
 from sqlmodel import select
 
+from app.core import enums
 from app.core.enums import RunStatus, SafetyClass
 from app.core.ids import utcnow
 from app.db.session import get_engine, session_scope
 from app import models
-from app.models import Check, CheckRun, RunRequest, StageOutcome, Target
-from app.services import locking, run_service
+from app.models import CheckRun, RunRequest, StageOutcome, Target
+from app.services import locking, run_service, script_tests
 
+from helpers import script_test
 from helpers import target_id as _target
-from helpers import test_id as _test
 
-POLICY = "Cluster policy enforcement"
+READS = 'with check("lists jobs"):\n    w.jobs.list()\n'
+_names = itertools.count()
 
 
 @pytest.fixture(autouse=True)
@@ -44,20 +47,29 @@ def _settings():
     return settings
 
 
+def _script_test(s, script=READS):
+    """An Active script Test; returns it and its checks' ids."""
+    test, _ = script_tests.create_script_test(s, name=f"reads {next(_names)}", actor="tester", script=script,
+                                              status=enums.TestStatus.ACTIVE)
+    members = s.exec(select(models.TestCheck).where(models.TestCheck.test_id == test.id)
+                     .order_by(models.TestCheck.sort_order)).all()
+    return test, [m.check_id for m in members]
+
+
 def _seed(n=1, *, target_id=None):
-    """A PENDING request with ``n`` waiting CheckRuns of a read-only check."""
+    """A PENDING request with ``n`` waiting CheckRuns, each of its own read-only script Test."""
     with session_scope() as s:
         if target_id is None:
             target = Target(name="ro", safety_class=SafetyClass.READ_ONLY)
             s.add(target)
             s.flush()
             target_id = target.id
-        check = Check(display_name="lists jobs", operation={"service": "jobs", "method": "list", "verb": "GET"})
+        tests = [_script_test(s) for _ in range(n)]
         req = RunRequest(status=RunStatus.PENDING)
-        s.add_all([check, req])
+        s.add(req)
         s.flush()
-        runs = [CheckRun(request_id=req.id, check_id=check.id, target_id=target_id, gating=True,
-                         verdict=RunStatus.PENDING) for _ in range(n)]
+        runs = [CheckRun(request_id=req.id, test_id=test.id, check_id=check_id, target_id=target_id, gating=True,
+                         verdict=RunStatus.PENDING) for test, (check_id,) in tests]
         s.add_all(runs)
         s.commit()
         return req.id, target_id, [r.run_id for r in runs]
@@ -68,20 +80,24 @@ def _status(request_id):
         return s.get(RunRequest, request_id).status
 
 
-class _Wrapped:
-    """A real handler with a hook that runs before it does."""
+def _hook_script(monkeypatch, before):
+    """Call ``before(ctx)`` just ahead of each script execution."""
+    real = script_tests.run_script
 
-    def __init__(self, inner, before):
-        self.inner, self.before = inner, before
+    def hooked(script, ctx):
+        before(ctx)
+        return real(script, ctx)
 
-    def run(self, ctx):
-        self.before(ctx)
-        return self.inner.run(ctx)
+    monkeypatch.setattr(script_tests, "run_script", hooked)
 
 
-def _hook_handler(monkeypatch, before):
-    real = run_service.get_handler
-    monkeypatch.setattr(run_service, "get_handler", lambda key: _Wrapped(real(key), before))
+def _pass_runs(run_ids):
+    with session_scope() as s:
+        for run_id in run_ids:
+            run = s.get(CheckRun, run_id)
+            run.verdict = RunStatus.PASS
+            s.add(run)
+        s.commit()
 
 
 # --------------------------- claims (S7) ---------------------------
@@ -105,14 +121,14 @@ def test_a_request_is_claimed_by_exactly_one_worker(db):
 
 def test_a_check_run_executes_once_when_dispatched_twice(db, monkeypatch):
     calls = []
-    _hook_handler(monkeypatch, lambda ctx: calls.append(ctx.run_id))
+    _hook_script(monkeypatch, calls.append)
     _, _, (run_id,) = _seed()
-    threads = [threading.Thread(target=run_service.execute_check_run, args=(run_id,)) for _ in range(4)]
+    threads = [threading.Thread(target=script_tests.execute_script_group, args=([run_id],)) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert calls == [run_id]
+    assert len(calls) == 1
     with session_scope() as s:
         stages = [o.stage for o in s.exec(select(StageOutcome).where(StageOutcome.run_id == run_id)).all()]
     assert stages and len(set(stages)) == len(stages)
@@ -129,7 +145,7 @@ def test_a_late_worker_cannot_overwrite_the_reapers_error(db, monkeypatch):
             s.commit()
         assert run_service.reap_wedged_runs() == 1
 
-    _hook_handler(monkeypatch, reaped_mid_flight)
+    _hook_script(monkeypatch, reaped_mid_flight)
     run_service.run_request(req_id)
 
     with session_scope() as s:
@@ -168,26 +184,26 @@ def test_after_the_reaper_requeues_a_request_the_old_claim_cannot_finalize_it(db
 
 
 # ----------------------- prompt started_at (S8) -----------------------
-def test_started_at_is_committed_and_no_connection_is_held_while_the_handler_runs(db, monkeypatch):
+def test_started_at_is_committed_and_no_connection_is_held_while_the_script_runs(db, monkeypatch):
     seen = {}
+    _, _, (run_id,) = _seed()
 
     def inspect(ctx):
         seen["checked_out"] = get_engine().pool.checkedout()
         with session_scope() as s:
-            run = s.get(CheckRun, ctx.run_id)
+            run = s.get(CheckRun, run_id)
             seen["verdict"], seen["started_at"] = run.verdict, run.started_at
 
-    _hook_handler(monkeypatch, inspect)
-    _, _, (run_id,) = _seed()
-    run_service.execute_check_run(run_id)
+    _hook_script(monkeypatch, inspect)
+    script_tests.execute_script_group([run_id])
     assert seen["checked_out"] == 0
     assert seen["verdict"] == RunStatus.RUNNING and seen["started_at"] is not None
 
 
 # ------------------------- per-target FIFO (S11) -------------------------
 def test_a_new_submission_does_not_jump_an_older_queued_request(client):
-    sandbox, policy = _target(client, "sandbox"), _test(client, POLICY)
-    body = {"test_ids": [policy], "target_ids": [sandbox], "depth": "full"}
+    sandbox, reads = _target(client, "sandbox"), script_test(client, READS, "Reads")["id"]
+    body = {"test_ids": [reads], "target_ids": [sandbox], "depth": "full"}
     with session_scope() as s:
         assert locking.acquire(s, sandbox, holder="someone-else")
     older = client.post("/api/v1/runs", json=body).json()["run_id"]
@@ -212,20 +228,16 @@ def test_check_work_shares_one_process_wide_concurrency_cap(db, monkeypatch):
     monkeypatch.setattr(_settings(), "MAX_RUN_CONCURRENCY", 2)
     lock, state = threading.Lock(), {"active": 0, "peak": 0}
 
-    def fake_execute(run_id):
+    def fake_execute(run_ids):
         with lock:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
         time.sleep(0.05)
         with lock:
             state["active"] -= 1
-        with session_scope() as s:
-            run = s.get(CheckRun, run_id)
-            run.verdict = RunStatus.PASS
-            s.add(run)
-            s.commit()
+        _pass_runs(run_ids)
 
-    monkeypatch.setattr(run_service, "execute_check_run", fake_execute)
+    monkeypatch.setattr(script_tests, "execute_script_group", fake_execute)
     requests = [_seed(4)[0], _seed(4)[0]]
     threads = [threading.Thread(target=run_service.run_request, args=(rid,)) for rid in requests]
     for t in threads:
@@ -308,15 +320,16 @@ def _counting_selects():
         event.remove(engine, "before_cursor_execute", on_execute)
 
 
+def _script(n):
+    return "".join(f'with check("c{i}"):\n    w.jobs.list()\n' for i in range(n))
+
+
 def _test_with_checks(n):
     with session_scope() as s:
         target = Target(name="ro", safety_class=SafetyClass.READ_ONLY)
-        test = models.Test(name=f"{n} checks", description="")
-        checks = [Check(display_name=f"c{i}", operation={"service": "jobs", "method": "list", "verb": "GET"})
-                  for i in range(n)]
-        s.add_all([target, test, *checks])
+        s.add(target)
         s.flush()
-        s.add_all([models.TestCheck(test_id=test.id, check_id=c.id, sort_order=i) for i, c in enumerate(checks)])
+        test, _ = _script_test(s, _script(n))
         req = RunRequest(test_ids=[test.id], target_ids=[target.id])
         s.add(req)
         s.commit()
@@ -331,7 +344,7 @@ def _expand_and_plan(request_id):
         runs = s.exec(select(CheckRun).where(CheckRun.request_id == request_id)).all()
         assert runs
         with _counting_selects() as plan:
-            run_service._work_units(s, list(runs))
+            run_service._work_units(list(runs))
     return len(expand), len(plan)
 
 
@@ -359,7 +372,9 @@ def test_marking_work_queued_is_one_statement(db):
 
 # --------------------------- GET /runs offset ---------------------------
 def test_check_runs_of_a_request_page_with_offset(client):
-    run_id = client.post("/api/v1/runs", json={"target_ids": [_target(client, "read-only")]}).json()["run_id"]
+    test = script_test(client, _script(7), "Seven checks")
+    run_id = client.post("/api/v1/runs", json={"test_ids": [test["id"]],
+                                               "target_ids": [_target(client, "read-only")]}).json()["run_id"]
     expected = set(client.get(f"/api/v1/runs/{run_id}").json()["run_ids"])
     assert len(expected) > 4
     seen: list[str] = []

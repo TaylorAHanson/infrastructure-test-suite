@@ -76,8 +76,8 @@ def search_targets(session: Session, query: str = "", limit: int = 10) -> list[d
 def search_roles(session: Session, target_ref: str) -> list[dict]:
     """The assumable role-profiles a target has **registered** (ADR-0018).
 
-    Grounding for a ``run-as-role`` suggestion: the Assistant may only offer a
-    role that appears here (user story 24). Returns ``[]`` for an unknown target
+    The Assistant may only name a role that appears here (user story 24).
+    Returns ``[]`` for an unknown target
     or one with no registered roles — never invents one. ``target_ref`` matches
     a target id or name.
     """
@@ -114,7 +114,7 @@ def search_suites(session: Session, query: str = "", limit: int = 10) -> list[di
             continue
         out.append({
             "id": s.id, "name": s.name, "description": s.description,
-            "test_count": counts.get(s.id, 0), "deterministic_only": s.deterministic_only,
+            "test_count": counts.get(s.id, 0),
         })
     return out[:limit]
 

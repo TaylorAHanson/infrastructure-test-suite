@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.clients import databricks as dbx
-from app.core.enums import RequestSource, RiskTier, SafetyClass
+from app.core.enums import RequestSource, SafetyClass
 from app.services.roles import RoleRegistrationError, find_role, validate_roles_for_class
 from app.services.safety import (
     SafetyOverride,
@@ -97,15 +97,6 @@ def test_override_requires_matching_typed_confirmation():
         R2, SafetyClass.PROD_FOR_US, override=SafetyOverride(target_name="WRONG"),
         request_source=RequestSource.UI_MANUAL, target_name="prod-1")
     assert not decision.allowed
-
-
-def test_confirmed_tier_raises_the_coarse_guess():
-    # A mutating-target one-confirm tier can raise R1→R2, pushing it over the cap.
-    below = evaluate_operation_safety(R1, SafetyClass.PROD_FOR_US)
-    assert below.allowed
-    raised = evaluate_operation_safety(
-        R1, SafetyClass.PROD_FOR_US, confirmed_tier=RiskTier.R2)
-    assert not raised.allowed and raised.effective_tier == RiskTier.R2
 
 
 def test_is_machine_source():

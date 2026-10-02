@@ -1,9 +1,8 @@
 """Regressions for the bugs the post-apply review found in the runtime.
 
 A counterfactual that passes on any failure, a ``Wait`` that crashes the
-evidence serializer, a SQL permission error that isn't a denial, a target token
-the SDK quietly ignores, and converted checks that look like they assert
-something when they don't.
+evidence serializer, a SQL permission error that isn't a denial, and checks
+that look like they assert something when they don't.
 """
 from __future__ import annotations
 
@@ -14,9 +13,17 @@ import pytest
 from app.core.enums import Depth, SafetyClass
 from app.script_runtime import demo_workspace
 from app.script_runtime.analysis import analyze
-from app.script_runtime.codegen import structured_to_script
 from app.script_runtime.runner import RunContext, run_script
-from app.services.run_service import denied_as_expected
+
+from helpers import script_test, target_id
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
 
 
 def _run(script, *, tags=None, params=None, safety_class=SafetyClass.READ_ONLY, depth=Depth.FULL):
@@ -41,39 +48,38 @@ def _fail_calls(monkeypatch, op: str, error: dict):
 # ---------------------------------------------------------------------------
 # Counterfactuals: only the denial asked for counts
 # ---------------------------------------------------------------------------
-def _failed(stage, bucket):
-    return SimpleNamespace(stage=stage, failure_bucket=bucket)
+_DENIED = {"kind": "permission_denied", "message": "nope", "status": 403}
+_UNAUTHENTICATED = {"kind": "unauthenticated", "message": "invalid token", "status": 401}
+_DNS = {"kind": "connect", "message": "name resolution failed", "stage": "RESOLVE", "bucket": "DNS_FAILURE"}
+_REFUSED = {"kind": "connect", "message": "connection refused", "stage": "CONNECT", "bucket": "NETWORK_POLICY_DENY"}
+_TIMEOUT = {"kind": "connect", "message": "timed out", "stage": "CONNECT", "bucket": "UPSTREAM_TIMEOUT"}
+_API = {"kind": "api", "message": "INVALID_STATE", "status": 400}
 
 
-@pytest.mark.parametrize("expected, stage, bucket, ok", [
-    ("AUTHORIZE", "AUTHORIZE", "PERMISSION_DENIED", True),
-    ("AUTHORIZE", "RESOLVE", "DNS_FAILURE", False),
-    ("AUTHORIZE", "AUTHENTICATE", "AUTHENTICATION_FAILURE", False),
-    ("AUTHORIZE", "OPERATE", "OPERATION_FAILED", False),
-    ("CONNECT", "CONNECT", "UPSTREAM_TIMEOUT", True),
-    ("CONNECT", "OPERATE", "NETWORK_POLICY_DENY", True),
-    ("CONNECT", "AUTHORIZE", "PERMISSION_DENIED", False),
-    ("OPERATE", "OPERATE", "OPERATION_FAILED", True),
-    ("OPERATE", "AUTHORIZE", "PERMISSION_DENIED", True),
-    ("OPERATE", "AUTHENTICATE", "AUTHENTICATION_FAILURE", False),
-    ("OPERATE", "RESOLVE", "DNS_FAILURE", False),
+@pytest.mark.parametrize("at, error, ok", [
+    ("AUTHORIZE", _DENIED, True),
+    ("AUTHORIZE", _DNS, False),
+    ("AUTHORIZE", _UNAUTHENTICATED, False),
+    ("AUTHORIZE", _API, False),
+    ("CONNECT", _REFUSED, True),
+    ("CONNECT", _DNS, True),
+    ("CONNECT", _TIMEOUT, False),
+    ("CONNECT", _DENIED, False),
+    ("OPERATE", _API, True),
+    ("OPERATE", _DENIED, True),
+    ("OPERATE", _UNAUTHENTICATED, False),
+    ("OPERATE", _DNS, False),
 ])
-def test_a_structured_counterfactual_passes_only_on_the_denial_it_names(expected, stage, bucket, ok):
-    check = SimpleNamespace(expected_stage=expected)
-    assert denied_as_expected(check, _failed(stage, bucket)) is ok
+def test_a_counterfactual_passes_only_on_the_denial_it_names(monkeypatch, at, error, ok):
+    _fail_calls(monkeypatch, "clusters.get", error)
+    res = _run(f'with expect_deny("refused", at="{at}"):\n    w.clusters.get(cluster_id="x")\n')
+    assert (res.check("refused").outcome == "pass") is ok, res.check("refused").message
 
 
-def _run_counterfactual(client, expected_stage):
-    from helpers import target_id
-
-    chk = client.post("/api/v1/checks", json={
-        "display_name": f"denied at {expected_stage}",
-        "operation": {"service": "clusters", "method": "create", "params": {"demo_outcome": "deny"}},
-        "handler_key": "databricks_sdk", "assertion": "the operation is denied",
-        "expected_stage": expected_stage}).json()
-    tst = client.post("/api/v1/tests", json={
-        "name": f"cf {expected_stage}", "members": [{"check_id": chk["id"], "kind": "counterfactual"}]}).json()
-    run_id = client.post("/api/v1/runs", json={"test_ids": [tst["id"]], "target_ids": [target_id(client, "sandbox")],
+def _run_counterfactual(client, at):
+    test = script_test(client, f'with expect_deny("denied at {at}", at="{at}"):\n'
+                               '    sql("SELECT * FROM main.health.forbidden")\n', f"cf {at}")
+    run_id = client.post("/api/v1/runs", json={"test_ids": [test["id"]], "target_ids": [target_id(client, "read-only")],
                                                "depth": "full"}).json()["run_id"]
     (cr,) = client.get(f"/api/v1/runs/{run_id}").json()["run_ids"]
     return client.get(f"/api/v1/runs/{cr}").json()
@@ -83,7 +89,7 @@ def test_a_policy_denial_does_not_satisfy_a_counterfactual_that_expected_a_netwo
     assert _run_counterfactual(client, "AUTHORIZE")["verdict"] == "PASS"
     detail = _run_counterfactual(client, "CONNECT")
     assert detail["verdict"] == "FAIL"
-    assert "Expected a denial at CONNECT, but it failed at AUTHORIZE" in str(detail)
+    assert "denied at AUTHORIZE, expected CONNECT" in detail["message"]
 
 
 @pytest.mark.parametrize("error", [
@@ -195,69 +201,15 @@ def test_a_long_running_operation_serializes_without_raising():
     from databricks.sdk.service._internal import Wait
     from databricks.sdk.service.jobs import SubmitRunResponse
 
-    from app.handlers.builtin.generic import _response_evidence
     from app.script_runtime.sdk_catalog import to_jsonable
 
     wait = Wait(lambda **_: None, response=SubmitRunResponse(run_id=42), run_id=42)
     assert to_jsonable(wait) == {"run_id": 42}
-    assert _response_evidence(wait) == {"response": {"run_id": 42}}
-
-
-def test_the_workspace_client_uses_the_targets_token_not_ambient_credentials(monkeypatch):
-    import databricks.sdk
-
-    from app.handlers.builtin import generic
-
-    seen = {}
-    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **kw: seen.update(kw) or object())
-    generic._make_workspace_client("https://h", "tok")
-    assert seen == {"host": "https://h", "token": "tok", "auth_type": "pat"}
 
 
 # ---------------------------------------------------------------------------
-# Converted structured tests say what they don't prove
+# Checks say what they don't prove
 # ---------------------------------------------------------------------------
-def _check(**kw):
-    base = dict(id="c1", display_name="lists warehouses", handler_key="databricks_sdk",
-                operation={"service": "warehouses", "method": "list"}, compiled_predicate=None,
-                assertion="the operation succeeds", expectation="PASS", evaluator="deterministic",
-                expected_stage=None)
-    return SimpleNamespace(**{**base, **kw})
-
-
-def _convert(*checks):
-    test = SimpleNamespace(name="T", description="")
-    member = SimpleNamespace(run_as_role=None, kind="assertion")
-    return structured_to_script(test, [(member, c) for c in checks])
-
-
-def test_conversion_names_results_for_what_they_are():
-    script = _convert(_check(), _check(id="c2", display_name="me", operation={"service": "current_user",
-                                                                                "method": "me"}),
-                      _check(id="c3", display_name="sql", handler_key="sql_warehouse",
-                             operation={"service": "statement_execution", "method": "execute_statement",
-                                        "params": {"statement": "SELECT 1"}}))
-    assert "warehouses = w.warehouses.list()" in script
-    assert "me = w.current_user.me()" in script
-    assert "rows = sql('SELECT 1')" in script
-
-
-def test_conversion_flags_a_check_that_only_required_success():
-    script = _convert(_check())
-    assert "TODO: the original check only required this call to succeed" in script
-    out = analyze(script)
-    assert out["ok"]
-    assert any("has no assert" in w["message"] for w in out["warnings"])
-
-
-def test_conversion_flags_an_assert_on_a_field_that_only_existed_in_demo_data():
-    script = _convert(_check(operation={"service": "workspace_conf", "method": "get_status",
-                                        "params": {"keys": "x", "demo_evidence": {"x": "true"}}},
-                             compiled_predicate={"kind": "compare", "field": "x", "op": "==", "value": "true"}))
-    assert "TODO: 'x' came from demo data" in script
-    assert "assert workspace_conf.get('x') == 'true'" in script
-
-
 def test_analysis_warns_on_a_check_with_nothing_to_prove():
     out = analyze('with check("reachable"):\n    w.clusters.list()\n'
                   'with check("proves"):\n    assert w.clusters.list() is not None\n')
@@ -267,72 +219,22 @@ def test_analysis_warns_on_a_check_with_nothing_to_prove():
 
 
 # ---------------------------------------------------------------------------
-# Structured Checks against a real workspace: demo knobs are inert, and a
-# quick run doesn't judge what it didn't do
+# A quick run doesn't judge what it didn't do
 # ---------------------------------------------------------------------------
-def _live_ctx(params, *, token="tok", factory=None):
-    from app.core.operations import Operation
-    from app.handlers.base import HandlerContext
-
-    return HandlerContext(run_id="r", operation=Operation.from_dict({"service": "clusters", "method": "create"}),
-                          target=SimpleNamespace(host="https://h"), params=params, demo_mode=False, token=token,
-                          workspace_client_factory=factory)
-
-
-def test_a_demo_deny_param_does_not_deny_against_a_real_workspace():
-    from app.core.enums import StageStatus
-    from app.handlers.builtin.generic import DatabricksSdkHandler
-
-    result = DatabricksSdkHandler().stage_authorize(_live_ctx({"demo_outcome": "deny"}))
-    assert result.outcome == StageStatus.SKIP
-
-
-def test_the_sql_handler_runs_as_the_target_and_reports_a_denial(monkeypatch):
-    from databricks.sdk.service.sql import (
-        ServiceError,
-        StatementResponse,
-        StatementState,
-        StatementStatus,
-    )
-
-    from app.handlers.base import HandlerError
-    from app.handlers.builtin import generic
-    from app.handlers.builtin.sql_warehouse import SqlWarehouseHandler
-
-    seen = {}
-    resp = StatementResponse(status=StatementStatus(state=StatementState.FAILED, error=ServiceError(
-        message="[INSUFFICIENT_PERMISSIONS] User does not have SELECT on Table.")))
-    client = SimpleNamespace(statement_execution=SimpleNamespace(execute_statement=lambda **kw: resp))
-    monkeypatch.setattr(generic, "_make_workspace_client", lambda host, token: seen.update(token=token) or client)
-
-    def ambient():
-        raise AssertionError("must not use the app's own credentials")
-
-    with pytest.raises(HandlerError) as err:
-        SqlWarehouseHandler().stage_operate(_live_ctx({"statement": "SELECT * FROM t"}, factory=ambient))
-    assert seen == {"token": "tok"}
-    assert err.value.failure_bucket == "PERMISSION_DENIED"
-
-
-def test_a_quick_run_skips_a_check_that_judges_the_response(client):
-    from helpers import target_id, test_id
-
-    run_id = client.post("/api/v1/runs", json={"test_ids": [test_id(client, "SQL Warehouse validation")],
-                                               "target_ids": [target_id(client, "read-only")]}).json()["run_id"]
+def test_a_quick_run_skips_a_mutating_check(client):
+    test = script_test(client, 'with check("creates"):\n'
+                               '    w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")\n', "quick")
+    run_id = client.post("/api/v1/runs", json={"test_ids": [test["id"]],
+                                               "target_ids": [target_id(client, "sandbox")]}).json()["run_id"]
     resource = client.get(f"/api/v1/runs/{run_id}").json()
     (cr,) = resource["run_ids"]
     detail = client.get(f"/api/v1/runs/{cr}").json()
-    assert detail["verdict"] == "SKIPPED" and "full depth" in detail["message"]
-    assert resource["functional"] is None
+    assert detail["verdict"] == "SKIPPED" and "quick runs only make read calls" in detail["message"]
+    assert resource["verdict"] == "SKIPPED" and resource["functional"] is None
 
 
 def test_a_safety_block_does_not_read_as_broken_connectivity(client):
-    from helpers import target_id
-
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "over-cap delete", "operation": {"service": "clusters", "method": "delete"},
-        "assertion": "the operation succeeds"}).json()
-    tst = client.post("/api/v1/tests", json={"name": "over-cap", "check_ids": [chk["id"]]}).json()
+    tst = script_test(client, 'with check("over-cap delete"):\n    w.clusters.delete(cluster_id="x")\n', "over-cap")
     run_id = client.post("/api/v1/runs", json={"test_ids": [tst["id"]], "target_ids": [target_id(client, "read-only")],
                                                "depth": "full"}).json()["run_id"]
     resource = client.get(f"/api/v1/runs/{run_id}").json()

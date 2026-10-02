@@ -129,8 +129,7 @@ TOOL_SCHEMAS: list[dict] = [
         {"bucket": {"type": "string"}, "stage": {"type": "string"},
          "limit": {"type": "integer"}}),
     _function_schema("search_suites",
-        "List available Suites by name/description/tags. Returns id, name, test_count, "
-        "deterministic_only.",
+        "List available Suites by name/description/tags. Returns id, name and test_count.",
         {"query": {"type": "string"}, "limit": {"type": "integer"}}),
 ]
 
@@ -289,6 +288,16 @@ def _initial_messages(intent: str) -> list[dict]:
 
 
 
+def _tool_calling_turn(content: Any, calls: list[dict]) -> dict:
+    """The model's tool-calling turn in wire shape. Every tool result that follows
+    must answer a tool call listed here, by id, or the endpoint rejects the request."""
+    return {"role": "assistant", "content": content if isinstance(content, str) else "",
+            "tool_calls": [{"id": c["id"], "type": "function",
+                            "function": {"name": str(c.get("name", "")),
+                                         "arguments": json.dumps(c.get("arguments") or {}, default=str)}}
+                           for c in calls]}
+
+
 def _build_graph(session: Session, target: Optional[Target], model_call: Optional[ModelCall]):
     """Compile the agent⇄tools StateGraph for one turn (closures bind the seam)."""
 
@@ -303,8 +312,10 @@ def _build_graph(session: Session, target: Optional[Target], model_call: Optiona
         parsed = parse_json_object(reply)
         tool_calls = parsed.get("tool_calls")
         if isinstance(tool_calls, list) and tool_calls:
-            messages = state["messages"] + [{"role": "assistant", "content": reply}]
-            return {"messages": messages, "pending": tool_calls, "iters": iters + 1}
+            calls = [{**tc, "id": tc.get("id") or f"call_{iters}_{i}"}
+                     for i, tc in enumerate(tool_calls) if isinstance(tc, dict)]
+            messages = state["messages"] + [_tool_calling_turn(parsed.get("content"), calls)]
+            return {"messages": messages, "pending": calls, "iters": iters + 1}
         return {"plan": parsed, "pending": [], "iters": iters + 1}
 
     def tools(state: _TurnState) -> dict:

@@ -3,10 +3,8 @@ made and nobody has since edited — and it audits every change it makes.
 
 * S15 — the CI Gate is reset only when it is still the seeder's and differs
   from the bundled gate; a person's edit to it survives restarts.
-* S16 — retirement matches seeded rows only: a person's Test or Suite holding a
-  retired name is left alone, and only unedited seeded Suites are removed.
-* S17 — seeded Tests are wired to the seeder's own Checks, never to a person's
-  Check that shares a display name.
+* S16 — removing retired Suites matches seeded rows only: a person's Suite
+  holding a retired name is left alone, and only unedited seeded Suites go.
 * S18 — seeded script Tests nobody edited follow catalog fixes as a new
   version; edited, renamed or deleted seeded rows are not reverted, duplicated
   or recreated.
@@ -16,10 +14,9 @@ from __future__ import annotations
 from sqlmodel import select
 
 from app.db.session import session_scope
-from app.models import AuditEvent, Check, EntityVersion, Suite, SuiteMember, TestCheck
+from app.models import AuditEvent, EntityVersion, Suite, SuiteMember, TestCheck
 from app.models import Test as CatalogTest
-from app.services.seed import CHECK_SPECS, seed_all
-from app.services.seed.build import SEED_KEY_HINT, make_check
+from app.services.seed import seed_all
 
 GATE = "CI Gate"
 POSTURE_TEST = "Admin footprint"
@@ -105,17 +102,6 @@ def test_an_unedited_gate_is_reset_to_the_bundled_gate_and_audited(client):
 
 
 # ------------------------------------- S16 -------------------------------------
-def test_a_persons_test_with_a_retired_name_is_not_retired(client):
-    resp = client.post("/api/v1/tests", json={"name": "SSO enforcement", "description": "mine"})
-    assert resp.status_code in (200, 201), resp.text
-    tid = resp.json()["id"]
-
-    _restart()
-    with session_scope() as s:
-        test = s.get(CatalogTest, tid)
-        assert test.name == "SSO enforcement" and test.enabled and "retired" not in test.tags
-
-
 def test_only_unedited_seeded_suites_with_retired_names_are_removed(client):
     with session_scope() as s:
         old = Suite(name="Consumer Suite", tags=["seeded"])
@@ -133,70 +119,6 @@ def test_only_unedited_seeded_suites_with_retired_names_are_removed(client):
         assert s.get(Suite, mine) is not None
     (deleted,) = _seed_audits("suite.delete")
     assert deleted.entity_id == old_id and deleted.before["name"] == "Consumer Suite"
-
-
-# ------------------------------------- S17 -------------------------------------
-_TUTORIAL_KEY, _TUTORIAL_SPEC = CHECK_SPECS[0]
-
-
-def _drop_tutorial_test_using(s, check_key: str) -> str:
-    """Remove the seeded Test that uses ``check_key``'s Check, as an older release lacked it."""
-    check = next(c for c in s.exec(select(Check)).all()
-                 if (c.hints or {}).get(SEED_KEY_HINT) == check_key)
-    link = s.exec(select(TestCheck).where(TestCheck.check_id == check.id)).first()
-    test = s.get(CatalogTest, link.test_id)
-    name = test.name
-    for row in s.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all():
-        s.delete(row)
-    for row in s.exec(select(SuiteMember).where(SuiteMember.test_id == test.id)).all():
-        s.delete(row)
-    s.delete(test)
-    s.commit()
-    return name
-
-
-def test_seeded_tests_are_not_wired_to_a_persons_same_named_check(client):
-    with session_scope() as s:
-        name = _drop_tutorial_test_using(s, _TUTORIAL_KEY)
-        for c in s.exec(select(Check)).all():
-            if (c.hints or {}).get(SEED_KEY_HINT) == _TUTORIAL_KEY:
-                c.enabled = False  # the seeder's own copy is gone too
-                s.add(c)
-        s.commit()
-    mine = client.post("/api/v1/checks", json={
-        "display_name": _TUTORIAL_SPEC["display_name"],
-        "operation": {"service": "jobs", "method": "list"},
-        "assertion": "the operation succeeds"}).json()["id"]
-
-    _restart()
-    with session_scope() as s:
-        test = _test(s, name)
-        member_ids = {m.check_id for m in s.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()}
-        assert mine not in member_ids
-        wired = [s.get(Check, cid) for cid in member_ids]
-        assert any((c.hints or {}).get(SEED_KEY_HINT) == _TUTORIAL_KEY for c in wired)
-
-
-def test_a_check_seeded_before_keys_existed_is_still_reused(client):
-    with session_scope() as s:
-        name = _drop_tutorial_test_using(s, _TUTORIAL_KEY)
-        for c in s.exec(select(Check)).all():
-            if (c.hints or {}).get(SEED_KEY_HINT) == _TUTORIAL_KEY:
-                c.enabled = False
-                s.add(c)
-        legacy = make_check(_TUTORIAL_SPEC)  # no seed key, as an older release built it
-        holder = CatalogTest(name="An older seeded test")
-        s.add_all([legacy, holder])
-        s.commit()
-        s.add(TestCheck(test_id=holder.id, check_id=legacy.id, sort_order=0))
-        s.commit()
-        legacy_id = legacy.id
-
-    _restart()
-    with session_scope() as s:
-        test = _test(s, name)
-        member_ids = {m.check_id for m in s.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()}
-        assert legacy_id in member_ids
 
 
 # ------------------------------------- S18 -------------------------------------

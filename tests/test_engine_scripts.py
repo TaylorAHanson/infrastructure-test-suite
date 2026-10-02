@@ -1,6 +1,5 @@
 """Script Tests in the run engine: run params, workspace names, logs stored once,
-the identity rule in a deployed app, bounded SDK timeouts, legacy Check reuse on
-conversion, and bulk loads."""
+the identity rule in a deployed app, bounded SDK timeouts, and bulk loads."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -172,25 +171,6 @@ def test_the_profile_client_passes_timeouts_through_the_sdk_config(monkeypatch):
     client = config.get_workspace_client(http_timeout_seconds=7, retry_timeout_seconds=9)
     assert client.kwargs["config"].kwargs == {
         "http_timeout_seconds": 7, "retry_timeout_seconds": 9, "profile": config.settings.DATABRICKS_PROFILE}
-
-
-# ------------------------ legacy Check reuse (C13) ------------------------
-def test_converting_a_structured_test_keeps_its_check_ids(client):
-    tests = client.get("/api/v1/tests").json()
-    owners: dict[str, int] = {}
-    for t in tests:
-        for m in t["members"]:
-            owners[m["check_id"]] = owners.get(m["check_id"], 0) + 1
-    test = next(t for t in tests if not t.get("script") and t["members"]
-                and all(owners[m["check_id"]] == 1 for m in t["members"]))
-    before = [m["check_id"] for m in test["members"]]
-
-    script = client.get(f"/api/v1/tests/{test['id']}/script").json()["script"]
-    r = client.put(f"/api/v1/tests/{test['id']}/script", json={"script": script})
-    assert r.status_code == 200, r.text
-    assert [m["check_id"] for m in r.json()["members"]] == before
-    checks = {c["id"]: c for c in client.get("/api/v1/checks").json()}
-    assert {checks[cid]["handler_key"] for cid in before} == {"script"}
 
 
 # ------------------------------ bulk loads ------------------------------

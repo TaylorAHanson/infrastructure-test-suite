@@ -13,6 +13,20 @@ observable outcomes, not internal wiring.
 """
 from __future__ import annotations
 
+import pytest
+
+from helpers import script_test
+
+R2 = 'w.clusters.delete(cluster_id="x")'
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
+
 
 # --------------------------------- helpers ---------------------------------
 def register(client, name, safety_class, *, headers=None, identity_handle="kv/sp"):
@@ -22,16 +36,9 @@ def register(client, name, safety_class, *, headers=None, identity_handle="kv/sp
     })
 
 
-def make_check(client, service, method):
-    return client.post("/api/v1/checks", json={
-        "display_name": f"{service}.{method}",
-        "operation": {"service": service, "method": method},
-        "handler_key": "databricks_sdk", "assertion": "the operation succeeds",
-    }).json()
-
-
-def make_test(client, check_id, name):
-    return client.post("/api/v1/tests", json={"name": name, "check_ids": [check_id]}).json()
+def make_test(client, call, name):
+    """An Active script Test whose one check makes ``call``."""
+    return script_test(client, f'with check("{name}"):\n    {call}\n', name)
 
 
 def run_verdict(client, test_id, target_id, *, request_source="API", override=None, depth="full"):
@@ -54,8 +61,7 @@ def test_any_authenticated_human_has_full_capability(client):
     # target, author a Test, trigger a run, downgrade the class (ceremony), and
     # exercise the override — every capability, no 403 at any step.
     prod = register(client, "cap-prod", "prod-for-us").json()
-    check = make_check(client, "clusters", "delete")  # R2
-    test = make_test(client, check["id"], "cap-del")
+    test = make_test(client, R2, "cap-del")
 
     # Trigger (capability) — a within-cap read is fine; the R2 here is blocked by
     # tier, never by a *permission* gate (that's the point of the model).
@@ -125,7 +131,7 @@ def test_upgrade_needs_no_ceremony(client):
 # ---------------- 3. override ceremony + machine rejection ----------------
 def test_override_requires_matching_typed_confirmation(client):
     prod = register(client, "ov-conf", "prod-for-us").json()
-    test = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-c")
+    test = make_test(client, R2, "ov-c")
     # A blank / mismatched typed target name is not a valid confirmation.
     blank = {"target_name": "", "reason": "r", "confirmed": True}
     assert run_verdict(client, test["id"], prod["id"],
@@ -133,12 +139,12 @@ def test_override_requires_matching_typed_confirmation(client):
 
     good = {"target_name": "ov-conf", "reason": "r", "confirmed": True}
     assert run_verdict(client, test["id"], prod["id"],
-                       request_source="UI_MANUAL", override=good) != "BLOCKED_BY_SAFETY"
+                       request_source="UI_MANUAL", override=good) == "PASS"
 
 
 def test_override_is_rejected_for_a_machine_identity(client):
     prod = register(client, "ov-machine", "prod-for-us").json()
-    test = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-m")
+    test = make_test(client, R2, "ov-m")
     override = {"target_name": "ov-machine", "reason": "r", "confirmed": True}
     # Same valid ceremony payload, but a machine (CI) caller can never escalate.
     assert run_verdict(client, test["id"], prod["id"],
@@ -149,7 +155,7 @@ def test_a_machine_caller_cannot_claim_to_be_the_gui(client):
     # The override is keyed on the request source, so the source must come from
     # the caller's identity: a service principal saying UI_MANUAL is not the GUI.
     prod = register(client, "ov-spoof", "prod-for-us").json()
-    test = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-s")
+    test = make_test(client, R2, "ov-s")
     machine = {"X-Forwarded-Client-Id": "ci-sp"}
     body = {"test_ids": [test["id"]], "target_ids": [prod["id"]], "depth": "full",
             "request_source": "UI_MANUAL"}
@@ -166,9 +172,9 @@ def test_a_machine_caller_cannot_claim_to_be_the_gui(client):
 def test_the_forwarded_identity_is_the_requester_and_the_audit_actor(client):
     headers = {"X-Forwarded-Email": "eng@example.com"}
     target = register(client, "who-1", "read-only").json()
-    check = make_check(client, "clusters", "list")
-    client.post("/api/v1/tests?actor=spoofed", json={"name": "who-t", "check_ids": [check["id"]]},
-                headers=headers)
+    created = client.post("/api/v1/tests/script?actor=spoofed", headers=headers, json={
+        "name": "who-t", "script": 'with check("lists clusters"):\n    w.clusters.list()\n'})
+    assert created.status_code == 201, created.text
     run_id = client.post("/api/v1/runs", headers=headers, json={
         "target_ids": [target["id"]], "requested_by": "ui-user"}).json()["run_id"]
 
@@ -180,15 +186,14 @@ def test_the_forwarded_identity_is_the_requester_and_the_audit_actor(client):
 
 # ---------------- 4. R3 global wall ----------------
 def test_r3_is_refused_regardless_of_any_human_capability(client):
-    # The R3-never floor is absolute: a blocklisted (catastrophic) operation can
-    # never even be *expressed* as a Check, so no target, ceremony, or override
+    # The R3-never floor is absolute: a blocklisted (catastrophic) call can
+    # never even be *saved* in a Test script, so no target, ceremony, or override
     # can ever route it. Authoring one is refused up front.
-    resp = client.post("/api/v1/checks", json={
-        "display_name": "metastores.delete",
-        "operation": {"service": "metastores", "method": "delete"},
-        "handler_key": "databricks_sdk", "assertion": "the operation succeeds"})
+    resp = client.post("/api/v1/tests/script", json={
+        "name": "drops a metastore", "script": 'with check("x"):\n    w.metastores.delete(id="m")\n'})
     assert resp.status_code == 422
-    assert "blocklisted" in resp.json()["detail"]
+    assert any("blocklist" in e["message"] for e in resp.json()["detail"]["analysis"]["errors"])
+    assert "drops a metastore" not in {t["name"] for t in client.get("/api/v1/tests").json()}
 
     # And the gate is the belt-and-braces floor beneath authoring: a blocklisted
     # op evaluated directly is BLOCKED even on the widest class with a human

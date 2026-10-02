@@ -96,6 +96,9 @@ class DemoWorkspace:
                        ["path", "name", "size", "modification_time"]), None
         if "read_files(" in lower:
             return _ok([["canary"]], ["value"]), None
+        if lower.startswith("show catalogs"):
+            return _ok([["main"], ["system"], [self.settings.get("canary_catalog") or "validation_canary"]],
+                       ["catalog"]), None
         m = re.match(r"create or replace table\s+([\w.`]+)", lower)
         if m:
             self.tables[m.group(1)] = []

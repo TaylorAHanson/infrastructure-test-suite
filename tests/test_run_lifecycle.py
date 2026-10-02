@@ -12,11 +12,24 @@ single ``quick``/``full`` dial.
 """
 from __future__ import annotations
 
+import pytest
+
 from app.core.stages import stage_ids
 
-from helpers import suite_id as _suite_id
+from helpers import script_test
 from helpers import target_id as _target_id
-from helpers import test_id as _test_id
+
+READS = ('with check("lists warehouses"):\n    record("n", len(w.warehouses.list()))\n'
+         'with check("knows its identity"):\n    w.current_user.me()\n')
+CREATES = 'with check("creates a cluster"):\n    w.clusters.create(spark_version="15.4.x-scala2.12", cluster_name="t")\n'
+
+
+@pytest.fixture(autouse=True)
+def _demo(monkeypatch):
+    """Never touch a real workspace from these tests, whatever profile is configured."""
+    from app.services import run_service
+
+    monkeypatch.setattr(run_service, "_demo_mode", lambda: True)
 
 
 # --------------------------- helpers ---------------------------
@@ -32,33 +45,43 @@ def submit(client, **body):
 
 
 # --------------------------- CRUD roundtrip ---------------------------
-def test_check_test_suite_roundtrip(client):
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "roundtrip check",
-        "operation": {"service": "catalogs", "method": "list",
-                      "params": {"statement": "SHOW CATALOGS", "demo_row_count": 1}},
-        "handler_key": "sql_warehouse",
-        "assertion": "the query returns at least one row",
-    })
-    assert chk.status_code == 201
-    chk = chk.json()
+def test_test_check_suite_roundtrip(client):
+    tst = script_test(client, READS, "roundtrip test", active=False)
+    assert tst["status"] == "draft"
+    cid = tst["members"][0]["check_id"]
+    chk = client.get(f"/api/v1/checks/{cid}").json()
+    assert chk["handler_key"] == "script" and chk["display_name"] == "lists warehouses"
     assert chk["evaluator"] == "deterministic"
     assert chk["risk_tier"] == "R0"  # a read (list) → coarse R0
-    assert chk["compiled_predicate"]["field"] == "row_count"
-
-    tst = client.post("/api/v1/tests", json={"name": "roundtrip test", "check_ids": [chk["id"]]}).json()
-    assert tst["members"][0]["check_id"] == chk["id"]
+    assert cid in {c["id"] for c in client.get("/api/v1/checks").json()}
 
     suite = client.post("/api/v1/suites", json={"name": "roundtrip suite", "test_ids": [tst["id"]]}).json()
     assert suite["test_ids"] == [tst["id"]]
-
-    assert client.get(f"/api/v1/checks/{chk['id']}").json()["id"] == chk["id"]
     assert client.get(f"/api/v1/tests/{tst['id']}").json()["id"] == tst["id"]
+
+
+def test_the_structured_authoring_routes_are_gone(client):
+    tst = script_test(client, READS, "routes", active=False)
+    cid = tst["members"][0]["check_id"]
+    suite = client.post("/api/v1/suites", json={"name": "s", "test_ids": [tst["id"]]}).json()
+    gone = [
+        client.post("/api/v1/checks", json={"display_name": "x"}),
+        client.post("/api/v1/checks/compile", json={"assertion": "the operation succeeds"}),
+        client.patch(f"/api/v1/checks/{cid}", json={"display_name": "x"}),
+        client.get(f"/api/v1/checks/{cid}/versions"),
+        client.post(f"/api/v1/checks/{cid}/rollback/1"),
+        client.post("/api/v1/tests", json={"name": "x", "check_ids": [cid]}),
+        client.get(f"/api/v1/tests/{tst['id']}/yaml"),
+        client.get(f"/api/v1/suites/{suite['id']}/yaml"),
+    ]
+    assert all(r.status_code in (404, 405) for r in gone), [(r.request.url.path, r.status_code) for r in gone]
+    assert client.get(f"/api/v1/checks/{cid}").json()["version"] == 1
 
 
 # --------------------------- async run contract ---------------------------
 def test_post_runs_returns_run_id_and_get_reaches_terminal(client):
-    resp = client.post("/api/v1/runs", json={"test_ids": [_test_id(client, "SQL Warehouse validation")],
+    test = script_test(client, READS, "async")
+    resp = client.post("/api/v1/runs", json={"test_ids": [test["id"]],
                                              "target_ids": [_target_id(client, "read-only")], "depth": "full"})
     assert resp.status_code == 202
     body = resp.json()
@@ -66,65 +89,67 @@ def test_post_runs_returns_run_id_and_get_reaches_terminal(client):
     resource = poll(client, body["run_id"])
     assert resource["phase"] == "terminal"
     assert resource["verdict"] == "PASS"
-    assert resource["run_ids"]                    # fan-out CheckRuns present on the resource
+    assert len(resource["run_ids"]) == 2          # one fan-out CheckRun per check
 
 
-def test_run_over_seeded_test_emits_stage_outcomes(client):
-    run_id, resource = submit(client, test_ids=[_test_id(client, "SQL Warehouse validation")],
+def test_a_script_run_emits_stage_outcomes_on_the_canonical_spine(client):
+    test = script_test(client, READS, "stages")
+    run_id, resource = submit(client, test_ids=[test["id"]],
                               target_ids=[_target_id(client, "read-only")], depth="full")
     assert resource["verdict"] == "PASS"
 
     detail = client.get(f"/api/v1/runs/{resource['run_ids'][0]}").json()
     stages = [s["stage"] for s in detail["stage_outcomes"]]
     assert set(stages).issubset(set(stage_ids()))       # canonical spine only
-    assert "OPERATE" in stages                          # full depth reached operate
+    assert "OPERATE" in stages
     assert "PRECHECK" not in stages and "AUTH" not in stages  # no hardcoded StepKind
     assert detail["connectable"] is True                # derived, not stored
     assert detail["functional"] is True
 
 
-def test_the_connectivity_suite_passes_in_demo_mode_without_a_workspace(client):
-    _, resource = submit(client, suite_ids=[_suite_id(client, "Connectivity Suite")],
-                         target_ids=[_target_id(client, "read-only")], depth="full")
+def test_a_suite_selection_runs_its_tests(client):
+    a, b = script_test(client, READS, "suite a"), script_test(client, READS, "suite b")
+    suite = client.post("/api/v1/suites", json={"name": "picked", "test_ids": [a["id"], b["id"]]}).json()
+    _, resource = submit(client, suite_ids=[suite["id"]], target_ids=[_target_id(client, "read-only")])
     assert resource["verdict"] == "PASS", resource
+    assert set(resource["test_rollup"]) == {a["id"], b["id"]}
 
 
 def test_depth_defaults_to_quick_and_full_is_opt_in(client):
-    # Unspecified depth is the cheap/fast one (ADR-0007 §3): quick runs only the
-    # connectivity end of the spine, so OPERATE never runs.
-    _, quick = submit(client, test_ids=[_test_id(client, "SQL Warehouse validation")],
-                      target_ids=[_target_id(client, "read-only")])
+    # Unspecified depth is the cheap/fast one (ADR-0007 §3): a quick run makes
+    # only read calls, so a mutating check is skipped, never attempted.
+    test = script_test(client, CREATES, "depth")
+    sandbox = _target_id(client, "sandbox")
+    _, quick = submit(client, test_ids=[test["id"]], target_ids=[sandbox])
+    assert quick["depth"] == "quick"
     qdetail = client.get(f"/api/v1/runs/{quick['run_ids'][0]}").json()
-    qstages = [s["stage"] for s in qdetail["stage_outcomes"]]
-    assert "OPERATE" not in qstages and "VERIFY" not in qstages
-    assert qdetail["connectable"] is True
-    assert qdetail["functional"] is None                # no functional stage ran
+    assert qdetail["verdict"] == "SKIPPED"
+    assert [s["outcome"] for s in qdetail["stage_outcomes"] if s["stage"] == "OPERATE"] == ["SKIP"]
 
-    # full is the explicit opt-in and reaches OPERATE.
-    _, full = submit(client, test_ids=[_test_id(client, "SQL Warehouse validation")],
-                     target_ids=[_target_id(client, "read-only")], depth="full")
-    fstages = [s["stage"] for s in client.get(f"/api/v1/runs/{full['run_ids'][0]}").json()["stage_outcomes"]]
-    assert "OPERATE" in fstages
+    # full is the explicit opt-in and makes the call.
+    _, full = submit(client, test_ids=[test["id"]], target_ids=[sandbox], depth="full")
+    fdetail = client.get(f"/api/v1/runs/{full['run_ids'][0]}").json()
+    assert fdetail["verdict"] == "PASS"
+    assert "OPERATE" in [s["stage"] for s in fdetail["stage_outcomes"]]
 
 
 def test_counterfactual_passes_when_operation_is_denied(client):
-    # Cluster-policy Checks are mutating (R1); run against sandbox so the safety
-    # gate permits the attempt and the *policy* denial fails it closed.
-    run_id, resource = submit(client, test_ids=[_test_id(client, "Cluster policy enforcement")],
-                              target_ids=[_target_id(client, "sandbox")], depth="full")
-    details = [client.get(f"/api/v1/runs/{r}").json() for r in resource["run_ids"]]
-    counterfactuals = [d for d in details if d["expectation"] == "DENY"]
-    assert counterfactuals, "the policy test should include a counterfactual"
-    for d in counterfactuals:
-        assert d["verdict"] == "PASS"          # denied => the counterfactual passes
-        assert d["connectable"] is False        # denied at AUTHORIZE
+    test = script_test(client, 'with expect_deny("the forbidden table is denied"):\n'
+                               '    sql("SELECT * FROM main.health.forbidden")\n', "denied")
+    _, resource = submit(client, test_ids=[test["id"]],
+                         target_ids=[_target_id(client, "read-only")], depth="full")
+    (detail,) = [client.get(f"/api/v1/runs/{r}").json() for r in resource["run_ids"]]
+    assert detail["expectation"] == "DENY"
+    assert detail["verdict"] == "PASS"          # denied => the counterfactual passes
+    assert detail["connectable"] is False       # denied at AUTHORIZE
 
 
 def test_verdict_rolls_up_per_test_on_the_resource(client):
-    _, resource = submit(client, test_ids=[_test_id(client, "SQL Warehouse validation")],
+    test = script_test(client, READS, "rollup")
+    _, resource = submit(client, test_ids=[test["id"]],
                          target_ids=[_target_id(client, "read-only")], depth="full")
     assert resource["verdict"] == "PASS"
-    assert all(v == "PASS" for v in resource["test_rollup"].values())
+    assert resource["test_rollup"] == {test["id"]: "PASS"}
     assert resource["failure_summary"] == {"gating": {}, "advisory": {}}
 
 
@@ -133,10 +158,7 @@ def test_fail_closed_mapping_only_pass_is_passing(client):
     # A mutation above the read-only cap → BLOCKED_BY_SAFETY, which is non-pass
     # and must block the pipeline (ADR-0005 §5). Assert it is not PASS and the
     # phase is terminal so the caller stops polling and gates.
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "over-cap delete", "operation": {"service": "clusters", "method": "delete"},
-        "assertion": "the operation succeeds"}).json()
-    tst = client.post("/api/v1/tests", json={"name": "over-cap", "check_ids": [chk["id"]]}).json()
+    tst = script_test(client, 'with check("over-cap delete"):\n    w.clusters.delete(cluster_id="x")\n', "over-cap")
     _, resource = submit(client, test_ids=[tst["id"]], target_ids=[_target_id(client, "read-only")], depth="full")
     assert resource["phase"] == "terminal"
     assert resource["verdict"] == "BLOCKED_BY_SAFETY"
@@ -146,74 +168,26 @@ def test_fail_closed_mapping_only_pass_is_passing(client):
 def test_unknown_target_is_a_hard_error_not_a_silent_pass(client):
     # ADR-0005 §3: a named-but-unregistered target must fail loudly, never drop
     # silently (which could run against nothing and still roll up to PASS).
+    test = script_test(client, READS, "nowhere")
     resp = client.post("/api/v1/runs", json={
-        "test_ids": [_test_id(client, "SQL Warehouse validation")],
-        "target_ids": ["tgt_does_not_exist"], "depth": "full"})
+        "test_ids": [test["id"]], "target_ids": ["tgt_does_not_exist"], "depth": "full"})
     assert resp.status_code == 400
     assert "unknown" in resp.json()["detail"].lower()
 
 
-# --------------------------- blocklist + CRUD/versioning ---------------------------
-def test_blocklisted_operation_refused_by_api(client):
-    resp = client.post("/api/v1/checks", json={
-        "display_name": "danger",
-        "operation": {"service": "workspaces", "method": "delete"},
-        "assertion": "the operation succeeds",
-    })
+def test_a_check_selection_is_refused_not_widened_to_everything(client):
+    # check_ids is no longer a selection; ignoring it would leave the selection
+    # empty, which means "run every Test".
+    before = len(client.get("/api/v1/runs/requests").json())
+    resp = client.post("/api/v1/runs", json={"check_ids": ["chk_x"], "target_ids": [_target_id(client, "read-only")]})
     assert resp.status_code == 422
-    assert "blocklisted" in resp.json()["detail"].lower()
+    assert "check_ids" in resp.text
+    assert len(client.get("/api/v1/runs/requests").json()) == before
 
 
-def test_yaml_export_of_a_test(client):
-    tests = client.get("/api/v1/tests").json()
-    y = client.get(f"/api/v1/tests/{tests[0]['id']}/yaml").json()["yaml"]
-    assert "test:" in y and "checks:" in y
-
-
-def test_yaml_export_carries_each_checks_full_definition(client):
-    """The export is how a human reads what a Test does (#117): each Check's
-    call params and description, not just its service.method label."""
-    import yaml
-
-    y = client.get(f"/api/v1/tests/{_test_id(client, 'SQL Warehouse validation')}/yaml").json()["yaml"]
-    (check,) = yaml.safe_load(y)["test"]["checks"]
-    assert check["operation"]["params"]["statement"] == "SELECT 1 AS healthcheck"
-    assert check["description"].startswith("Run a trivial statement on a SQL warehouse")
-
-
-def test_yaml_export_carries_a_counterfactuals_expected_stage(client):
-    """A DENY Check means nothing without the stage it must be denied at."""
-    import yaml
-
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "analyst can't create clusters",
-        "operation": {"service": "clusters", "method": "create", "verb": "POST"},
-        "assertion": "the operation is denied",
-        "expected_stage": "AUTHORIZE",
-    }).json()
-    test = client.post("/api/v1/tests", json={
-        "name": "cluster-create denied",
-        "members": [{"check_id": chk["id"], "kind": "counterfactual"}],
-    }).json()
-    y = client.get(f"/api/v1/tests/{test['id']}/yaml").json()["yaml"]
-    (check,) = yaml.safe_load(y)["test"]["checks"]
-    assert check["expectation"] == "DENY"
-    assert check["expected_stage"] == "AUTHORIZE"
-
-
-def test_check_versioning_and_rollback(client):
-    chk = client.post("/api/v1/checks", json={
-        "display_name": "v-one",
-        "operation": {"service": "jobs", "method": "list"},
-        "assertion": "the operation succeeds",
-    }).json()
-    assert chk["version"] == 1
-
-    updated = client.patch(f"/api/v1/checks/{chk['id']}", json={"display_name": "v-two"}).json()
-    assert updated["version"] == 2 and updated["display_name"] == "v-two"
-
-    versions = client.get(f"/api/v1/checks/{chk['id']}/versions").json()
-    assert len(versions) >= 2
-
-    rolled = client.post(f"/api/v1/checks/{chk['id']}/rollback/1").json()
-    assert rolled["display_name"] == "v-one" and rolled["version"] == 3
+# --------------------------- blocklist ---------------------------
+def test_blocklisted_call_refused_by_api(client):
+    resp = client.post("/api/v1/tests/script", json={
+        "name": "danger", "script": 'with check("danger"):\n    w.metastores.delete(id="m")\n'})
+    assert resp.status_code == 422
+    assert any("blocklist" in e["message"] for e in resp.json()["detail"]["analysis"]["errors"])

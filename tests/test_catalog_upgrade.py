@@ -1,112 +1,162 @@
-"""seed_all() on a database an older release seeded: retire what it seeded, add
-what the current catalog has, leave a person's own Tests alone, and keep every
-retired row so run history still resolves."""
+"""seed_all() on a database an older release seeded: every structured Test (the
+tutorial ones, retired ones, a person's own) goes with its Checks, results and
+the worked examples; the Connectivity Suite keeps its id and holds the three
+script rewrites; script Tests and their history are untouched; and a second
+start changes nothing."""
 from __future__ import annotations
 
+import pytest
+from sqlalchemy import inspect
 from sqlmodel import select
 
-from app.models import Check, Suite, SuiteMember, Test, TestCheck
+from app.core.enums import RunStatus, TestStatus
+from app.models import AuditEvent, Check, CheckRun, RunRequest, StageOutcome, Suite, SuiteMember, Test, TestCheck
+from app.services.script_tests import create_script_test
 from app.services.seed import seed_all
-from app.services.seed.build import make_check
-from app.services.seed.upgrade import RETIRED_TAG
+
+CONNECTIVITY = ["Egress connectivity", "SQL Warehouse validation", "Unity Catalog access"]
+TUTORIAL = ["Cluster policy enforcement", "Platform self-check"]
 
 
-def _structured(session, name: str, check_name: str) -> Test:
-    check = make_check({"display_name": check_name, "operation": {"service": "clusters", "method": "list"},
-                        "assertion": "the operation succeeds"})
-    test = Test(name=name, tags=["posture"])
-    session.add_all([check, test])
+def _test(s, name: str) -> Test:
+    return s.exec(select(Test).where(Test.name == name)).one()
+
+
+def _suite(s, name: str) -> Suite:
+    return s.exec(select(Suite).where(Suite.name == name)).one()
+
+
+def _members(s, suite: Suite) -> list[Test]:
+    rows = s.exec(select(SuiteMember).where(SuiteMember.suite_id == suite.id)
+                  .order_by(SuiteMember.sort_order)).all()
+    return [s.get(Test, m.test_id) for m in rows]
+
+
+def _structured(s, name: str, handler: str, *, tags: list[str]) -> tuple[Test, Check]:
+    test = Test(name=name, tags=tags, enabled="retired" not in tags)
+    check = Check(display_name=f"{name} check", handler_key=handler,
+                  operation={"service": "statement_execution", "method": "execute_statement"})
+    s.add_all([test, check])
+    s.commit()
+    s.add(TestCheck(test_id=test.id, check_id=check.id, sort_order=0))
+    s.commit()
+    return test, check
+
+
+def _drop_script_test(s, test: Test) -> None:
+    check_ids = [link.check_id for link in s.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()]
+    for row in [*s.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all(),
+                *s.exec(select(SuiteMember).where(SuiteMember.test_id == test.id)).all()]:
+        s.delete(row)
+    s.flush()
+    for check_id in check_ids:
+        s.delete(s.get(Check, check_id))
+    s.delete(test)
+    s.commit()
+
+
+def _record_run(s, status: RunStatus, *results: tuple[Test, Check]) -> RunRequest:
+    request = RunRequest(status=status)
+    s.add(request)
+    s.commit()
+    for test, check in results:
+        run = CheckRun(request_id=request.id, test_id=test.id, check_id=check.id, verdict=RunStatus.PASS)
+        s.add(run)
+        s.commit()
+        s.add(StageOutcome(run_id=run.run_id, stage="OPERATE"))
+    s.commit()
+    return request
+
+
+@pytest.fixture()
+def old_install(session):
+    """Today's script catalog as the previous release left it: the connectivity Tests
+    still structured, the tutorial Tests, a retired Test in a retired seeded Suite,
+    a person's structured and script Tests, run history and the worked examples."""
+    seed_all(session, with_demo_targets=False)
+    connectivity_suite = _suite(session, "Connectivity Suite")
+    full = _suite(session, "Full Regression")
+    for name in CONNECTIVITY:
+        _drop_script_test(session, _test(session, name))
+
+    old: dict[str, tuple[Test, Check]] = {}
+    for name, handler in zip(CONNECTIVITY + TUTORIAL,
+                             ["outbound_http", "sql_warehouse", "sql_warehouse", "databricks_sdk", "lakebase"]):
+        old[name] = _structured(session, name, handler, tags=["tutorial", "example"])
+    old["SSO enforcement (retired)"] = _structured(session, "SSO enforcement (retired)", "databricks_sdk",
+                                                   tags=["security", "retired"])
+    old["My structured test"] = _structured(session, "My structured test", "databricks_sdk", tags=[])
+    session.add(AuditEvent(action="test.create", entity_type="test", actor="bob",
+                           entity_id=old["My structured test"][0].id))
+    retired_suite = Suite(name="Security Posture Suite", tags=["seeded"])
+    session.add(retired_suite)
     session.commit()
-    session.add(TestCheck(test_id=test.id, check_id=check.id, sort_order=0, kind="assertion"))
+    session.add(SuiteMember(suite_id=retired_suite.id, test_id=old["SSO enforcement (retired)"][0].id))
+    for i, name in enumerate(CONNECTIVITY):
+        session.add(SuiteMember(suite_id=connectivity_suite.id, test_id=old[name][0].id, sort_order=i))
+    for i, name in enumerate(CONNECTIVITY + TUTORIAL, start=100):
+        session.add(SuiteMember(suite_id=full.id, test_id=old[name][0].id, sort_order=i))
     session.commit()
-    return test
 
+    mine, _ = create_script_test(session, name="My script test", actor="bob", status=TestStatus.ACTIVE,
+                                 script='with check("mine"):\n    assert w.current_user.me()\n')
+    workspace_access = _test(session, "Workspace access")
+    wa_check = session.get(Check, session.exec(select(TestCheck.check_id)
+                                               .where(TestCheck.test_id == workspace_access.id)).first())
+    legacy_only = _record_run(session, RunStatus.FAIL, old["SQL Warehouse validation"], old["Platform self-check"])
+    mixed = _record_run(session, RunStatus.PASS, old["Egress connectivity"], (workspace_access, wa_check))
 
-def _suite(session, name: str, tests: list[Test]) -> Suite:
-    suite = Suite(name=name, tags=["seeded"])
-    session.add(suite)
+    connection = session.connection()
+    connection.exec_driver_sql("CREATE TABLE worked_examples (id VARCHAR PRIMARY KEY, intent VARCHAR)")
+    connection.exec_driver_sql("INSERT INTO worked_examples VALUES ('ex1', 'list clusters'), ('ex2', 'who am i')")
     session.commit()
-    for i, t in enumerate(tests):
-        session.add(SuiteMember(suite_id=suite.id, test_id=t.id, sort_order=i))
-    session.commit()
-    return suite
+    return {"connectivity_suite": connectivity_suite.id, "mine": mine.id, "workspace_access": workspace_access.id,
+            "legacy_only": legacy_only.id, "mixed": mixed.id}
 
 
-def _old_catalog(session):
-    sso = _structured(session, "SSO enforcement", "SSO enabled")
-    exfil = _structured(session, "Exfiltration controls", "Exfiltration controls disabled")
-    serverless = _structured(session, "Serverless compute", "Serverless SQL is enabled")
-    mine = _structured(session, "My own test", "my check")
-    _suite(session, "Security Posture Suite", [sso, exfil])
-    _suite(session, "CI Gate", [sso, exfil])
-    _suite(session, "Full Regression", [sso, exfil, serverless])
-    return {"sso": sso, "exfil": exfil, "serverless": serverless, "mine": mine}
-
-
-def _members(session, suite_name: str) -> set[str]:
-    suite = session.exec(select(Suite).where(Suite.name == suite_name)).one()
-    return {session.get(Test, m.test_id).name
-            for m in session.exec(select(SuiteMember).where(SuiteMember.suite_id == suite.id)).all()}
-
-
-def test_superseded_seeded_tests_are_retired_in_place(session):
-    old = _old_catalog(session)
+def test_every_structured_test_and_its_history_is_gone(session, old_install):
     seed_all(session, with_demo_targets=False)
 
-    for key in ("sso", "exfil", "serverless"):
-        test = session.get(Test, old[key].id)
-        assert test is not None, "a retired Test is kept for its run history"
-        assert test.enabled is False and RETIRED_TAG in test.tags and test.name.endswith(" (retired)")
-        assert not session.exec(select(SuiteMember).where(SuiteMember.test_id == test.id)).all()
-        (link,) = session.exec(select(TestCheck).where(TestCheck.test_id == test.id)).all()
-        assert session.get(Check, link.check_id).enabled is False
+    assert all(t.script for t in session.exec(select(Test)).all())
+    assert {c.handler_key for c in session.exec(select(Check)).all()} == {"script"}
+    assert not {"Platform self-check", "Cluster policy enforcement", "My structured test",
+                "SSO enforcement (retired)"} & {t.name for t in session.exec(select(Test)).all()}
+    assert session.get(RunRequest, old_install["legacy_only"]) is None
+    (kept,) = session.exec(select(CheckRun).where(CheckRun.request_id == old_install["mixed"])).all()
+    assert kept.test_id == old_install["workspace_access"]
+    assert {o.run_id for o in session.exec(select(StageOutcome)).all()} == {kept.run_id}
+    assert not inspect(session.connection()).has_table("worked_examples")
 
 
-def test_a_persons_own_test_is_untouched(session):
-    old = _old_catalog(session)
+def test_the_connectivity_suite_keeps_its_id_and_holds_the_script_rewrites(session, old_install):
     seed_all(session, with_demo_targets=False)
-    mine = session.get(Test, old["mine"].id)
-    assert mine.name == "My own test" and mine.enabled and RETIRED_TAG not in mine.tags
+
+    suite = session.get(Suite, old_install["connectivity_suite"])
+    assert suite.name == "Connectivity Suite" and suite.version == 2
+    members = _members(session, suite)
+    assert [t.name for t in members] == CONNECTIVITY
+    assert all(t.script for t in members)
+    full = {t.name for t in _members(session, _suite(session, "Full Regression"))}
+    assert full == {t.name for t in session.exec(select(Test)).all()} - {"My script test"}
 
 
-def test_the_current_catalog_is_added_and_its_names_are_taken_by_scripts(session):
-    _old_catalog(session)
+def test_script_tests_and_retired_suites_are_handled_as_before(session, old_install):
     seed_all(session, with_demo_targets=False)
-    live = {t.name: t for t in session.exec(select(Test)).all() if RETIRED_TAG not in (t.tags or [])}
-    for name in ("Workspace access", "Unity Catalog data path", "Exfiltration controls",
-                 "Serverless compute", "SQL Warehouse validation"):
-        assert name in live, name
-    assert live["Exfiltration controls"].script and live["Serverless compute"].script
+
+    assert session.get(Test, old_install["mine"]).enabled
+    assert not session.exec(select(Suite).where(Suite.name == "Security Posture Suite")).all()
 
 
-def test_old_suites_go_and_the_gate_is_rebuilt_exactly(session):
-    _old_catalog(session)
+def test_the_upgrade_is_audited_and_a_second_start_changes_nothing(session, old_install):
     seed_all(session, with_demo_targets=False)
-    names = {s.name for s in session.exec(select(Suite)).all()}
-    assert "Security Posture Suite" not in names
-    assert {"Post-apply health: compute & network", "Security posture (drift)"} <= names
-    assert _members(session, "CI Gate") == {"Workspace access", "Unity Catalog data path"}
-    full = _members(session, "Full Regression")
-    assert "Workspace access" in full and not any(n.endswith(" (retired)") for n in full)
+    purge, upgrade = session.exec(select(AuditEvent).where(AuditEvent.action == "catalog.upgrade")
+                                  .order_by(AuditEvent.ts)).all()
+    assert purge.after["deleted_test_names"] == sorted(CONNECTIVITY + TUTORIAL + [
+        "My structured test", "SSO enforcement (retired)"])
+    assert purge.after["worked_examples"] == 2
+    assert upgrade.after["added_tests"] == 3 and upgrade.after["retired_suites"] == 1
 
-
-def test_upgrading_twice_changes_nothing(session):
-    _old_catalog(session)
+    models = (Test, Check, TestCheck, Suite, SuiteMember, CheckRun, RunRequest, AuditEvent)
+    counts = [len(session.exec(select(m)).all()) for m in models]
     seed_all(session, with_demo_targets=False)
-    counts = [len(session.exec(select(m)).all()) for m in (Test, Check, Suite, SuiteMember)]
-    seed_all(session, with_demo_targets=False)
-    assert [len(session.exec(select(m)).all()) for m in (Test, Check, Suite, SuiteMember)] == counts
-
-
-def test_retired_tests_are_hidden_from_the_list_but_still_resolve(client):
-    from app.db.session import session_scope
-
-    with session_scope() as s:
-        old = _structured(s, "SSO enforcement", "SSO enabled (old)")
-        old_id = old.id
-        seed_all(s, with_demo_targets=False)
-    names = {t["name"] for t in client.get("/api/v1/tests").json()}
-    assert "SSO enforcement (retired)" not in names
-    every = {t["name"] for t in client.get("/api/v1/tests", params={"include_retired": True}).json()}
-    assert "SSO enforcement (retired)" in every
-    assert client.get(f"/api/v1/tests/{old_id}").status_code == 200
+    assert [len(session.exec(select(m)).all()) for m in models] == counts

@@ -53,8 +53,7 @@ def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
     for tid in payload.test_ids:
         if not session.get(Test, tid):
             raise HTTPException(422, f"test {tid} not found")
-    suite = Suite(name=payload.name, description=payload.description, tags=payload.tags,
-                  deterministic_only=payload.deterministic_only)
+    suite = Suite(name=payload.name, description=payload.description, tags=payload.tags)
     session.add(suite)
     session.commit()
     session.refresh(suite)
@@ -79,7 +78,7 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
     for tid in payload.test_ids or []:
         if not session.get(Test, tid):
             raise HTTPException(422, f"test {tid} not found")
-    for key in ("name", "description", "tags", "deterministic_only", "enabled"):
+    for key in ("name", "description", "tags", "enabled"):
         if key in data and data[key] is not None:
             setattr(suite, key, data[key])
     if payload.test_ids is not None:
