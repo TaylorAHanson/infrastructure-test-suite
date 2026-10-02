@@ -30,7 +30,7 @@ from app.core.enums import Expectation, TestStatus
 from app.core.ids import utcnow
 from app.models import Check, Suite, SuiteMember, Test, TestCheck, WorkedExample
 from app.schemas.schemas import AssistantTurnIn, DraftCommitIn
-from app.services import authoring, versioning
+from app.services import pinned_versions
 from app.services.audit import record_audit
 
 logger = logging.getLogger(__name__)
@@ -141,8 +141,7 @@ def commit_draft(session: Session, payload: DraftCommitIn, actor: str = "assista
     session.commit()
     session.refresh(test)
 
-    out = test_snapshot(session, test)
-    versioning.snapshot(session, "test", test.id, test.version, out, actor)
+    out = pinned_versions.record_test_version(session, test, actor)
     record_audit(session, actor=actor, action="test.create", entity_type="test",
                  entity_id=test.id, summary=f"Assistant drafted test {test.name}", after=out)
     return test
@@ -159,15 +158,14 @@ def accept_test(session: Session, test_id: str, actor: str = "api-user") -> Test
         raise ValueError("test not found")
     if test.status == TestStatus.ACTIVE:
         return test
-    before = test_snapshot(session, test)
+    before = pinned_versions.test_snapshot(session, test)
     test.status = TestStatus.ACTIVE
     test.version += 1
     test.updated_at = utcnow()
     session.add(test)
     session.commit()
     session.refresh(test)
-    out = test_snapshot(session, test)
-    versioning.snapshot(session, "test", test.id, test.version, out, actor)
+    out = pinned_versions.record_test_version(session, test, actor)
     record_audit(session, actor=actor, action="test.accept", entity_type="test",
                  entity_id=test.id, summary=f"Accepted draft {test.name} → Active",
                  before=before, after=out)
@@ -228,14 +226,3 @@ def _append_to_suite(session: Session, suite_id: str, test_id: str) -> None:
         return
     session.add(SuiteMember(suite_id=suite_id, test_id=test_id, sort_order=len(existing)))
 
-
-def test_snapshot(session: Session, test: Test) -> dict:
-    rows = session.exec(
-        select(TestCheck).where(TestCheck.test_id == test.id).order_by(TestCheck.sort_order)  # type: ignore[arg-type]
-    ).all()
-    return {
-        **test.model_dump(mode="json"),
-        "members": [{"check_id": m.check_id, "kind": m.kind, "run_as_role": m.run_as_role,
-                     "counterpart_check_id": m.counterpart_check_id, "sort_order": m.sort_order}
-                    for m in rows],
-    }

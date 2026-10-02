@@ -6,15 +6,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
-from app.core.ids import utcnow
 from app.db.session import get_session
 from app.handlers.registry import OperationBlocked
 from app.models import Check
 from app.schemas.schemas import CheckCreate, CheckUpdate, CompileRequest
-from app.services import versioning
+from app.services import pinned_versions, versioning
 from app.services.assertion_compiler import compile_assertion
 from app.services.audit import record_audit
-from app.services.authoring import apply_check_update, build_check_fields
+from app.services.authoring import build_check_fields
 
 router = APIRouter()
 
@@ -80,23 +79,10 @@ def update_check(
     check = session.get(Check, check_id)
     if not check:
         raise HTTPException(404, "check not found")
-    before = check.model_dump(mode="json")
     try:
-        fields = apply_check_update(payload)
+        return pinned_versions.edit_check(session, check, payload, actor)
     except OperationBlocked as exc:
         raise HTTPException(422, str(exc))
-    for key, value in fields.items():
-        setattr(check, key, value)
-    check.version += 1
-    check.updated_at = utcnow()
-    session.add(check)
-    session.commit()
-    session.refresh(check)
-    out = check.model_dump(mode="json")
-    versioning.snapshot(session, "check", check.id, check.version, out, actor)
-    record_audit(session, actor=actor, action="check.update", entity_type="check", entity_id=check.id,
-                 summary=f"Updated check {out['display_name']}", before=before, after=out)
-    return out
 
 
 @router.get("/{check_id}/versions")
@@ -116,21 +102,7 @@ def rollback_check(
     check = session.get(Check, check_id)
     if not check:
         raise HTTPException(404, "check not found")
-    snap = versioning.get_version(session, "check", check_id, version)
-    if not snap:
-        raise HTTPException(404, "version not found")
-    before = check.model_dump(mode="json")
-    restorable = {k: v for k, v in snap.snapshot.items()
-                  if hasattr(check, k) and k not in ("id", "version", "created_at")}
-    for key, value in restorable.items():
-        setattr(check, key, value)
-    check.version += 1
-    check.updated_at = utcnow()
-    session.add(check)
-    session.commit()
-    session.refresh(check)
-    out = check.model_dump(mode="json")
-    versioning.snapshot(session, "check", check.id, check.version, out, actor)
-    record_audit(session, actor=actor, action="check.rollback", entity_type="check", entity_id=check.id,
-                 summary=f"Rolled check back to v{version}", before=before, after=out)
-    return out
+    try:
+        return pinned_versions.rollback_check(session, check, version, actor)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
