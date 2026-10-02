@@ -475,3 +475,18 @@ export interface Branding {
   updated_at: string
   updated_by: string
 }
+
+/** One shipped release from `RELEASE_NOTES.md`, served by `/admin/release-notes`. */
+export interface ReleaseNote {
+  version: string
+  date: string
+  summary: string
+  sections: { title: string; items: string[] }[]
+}
+
+export interface ReleaseNotes {
+  /** The version the backend is running — marks which release is deployed. */
+  current_version: string
+  /** Newest release first. */
+  releases: ReleaseNote[]
+}

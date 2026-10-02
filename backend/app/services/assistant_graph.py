@@ -384,7 +384,7 @@ def _na_author_when_empty(args: dict, result: Any) -> list[dict]:
 
 def _na_search_targets(args: dict, result: Any) -> list[dict]:
     if result:
-        return [{"kind": "navigate", "label": "View targets", "href": "/targets"}]
+        return [{"kind": "navigate", "label": "View targets", "href": "/settings/targets"}]
     return []
 
 

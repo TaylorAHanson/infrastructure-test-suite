@@ -11,6 +11,7 @@ import type {
   CheckRunRow,
   FindingsFeed,
   PageContext,
+  ReleaseNotes,
   RunRequestOut,
   RunRequestSummary,
   SafetyClass,
@@ -47,6 +48,13 @@ export const useTestVersions = (testId?: string) =>
     queryKey: ['test-versions', testId],
     queryFn: () => api.get<TestVersion[]>(`/tests/${testId}/versions`),
     enabled: !!testId,
+  })
+
+// Keyed on the Test's version so an accept or rollback refetches the export.
+export const useTestYaml = (testId: string, version: number) =>
+  useQuery({
+    queryKey: ['test-yaml', testId, version],
+    queryFn: () => api.get<{ yaml: string }>(`/tests/${testId}/yaml`),
   })
 
 export const useAssistantTurn = () =>
@@ -292,6 +300,14 @@ export const auditExportUrl = (filters: AuditFilters, format: 'csv' | 'json'): s
 
 export const useAdminSettings = () =>
   useQuery({ queryKey: ['admin'], queryFn: () => api.get<Record<string, unknown>>('/admin/settings') })
+
+/** Release notes ship with the code, so they only change on a deploy — fetch once. */
+export const useReleaseNotes = () =>
+  useQuery({
+    queryKey: ['release-notes'],
+    queryFn: () => api.get<ReleaseNotes>('/admin/release-notes'),
+    staleTime: Infinity,
+  })
 
 // ---------------- Branding (runtime white-label; ADR-0013 / #38) ----------------
 /** The global branding record. The shell reads it on load and this **poll**

@@ -181,6 +181,37 @@ def test_yaml_export_of_a_test(client):
     assert "test:" in y and "checks:" in y
 
 
+def test_yaml_export_carries_each_checks_full_definition(client):
+    """The export is how a human reads what a Test does (#117): each Check's
+    call params and description, not just its service.method label."""
+    import yaml
+
+    y = client.get(f"/api/v1/tests/{_test_id(client, 'SSO enforcement')}/yaml").json()["yaml"]
+    (check,) = yaml.safe_load(y)["test"]["checks"]
+    assert check["operation"]["params"]["keys"] == "ssoEnabled"
+    assert check["description"].startswith("Confirm federated single sign-on is enabled")
+
+
+def test_yaml_export_carries_a_counterfactuals_expected_stage(client):
+    """A DENY Check means nothing without the stage it must be denied at."""
+    import yaml
+
+    chk = client.post("/api/v1/checks", json={
+        "display_name": "analyst can't create clusters",
+        "operation": {"service": "clusters", "method": "create", "verb": "POST"},
+        "assertion": "the operation is denied",
+        "expected_stage": "AUTHORIZE",
+    }).json()
+    test = client.post("/api/v1/tests", json={
+        "name": "cluster-create denied",
+        "members": [{"check_id": chk["id"], "kind": "counterfactual"}],
+    }).json()
+    y = client.get(f"/api/v1/tests/{test['id']}/yaml").json()["yaml"]
+    (check,) = yaml.safe_load(y)["test"]["checks"]
+    assert check["expectation"] == "DENY"
+    assert check["expected_stage"] == "AUTHORIZE"
+
+
 def test_check_versioning_and_rollback(client):
     chk = client.post("/api/v1/checks", json={
         "display_name": "v-one",

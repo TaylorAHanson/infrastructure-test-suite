@@ -14,7 +14,13 @@ import type { PageContext } from '../types'
 export interface SeedPrompt {
   text: string
   nonce: number
+  /** Which Assistant capability the seeded conversation targets (e.g. `suite`
+   *  for "New suite"). Omitted = keep the shelf's current mode. */
+  mode?: AssistantMode
 }
+
+/** The turn `mode` the harness accepts; `auto` picks from the page context. */
+export type AssistantMode = 'auto' | 'authoring' | 'suite'
 
 interface Ctx {
   pageContext: PageContext
@@ -23,7 +29,7 @@ interface Ctx {
   // pre-seeded with a starting sentence. The shelf watches `seedPrompt`; callers
   // invoke `openWithPrompt` to raise a fresh request.
   seedPrompt: SeedPrompt | null
-  openWithPrompt: (text: string) => void
+  openWithPrompt: (text: string, mode?: AssistantMode) => void
 }
 
 const AssistantContext = createContext<Ctx | null>(null)
@@ -31,8 +37,8 @@ const AssistantContext = createContext<Ctx | null>(null)
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const [pageContext, setPageContext] = useState<PageContext>({ page: '' })
   const [seedPrompt, setSeedPrompt] = useState<SeedPrompt | null>(null)
-  const openWithPrompt = useCallback((text: string) => {
-    setSeedPrompt((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1 }))
+  const openWithPrompt = useCallback((text: string, mode?: AssistantMode) => {
+    setSeedPrompt((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1, mode }))
   }, [])
   const value = useMemo(
     () => ({ pageContext, setPageContext, seedPrompt, openWithPrompt }),

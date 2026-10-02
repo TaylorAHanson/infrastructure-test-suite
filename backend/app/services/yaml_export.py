@@ -16,10 +16,12 @@ def _check_dict(check: Check) -> dict:
     return {
         "id": check.id,
         "display_name": check.display_name,
+        "description": check.description,
         "operation": check.operation,
         "handler_key": check.handler_key,
         "assertion": check.assertion,
         "expectation": check.expectation.value,
+        "expected_stage": check.expected_stage,
         "evaluator": check.evaluator.value,
         "risk_tier": check.risk_tier,
     }
