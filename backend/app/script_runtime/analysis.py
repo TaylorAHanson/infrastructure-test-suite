@@ -29,6 +29,15 @@ def _const(node: Optional[ast.AST]) -> Any:
     return None
 
 
+def _literal(node: Optional[ast.AST]) -> Any:
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+
+
 def _sql_text(node: Optional[ast.AST]) -> Optional[str]:
     """A statement's text for classification; an f-string's holes read as identifiers."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -87,18 +96,24 @@ def analyze(script: str) -> dict:
     check_nodes: list[tuple[ast.With, ast.Call]] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                call = item.context_expr
-                if isinstance(call, ast.Call) and _func_name(call) in _CHECK_FUNCS:
-                    check_nodes.append((node, call))
+            in_this_with = [item.context_expr for item in node.items
+                            if isinstance(item.context_expr, ast.Call) and _func_name(item.context_expr) in _CHECK_FUNCS]
+            if len(in_this_with) > 1:
+                out["ok"] = False
+                out["errors"].append({"line": node.lineno,
+                                      "message": "One check per `with`: put each check in its own `with` block."})
+            check_nodes.extend((node, call) for call in in_this_with)
 
     for with_node, call in sorted(check_nodes, key=lambda x: x[1].lineno):
         fname = _func_name(call)
         name = _const(call.args[0]) if call.args else _const(_kw(call, "name"))
         if not isinstance(name, str) or not name.strip():
-            out["warnings"].append({
+            out["ok"] = False
+            out["errors"].append({
                 "line": call.lineno,
-                "message": "Check names should be plain string literals so each check keeps its run history."})
+                "message": "A check's name must be a plain string literal, like check(\"cluster is pinned\"): "
+                           "the name is how the check keeps its run history. To cover many items, "
+                           "loop inside one check and assert on each."})
             continue
         name = name.strip()
         if name in seen:
@@ -145,8 +160,12 @@ def analyze(script: str) -> dict:
         if chain and len(chain) == 2 and chain[0] == "api" and chain[1] in _RAW_VERBS:
             path = _const(node.args[0]) if node.args else None
             if isinstance(path, str):
-                op = raw_api_operation(chain[1].upper(), path)
+                body = _literal(node.args[1] if len(node.args) > 1 else _kw(node, "body"))
+                op = raw_api_operation(chain[1].upper(), path, body)
                 label = f"{chain[1].upper()} {path}"
+                if op.service == "statement_execution" and not isinstance(body, dict):
+                    out["warnings"].append({"line": node.lineno,
+                                            "message": "The statement body isn't a literal; its SQL is classified at run time."})
             else:
                 out["warnings"].append({"line": node.lineno, "message": "w.api path isn't a literal; its tier is checked at run time."})
                 continue

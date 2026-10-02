@@ -3,17 +3,14 @@ import { ArrowDown, ArrowUp, Layers, Search, Trash2, X } from 'lucide-react'
 
 import { useCreateSuite, useDeleteSuite, useUpdateSuite } from '../hooks/queries'
 import { errorMessage } from '../lib/api'
-import type { Check, StudioTest, Suite } from '../types'
+import type { StudioTest, Suite } from '../types'
 
-// Create or edit a Suite by hand: a name, an ordered pick of Tests, and the
-// deterministic-only flag (a deterministic-only Suite can't hold a Test with an
-// agentic Check; the server enforces it, the list previews it).
+// Create or edit a Suite by hand: a name and an ordered pick of Tests.
 export default function SuiteDialog({
-  suite, tests, checkById, onClose, onSaved,
+  suite, tests, onClose, onSaved,
 }: {
   suite: Suite | null
   tests: StudioTest[]
-  checkById: Map<string, Check>
   onClose: () => void
   onSaved: (id: string | null) => void
 }) {
@@ -22,7 +19,6 @@ export default function SuiteDialog({
   const remove = useDeleteSuite()
   const [name, setName] = useState(suite?.name ?? '')
   const [description, setDescription] = useState(suite?.description ?? '')
-  const [detOnly, setDetOnly] = useState(suite?.deterministic_only ?? false)
   const [enabled, setEnabled] = useState(suite?.enabled ?? true)
   const [picked, setPicked] = useState<string[]>(suite?.test_ids ?? [])
   const [q, setQ] = useState('')
@@ -35,11 +31,9 @@ export default function SuiteDialog({
   }, [onClose])
 
   const byId = useMemo(() => new Map(tests.map((t) => [t.id, t])), [tests])
-  const agentic = (t: StudioTest) => t.members.some((m) => checkById.get(m.check_id)?.evaluator === 'agentic')
   const available = tests.filter(
     (t) => !picked.includes(t.id) && (!q.trim() || `${t.name} ${t.tags.join(' ')}`.toLowerCase().includes(q.trim().toLowerCase())),
   )
-  const conflicts = detOnly ? picked.filter((id) => byId.get(id) && agentic(byId.get(id)!)) : []
 
   const move = (i: number, d: -1 | 1) =>
     setPicked((p) => {
@@ -52,8 +46,9 @@ export default function SuiteDialog({
 
   async function submit() {
     if (!name.trim()) return setError('Give the suite a name.')
+    if (!picked.length) return setError('Add at least one test. A suite with no tests has nothing to run.')
     setError(null)
-    const body = { name: name.trim(), description, test_ids: picked, deterministic_only: detOnly, enabled }
+    const body = { name: name.trim(), description, test_ids: picked, enabled }
     try {
       const out = suite ? await update.mutateAsync({ id: suite.id, ...body }) : await create.mutateAsync(body)
       onSaved(out.id)
@@ -88,18 +83,11 @@ export default function SuiteDialog({
           <input className="input" placeholder="Suite name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
           <input className="input" placeholder="Description (optional)" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <div className="mt-2 flex flex-wrap gap-4 text-sm text-gray-200">
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={detOnly} onChange={(e) => setDetOnly(e.target.checked)} />
-            Deterministic only
-            <span className="text-xs text-muted">(no agentic checks; its verdict never depends on a model)</span>
+        {suite && (
+          <label className="mt-2 flex items-center gap-2 text-sm text-gray-200">
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
           </label>
-          {suite && (
-            <label className="flex items-center gap-2">
-              <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
-            </label>
-          )}
-        </div>
+        )}
 
         <div className="mt-3 grid min-h-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="flex min-h-0 flex-col rounded-lg border border-edge">
@@ -118,7 +106,6 @@ export default function SuiteDialog({
                   >
                     <span className="truncate">{t.name}</span>
                     {t.status === 'draft' && <span className="badge bg-warn/15 text-warn">draft</span>}
-                    {agentic(t) && <span className="badge bg-flaky/15 text-flaky">agentic</span>}
                     <span className="ml-auto text-[11px] text-accent">add</span>
                   </button>
                 </li>
@@ -135,7 +122,7 @@ export default function SuiteDialog({
                 return (
                   <li key={id} className="flex items-center gap-1 rounded px-2 py-1 text-sm hover:bg-ink-soft">
                     <span className="w-5 text-[11px] text-muted">{i + 1}</span>
-                    <span className={`truncate ${conflicts.includes(id) ? 'text-fail' : 'text-gray-200'}`}>{t?.name ?? id}</span>
+                    <span className="truncate text-gray-200">{t?.name ?? id}</span>
                     {t?.status === 'draft' && <span className="badge bg-warn/15 text-warn" title="Drafts don't run until activated">draft</span>}
                     <span className="ml-auto flex shrink-0 items-center">
                       <button className="p-0.5 text-muted hover:text-white disabled:opacity-30" disabled={i === 0} onClick={() => move(i, -1)}><ArrowUp size="12" /></button>
@@ -150,12 +137,6 @@ export default function SuiteDialog({
           </div>
         </div>
 
-        {conflicts.length > 0 && (
-          <div className="mt-2 text-xs text-fail">
-            {conflicts.length} {conflicts.length === 1 ? 'test has' : 'tests have'} agentic checks, which a deterministic-only
-            suite can't hold. Remove them or untick deterministic only.
-          </div>
-        )}
         {error && <div className="mt-2 text-xs text-fail">{error}</div>}
 
         <div className="mt-3 flex items-center gap-2">
@@ -164,8 +145,14 @@ export default function SuiteDialog({
               <Trash2 size="14" /> Delete suite
             </button>
           )}
-          <button className="btn ml-auto" onClick={onClose}>Cancel</button>
-          <button className="btn btn-accent" onClick={submit} disabled={busy || conflicts.length > 0}>
+          {!picked.length && <span className="ml-auto text-xs text-muted">Add at least one test to save.</span>}
+          <button className={`btn ${picked.length ? 'ml-auto' : ''}`} onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-accent"
+            onClick={submit}
+            disabled={busy || !picked.length}
+            title={picked.length ? undefined : 'A suite needs at least one test'}
+          >
             {suite ? 'Save suite' : 'Create suite'}
           </button>
         </div>

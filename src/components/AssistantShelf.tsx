@@ -7,9 +7,18 @@ import {
 
 import { useAssistantContext } from '../lib/assistantContext'
 import type { AssistantMode } from '../lib/assistantContext'
-import { useAssistantTurn, useBranding, useStarterPrompts } from '../hooks/queries'
+import { useAssistantTurn, useBranding } from '../hooks/queries'
 import { errorMessage } from '../lib/api'
-import type { NextAction, RcaSuggestion, ToolCall, WorkedExample } from '../types'
+import type { NextAction, RcaSuggestion, ToolCall } from '../types'
+
+// Shown on an empty conversation. Each asks for a test, so sending one hands it
+// to the test editor's assistant.
+const STARTER_PROMPTS = [
+  'Write a test that every SQL warehouse auto-stops within 60 minutes.',
+  'Write a test that the canary ping table can be read and the forbidden table is refused.',
+  'Write a test that the workspace has the expected Unity Catalog metastore assigned.',
+  'Write a test that no personal access token is valid for more than 90 days.',
+]
 
 interface AssistantShelfProps {
   open: boolean
@@ -38,7 +47,6 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   // with a different mode, or the user moves to another page.
   const [mode, setMode] = useState<AssistantMode>('auto')
   const turn = useAssistantTurn()
-  const { data: starters } = useStarterPrompts()
   // The Assistant's display name is a branding setting (ADR-0012/0013), default "Assistant".
   const { data: branding } = useBranding()
   const assistantName = branding?.assistant_name || 'Assistant'
@@ -100,11 +108,9 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
     reset()
     try {
       const res = await turn.mutateAsync({ turn: text, page_context: pageContext, mode })
-      if (res.mode === 'authoring') {
-        setAuthoring(text)
-        setAnswer(res.draft?.clarifying_question ?? null)
-      } else if (res.mode === 'query') setAnswer(res.answer ?? null)
-      else setRca(res.rca ?? null)
+      if (res.mode === 'authoring') setAuthoring(text)
+      if (res.mode === 'rca') setRca(res.rca ?? null)
+      else setAnswer(res.answer ?? null)
       // Additive: which tools ran + the contextual follow-up buttons (#65).
       setToolCalls(res.tool_calls ?? [])
       setNextActions(res.next_actions ?? [])
@@ -175,9 +181,14 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
 
             {/* Empty-conversation onboarding: concrete example prompts a
                 first-time user can click to see what they can ask (story 30). */}
-            {!authoring && !rca && !answer && !turn.isPending &&
-              starters && starters.length > 0 && (
-              <StarterPrompts examples={starters} onPick={(intent) => setText(intent)} />
+            {!authoring && !rca && !answer && !turn.isPending && (
+              <StarterPrompts
+                prompts={STARTER_PROMPTS}
+                onPick={(p) => {
+                  setText(p)
+                  setMode('authoring')
+                }}
+              />
             )}
 
             {/* Tool-call transparency (#65): the tools the agent ran this turn,
@@ -185,7 +196,7 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
                 before the answer so it reads as "it looked, then it answered." */}
             {toolCalls.length > 0 && <ToolCallList calls={toolCalls} />}
 
-            {authoring && <AuthoringHandoff onOpen={() => openEditor(authoring)} />}
+            {authoring && <AuthoringHandoff note={answer} onOpen={() => openEditor(authoring)} />}
             {rca && <RcaView rca={rca} />}
             {!authoring && !rca && answer && <AnswerView answer={answer} />}
 
@@ -217,15 +228,14 @@ export default function AssistantShelf({ open, onOpen, onClose, width, onResizeS
   )
 }
 
-// Onboarding starter prompts (spec #56 story 30): 3-4 curated examples from the
-// WorkedExample library. Clicking one populates the input with its intent text —
-// nothing is asked or saved until the user hits send.
+// Onboarding starter prompts (spec #56 story 30). Clicking one populates the
+// input — nothing is asked or saved until the user hits send.
 function StarterPrompts({
-  examples,
+  prompts,
   onPick,
 }: {
-  examples: WorkedExample[]
-  onPick: (intent: string) => void
+  prompts: string[]
+  onPick: (prompt: string) => void
 }) {
   return (
     <div className="mb-3">
@@ -233,13 +243,13 @@ function StarterPrompts({
         <Lightbulb size="12" /> Try asking
       </div>
       <div className="space-y-2">
-        {examples.slice(0, 4).map((ex) => (
+        {prompts.map((p) => (
           <button
-            key={ex.id}
+            key={p}
             className="w-full rounded-lg border border-edge bg-panel p-2 text-left text-sm text-gray-200 hover:border-accent hover:text-white"
-            onClick={() => onPick(ex.intent)}
+            onClick={() => onPick(p)}
           >
-            {ex.intent}
+            {p}
           </button>
         ))}
       </div>
@@ -306,12 +316,13 @@ function NextActions({
 
 // A request to write a test: the editor's assistant writes the script with you,
 // beside the code, so the handoff carries the sentence over.
-function AuthoringHandoff({ onOpen }: { onOpen: () => void }) {
+function AuthoringHandoff({ note, onOpen }: { note: string | null; onOpen: () => void }) {
   return (
     <div className="card">
       <div className="mb-1 flex items-center gap-2 card-title">
         <Code2 size="14" /> Write it in the test editor
       </div>
+      {note && <p className="mb-2 text-sm text-gray-200">{note}</p>}
       <p className="mb-3 text-sm text-gray-200">
         Tests are Python scripts. The editor's assistant will draft this one, check every SDK call,
         and dry-run it with you before anything is saved.

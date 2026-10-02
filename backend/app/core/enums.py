@@ -251,6 +251,8 @@ class AuditAction(str, Enum):
     EXAMPLE_PROMOTE = "example.promote"
     # Run-completion webhook sink edit (the sink is itself config, ADR-0016 §2).
     WEBHOOK_CONFIG_CHANGE = "webhook.config.change"
+    # Assistant model / loop settings edit (which model reads targets and drafts code).
+    ASSISTANT_CONFIG_CHANGE = "assistant.config.change"
 
 
 #: The config-plane event types the audit log surfaces. Membership here — not a

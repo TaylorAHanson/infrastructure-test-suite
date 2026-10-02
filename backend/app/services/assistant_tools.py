@@ -1,36 +1,44 @@
-"""The Assistant's tools — grounding (write-path) + RCA (read-path), ADR-0012.
+"""The Assistant's tools — catalog lookups + RCA, ADR-0012.
 
 The Assistant is **one agent differentiated by the tools it's given**, and the
-safety guardrails **ride on the tools, not the agent** (ADR-0012 §3):
+safety guardrails **ride on the tools, not the agent** (ADR-0012 §3). Every
+tool here is **strictly read-only** (it only reads, never mutates) and
+its output is **advisory** (ADR-0008): it never gates and never changes state.
+This is what keeps troubleshooting from ever mutating a target (user story 17).
 
-* **Write-path grounding tools** — :func:`search_sdk_surface`,
-  :func:`search_targets`, :func:`search_roles`, :func:`search_examples` — feed
-  the NL→Test compiler (:mod:`app.services.authoring`). ``search_roles`` returns
-  **only the roles a target has actually registered** (ADR-0018, user story 24),
-  so a suggested ``run-as-role`` can never name an invented or class-disallowed
-  role. Grounding is over the live SDK surface + the app's own catalogs.
+* **Catalog lookups** — :func:`search_targets`, :func:`search_roles`,
+  :func:`search_tests`, :func:`search_suites` — answer "do we have a test for
+  X?" and name what exists. ``search_roles`` returns **only the roles a target
+  has actually registered** (ADR-0018, user story 24), never an invented one.
 
-* **Read-path / RCA tools** — :func:`run_history`,
-  :func:`commit_provenance_thread`, :func:`failure_archive`,
-  :func:`operation_reference` — are **strictly read-only** (they only ``select``,
-  never mutate) and their output is **advisory** (ADR-0008): it never gates and
-  never changes state. This is what keeps troubleshooting from ever mutating a
-  target (user story 17).
+* **RCA tools** — :func:`run_history`, :func:`commit_provenance_thread`,
+  :func:`failure_archive` — the run history a triage reads.
+
+Writing a Test is the script editor agent's job (:mod:`app.services.editor_agent`).
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
-from app.core import sdk_surface
-from app.models import Check, CheckRun, RunRequest, Suite, SuiteMember, Target, Test, TestCheck, WorkedExample
+from app.core.enums import RunStatus
+from app.models import Check, CheckRun, RunRequest, Suite, SuiteMember, Target, Test, TestCheck
 from app.services.roles import normalize_roles
 
 #: Verdict values that represent a failed/bad run outcome (in-memory checks only;
 #: DB-level `.in_()` calls keep their own tuples for compatibility).
 _BAD_VERDICTS: frozenset[str] = frozenset({"FAIL", "ERROR", "BLOCKED_BY_SAFETY"})
+_BAD_STATUSES = (RunStatus.FAIL, RunStatus.ERROR, RunStatus.BLOCKED_BY_SAFETY)
+
+#: Exactly the columns :func:`_run_summary` / :func:`_boundary_ref` read, so the
+#: read-path never loads a run's evidence blob it doesn't return.
+_SUMMARY_COLUMNS = (
+    CheckRun.run_id, CheckRun.check_id, CheckRun.target_id, CheckRun.verdict,
+    CheckRun.failure_bucket, CheckRun.failure_stage, CheckRun.git_sha,
+    CheckRun.event_ref, CheckRun.created_at,
+)
 
 
 def _tokenize_query(q: str) -> list[str]:
@@ -39,13 +47,8 @@ def _tokenize_query(q: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Write-path grounding tools
+# Catalog lookups
 # ---------------------------------------------------------------------------
-def search_sdk_surface(query: str, limit: int = 8) -> list[dict]:
-    """Ground on the live SDK/OpenAPI surface minus the blocklist (ADR-0017)."""
-    return [op.to_dict() for op in sdk_surface.search_sdk_surface(query, limit)]
-
-
 def search_targets(session: Session, query: str = "", limit: int = 10) -> list[dict]:
     """Return targets matching a free-text query (name/workspace/tags)."""
     targets = session.exec(select(Target)).all()
@@ -87,9 +90,8 @@ def search_roles(session: Session, target_ref: str) -> list[dict]:
 def search_suites(session: Session, query: str = "", limit: int = 10) -> list[dict]:
     """Return available suites matching a free-text query (name/description/tags).
 
-    Read-only grounding for run-submission proposals: lets the model discover
-    which suites exist and how many tests each contains, so it can propose a
-    sensible run without inventing suite ids.
+    Lets the model name which suites exist and how many tests each contains
+    without inventing suite ids.
     """
     # One aggregating query for member counts — avoids N+1 selects per suite.
     counts: dict[str, int] = dict(session.exec(
@@ -117,26 +119,6 @@ def search_suites(session: Session, query: str = "", limit: int = 10) -> list[di
     return out[:limit]
 
 
-def search_examples(session: Session, query: str, limit: int = 5) -> list[dict]:
-    """Rank the worked-example library against an intent (ADR-0006 §9)."""
-    examples = session.exec(select(WorkedExample)).all()
-    terms = _tokenize_query(query)
-
-    def score(ex: WorkedExample) -> int:
-        hay = " ".join([ex.intent, ex.title, ex.description, ex.assertion,
-                        " ".join(ex.tags or [])]).lower()
-        return sum(1 for t in terms if t in hay)
-
-    ranked = sorted(examples, key=score, reverse=True)
-    hits = [ex for ex in ranked if score(ex) > 0] or ranked[:limit]
-    return [{
-        "id": ex.id, "intent": ex.intent, "title": ex.title,
-        "operation": ex.operation, "handler_key": ex.handler_key,
-        "assertion": ex.assertion, "expectation": ex.expectation.value,
-        "counterfactual": ex.counterfactual, "tags": ex.tags,
-    } for ex in hits[:limit]]
-
-
 #: Per-field weight for :func:`search_tests` ranking. Each query term scores the
 #: best field it appears in, so script text only breaks ties and surfaces Tests
 #: that nothing more descriptive matched.
@@ -145,11 +127,9 @@ _TEST_FIELD_WEIGHTS = (("name", 4), ("tags", 3), ("description", 2), ("checks", 
 
 def search_tests(session: Session, query: str = "", status: Optional[str] = None,
                  limit: int = 10) -> list[dict]:
-    """Search Tests (and their member Checks) by name, description, operation, tags,
-    script text and status, ranked by where the terms matched (:data:`_TEST_FIELD_WEIGHTS`).
-
-    ``operation_summary`` reflects the first member Check's operation; use
-    ``check_count`` to know when a Test has more.
+    """Search Tests (and their checks) by name, description, check names and the SDK
+    calls they make, tags, script text and status, ranked by where the terms matched
+    (:data:`_TEST_FIELD_WEIGHTS`).
     """
     tests = session.exec(select(Test)).all()
     # Bulk-load all TestChecks and Checks to avoid N+1 round-trips.
@@ -171,8 +151,7 @@ def search_tests(session: Session, query: str = "", status: Optional[str] = None
             "tags": " ".join(test.tags or []),
             "description": test.description,
             "checks": " ".join(
-                f"{c.operation.get('service', '')}.{c.operation.get('method', '')} "
-                f"{c.display_name} {c.description}"
+                f"{c.display_name} {c.description} {' '.join((c.hints or {}).get('calls') or [])}"
                 for c in checks),
             "script": test.script or "",
         }
@@ -182,32 +161,17 @@ def search_tests(session: Session, query: str = "", status: Optional[str] = None
             for term in terms)
         if terms and score == 0:
             continue
-        op_summary = None
-        if checks:
-            op = checks[0].operation or {}
-            op_summary = f"{op.get('service', '')}.{op.get('method', '')}".strip(".")
         scored.append((score, {
             "id": test.id, "name": test.name, "description": test.description,
             "tags": test.tags or [], "status": test.status.value,
-            "operation_summary": op_summary, "check_count": len(checks),
+            "checks": [c.display_name for c in checks], "check_count": len(checks),
         }))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [result for _, result in scored[:limit]]
 
 
-def operation_reference(service: str, method: str) -> Optional[dict]:
-    """Look up one SDK-surface operation (verb, stages, hints) — read-only.
-
-    A read-path RCA tool *and* the write-path's grounding lookup: it resolves a
-    ``service.method`` to its surface entry (coarse verb, canonical stages, and
-    the counterfactual/evidence hints that survive of the manifest, ADR-0017 §5).
-    """
-    op = sdk_surface.find_operation(service, method)
-    return op.to_dict() if op else None
-
-
 # ---------------------------------------------------------------------------
-# Read-path / RCA tools — strictly read-only, advisory
+# RCA tools
 # ---------------------------------------------------------------------------
 def run_history(session: Session, *, check_id: Optional[str] = None,
                 target_id: Optional[str] = None,
@@ -219,14 +183,13 @@ def run_history(session: Session, *, check_id: Optional[str] = None,
     """
     if not check_id and not target_id:
         return _global_run_summary(session)
-    stmt = select(CheckRun)
+    stmt = select(*_SUMMARY_COLUMNS)
     if check_id:
         stmt = stmt.where(CheckRun.check_id == check_id)
     if target_id:
         stmt = stmt.where(CheckRun.target_id == target_id)
-    stmt = stmt.order_by(CheckRun.created_at.desc())  # type: ignore[attr-defined]
-    rows = session.exec(stmt).all()[:limit]
-    return [_run_summary(r) for r in rows]
+    stmt = stmt.order_by(CheckRun.created_at.desc()).limit(max(limit, 0))  # type: ignore[attr-defined]
+    return [_run_summary(r) for r in session.exec(stmt).all()]
 
 
 def _global_run_summary(session: Session) -> dict:
@@ -234,7 +197,7 @@ def _global_run_summary(session: Session) -> dict:
     req = session.exec(select(RunRequest).order_by(RunRequest.created_at.desc())).first()  # type: ignore[attr-defined]
     if req is None:
         return {"message": "No runs have been executed yet."}
-    runs = session.exec(select(CheckRun).where(CheckRun.request_id == req.id)).all()
+    runs = session.exec(select(*_SUMMARY_COLUMNS).where(CheckRun.request_id == req.id)).all()
     counts: dict[str, int] = {"pass": 0, "fail": 0, "error": 0, "blocked": 0, "pending": 0}
     for r in runs:
         v = r.verdict.value
@@ -275,26 +238,84 @@ def commit_provenance_thread(session: Session, *, check_id: str,
     as an anchor (ADR-0015), so this scan still finds it and diffs the *right*
     last-good, not the window edge.
     """
-    stmt = select(CheckRun).where(CheckRun.check_id == check_id)
+    scope = [CheckRun.check_id == check_id]
     if target_id:
-        stmt = stmt.where(CheckRun.target_id == target_id)
-    runs = sorted(session.exec(stmt).all(), key=lambda r: r.created_at)
+        scope.append(CheckRun.target_id == target_id)
+    last_green = session.exec(
+        select(*_SUMMARY_COLUMNS).where(*scope, CheckRun.verdict == RunStatus.PASS)
+        .order_by(CheckRun.created_at.desc(), CheckRun.run_id.desc()).limit(1)  # type: ignore[attr-defined]
+    ).first()
+    bad = select(*_SUMMARY_COLUMNS).where(*scope, CheckRun.verdict.in_(_BAD_STATUSES))  # type: ignore[attr-defined]
+    if last_green is not None:
+        bad = bad.where(CheckRun.created_at > last_green.created_at)
+    first_bad = session.exec(
+        bad.order_by(CheckRun.created_at.asc(), CheckRun.run_id.asc()).limit(1)  # type: ignore[attr-defined]
+    ).first()
+    total = session.exec(select(func.count()).select_from(CheckRun).where(*scope)).one()
+    return _thread(check_id, target_id, last_green, first_bad, total)
 
-    last_green: Optional[CheckRun] = None
-    first_bad: Optional[CheckRun] = None
-    for r in runs:
-        if r.verdict.value == "PASS":
-            last_green = r
-            first_bad = None  # a later green resets the search
-        elif r.verdict.value in _BAD_VERDICTS and first_bad is None:
-            first_bad = r
+
+def commit_provenance_threads(session: Session,
+                              series: Iterable[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """:func:`commit_provenance_thread` for many ``(target_id, check_id)`` series at once.
+
+    A fixed number of statements however many series or how long their history,
+    so the findings feed doesn't issue per-finding lookups. Every ``target_id``
+    must be set (a target-less series means "any target" to the single-series
+    tool, which this partitioning can't express).
+    """
+    keys = set(series)
+    if not keys:
+        return {}
+    scope = (CheckRun.target_id.in_(sorted({t for t, _ in keys})),  # type: ignore[union-attr]
+             CheckRun.check_id.in_(sorted({c for _, c in keys})))  # type: ignore[attr-defined]
+    partition = (CheckRun.target_id, CheckRun.check_id)
+
+    green_rank = func.row_number().over(
+        partition_by=partition,
+        order_by=(CheckRun.created_at.desc(), CheckRun.run_id.desc()),  # type: ignore[attr-defined]
+    ).label("series_rank")
+    greens = select(*_SUMMARY_COLUMNS, green_rank).where(
+        *scope, CheckRun.verdict == RunStatus.PASS).subquery()
+    last_green = {(r.target_id, r.check_id): r for r in session.exec(
+        select(*(greens.c[c.key] for c in _SUMMARY_COLUMNS)).where(greens.c.series_rank == 1)
+    ).all()}
+
+    green_at = select(CheckRun.target_id, CheckRun.check_id,
+                      func.max(CheckRun.created_at).label("at")).where(
+        *scope, CheckRun.verdict == RunStatus.PASS).group_by(*partition).subquery()
+    bad_rank = func.row_number().over(
+        partition_by=partition,
+        order_by=(CheckRun.created_at.asc(), CheckRun.run_id.asc()),  # type: ignore[attr-defined]
+    ).label("series_rank")
+    bads = (
+        select(*_SUMMARY_COLUMNS, bad_rank)
+        .outerjoin(green_at, and_(green_at.c.target_id == CheckRun.target_id,
+                                  green_at.c.check_id == CheckRun.check_id))
+        .where(*scope, CheckRun.verdict.in_(_BAD_STATUSES),  # type: ignore[attr-defined]
+               or_(green_at.c.at.is_(None), CheckRun.created_at > green_at.c.at))
+        .subquery()
+    )
+    first_bad = {(r.target_id, r.check_id): r for r in session.exec(
+        select(*(bads.c[c.key] for c in _SUMMARY_COLUMNS)).where(bads.c.series_rank == 1)
+    ).all()}
+
+    totals = {(t, c): n for t, c, n in session.exec(
+        select(CheckRun.target_id, CheckRun.check_id, func.count()).where(*scope).group_by(*partition)
+    ).all()}
+
+    return {key: _thread(key[1], key[0], last_green.get(key), first_bad.get(key), totals.get(key, 0))
+            for key in keys}
+
+
+def _thread(check_id: str, target_id: Optional[str], last_green, first_bad, total_runs: int) -> dict:
     return {
         "check_id": check_id,
         "target_id": target_id,
         "last_green": _run_summary(last_green) if last_green else None,
         "first_bad": _run_summary(first_bad) if first_bad else None,
         "boundary_ref": _boundary_ref(first_bad),
-        "total_runs": len(runs),
+        "total_runs": total_runs,
     }
 
 
@@ -317,14 +338,13 @@ def _boundary_ref(first_bad: Optional[CheckRun]) -> Optional[dict]:
 def failure_archive(session: Session, *, bucket: Optional[str] = None,
                     stage: Optional[str] = None, limit: int = 20) -> list[dict]:
     """Prior occurrences of a ``bucket @ stage`` failure across runs — read-only."""
-    stmt = select(CheckRun).where(CheckRun.verdict.in_(("FAIL", "ERROR", "BLOCKED_BY_SAFETY")))  # type: ignore[attr-defined]
+    stmt = select(*_SUMMARY_COLUMNS).where(CheckRun.verdict.in_(_BAD_STATUSES))  # type: ignore[attr-defined]
     if bucket:
         stmt = stmt.where(CheckRun.failure_bucket == bucket)
     if stage:
         stmt = stmt.where(CheckRun.failure_stage == stage)
-    stmt = stmt.order_by(CheckRun.created_at.desc())  # type: ignore[attr-defined]
-    rows = session.exec(stmt).all()[:limit]
-    return [_run_summary(r) for r in rows]
+    stmt = stmt.order_by(CheckRun.created_at.desc()).limit(max(limit, 0))  # type: ignore[attr-defined]
+    return [_run_summary(r) for r in session.exec(stmt).all()]
 
 
 # ---------------------------------------------------------------------------

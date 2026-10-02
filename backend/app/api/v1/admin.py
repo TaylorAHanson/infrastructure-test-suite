@@ -1,15 +1,17 @@
-"""Admin / settings endpoints: seed + purge + registry introspection + release notes."""
+"""Admin / settings endpoints: seed + purge + settings introspection + release notes."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
+from app.api.deps import actor_handle
+from app.clients.databricks import get_workspace_context
 from app.core.config import get_settings
 from app.core.release_notes import load_release_notes
 from app.core.stages import ordered_stages
 from app.core.taxonomy import all_buckets
 from app.db.session import get_session
-from app.handlers.registry import registry
 from app.models import (
     Check,
     CheckRun,
@@ -21,24 +23,37 @@ from app.models import (
     Test,
     TestCheck,
 )
+from app.services.audit import PURGE_ALL, PURGE_RUNS, record_audit
 
 router = APIRouter()
+
+
+def _count(session: Session, model) -> int:
+    return session.exec(select(func.count()).select_from(model)).one()
+
+
+def _demo_mode() -> bool:
+    # Same answer as databricks_available(), which builds a WorkspaceClient per
+    # call (~1 s locally without a profile); the app shell fetches these settings
+    # on every page load, so read the process-cached workspace context instead.
+    return not (get_settings().is_databricks_app or get_workspace_context().available)
 
 
 @router.get("/settings")
 def get_admin_settings(session: Session = Depends(get_session)) -> dict:
     return {
-        "registered_handler_keys": sorted(registry.keys()),
+        "environment": get_settings().ENVIRONMENT,
+        "feature_flags": {"demo_mode": _demo_mode()},
         "canonical_stages": [{"id": s.id, "label": s.label, "connectivity": s.connectivity}
                              for s in ordered_stages()],
         "failure_taxonomy": [{"id": b.id, "connectivity": b.connectivity, "stage": b.stage}
                              for b in all_buckets()],
         "catalog_counts": {
-            "checks": len(session.exec(select(Check)).all()),
-            "tests": len(session.exec(select(Test)).all()),
-            "suites": len(session.exec(select(Suite)).all()),
-            "targets": len(session.exec(select(Target)).all()),
-            "check_runs": len(session.exec(select(CheckRun)).all()),
+            "checks": _count(session, Check),
+            "tests": _count(session, Test),
+            "suites": _count(session, Suite),
+            "targets": _count(session, Target),
+            "check_runs": _count(session, CheckRun),
         },
     }
 
@@ -60,32 +75,33 @@ def seed_catalog(demo: bool = False, session: Session = Depends(get_session)) ->
     seed_all(session, with_demo_targets=demo)
     return {
         "seeded": True,
-        "checks": len(session.exec(select(Check)).all()),
-        "tests": len(session.exec(select(Test)).all()),
-        "suites": len(session.exec(select(Suite)).all()),
+        "checks": _count(session, Check),
+        "tests": _count(session, Test),
+        "suites": _count(session, Suite),
     }
 
 
-def _purge(session: Session, models) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for model in models:
-        rows = session.exec(select(model)).all()
-        counts[model.__name__] = len(rows)
-        for row in rows:
-            session.delete(row)
-        session.flush()
-    session.commit()
+def _purge(session: Session, models, *, actor: str, action: str, summary: str) -> dict[str, int]:
+    """Bulk-delete ``models`` (children first) and audit it, in one transaction."""
+    counts = {model.__name__: session.execute(delete(model)).rowcount for model in models}
+    record_audit(session, actor=actor, action=action, entity_type="database",
+                 summary=f"{summary}: " + ", ".join(f"{n} {name}" for name, n in counts.items()),
+                 after=counts)
     return counts
 
 
 @router.post("/purge-runs")
-def purge_runs(session: Session = Depends(get_session)) -> dict:
-    return {"purged": True, "counts": _purge(session, (StageOutcome, CheckRun, RunRequest))}
+def purge_runs(session: Session = Depends(get_session),
+               actor: str = Depends(actor_handle())) -> dict:
+    return {"purged": True, "counts": _purge(
+        session, (StageOutcome, CheckRun, RunRequest),
+        actor=actor, action=PURGE_RUNS, summary="Purged run history")}
 
 
 @router.post("/purge-all")
-def purge_all(session: Session = Depends(get_session)) -> dict:
+def purge_all(session: Session = Depends(get_session),
+              actor: str = Depends(actor_handle())) -> dict:
     return {"purged": True, "counts": _purge(
         session,
         (StageOutcome, CheckRun, RunRequest, TestCheck, SuiteMember, Suite, Test, Check, Target),
-    )}
+        actor=actor, action=PURGE_ALL, summary="Purged the catalog, targets and run history")}

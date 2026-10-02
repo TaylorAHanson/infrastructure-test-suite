@@ -30,8 +30,8 @@ summaries first, then open the ones that matter.
 - **Amber dot**: `BLOCKED_BY_SAFETY`. The safety gate stopped an operation. It's
   not a functional failure, but someone asked for something above the Target's
   cap.
-- **Purple dot / `flaky · advisory`**: recent deterministic verdicts alternate
-  between green and bad. Flaky findings are advisory and never gate.
+- **Purple dot / `flaky · advisory`**: recent verdicts alternate between green
+  and bad. Flaky findings are advisory and never gate.
 
 ## 2. Triage a finding
 
@@ -40,8 +40,8 @@ Open a finding to see:
 - **`bucket @ stage`**: *what kind* of failure, and *where* on the spine. For
   example `DNS_RESOLUTION_FAILURE @ RESOLVE` or `PERMISSION_DENIED @ AUTHORIZE`.
   **Tests → Reference** lists every bucket.
-- **gating / advisory**: whether this Check can fail a Run (`deterministic`) or
-  is signal only (`agentic`).
+- **Effect on runs**: whether this check can fail a Run (gating), or is only
+  reported because its script marks it `advisory=True`.
 - **The provenance thread**: **last green → first bad**, keyed to a commit sha
   or a non-deploy event. This tells you *when it started*, which usually tells
   you *why*.
@@ -84,7 +84,7 @@ hand, or run a new Test:
 | --- | --- |
 | **Suite** | Blank runs **every Active Test**. Drafts never run, even when named. |
 | **Target** | Blank runs against **every registered Target**. The safety gate still applies per Target, so "All" is safe. |
-| **Depth** | **Quick** makes read calls only and is fast: a check that would change something, or that judges a result quick depth didn't fetch, is `SKIPPED` with the reason. **Full** runs everything the Target's safety class allows. Quick is the default everywhere, and Full is always an explicit choice. |
+| **Depth** | **Quick** makes read calls only and is fast: a check that would change something is `SKIPPED` with the reason. **Full** runs everything the Target's safety class allows. Quick is the default everywhere, and Full is always an explicit choice. |
 
 ### Run phases and verdicts
 
@@ -102,8 +102,9 @@ hand, or run a new Test:
 | `BLOCKED_BY_SAFETY` | An operation exceeded the Target's safety class | blocks |
 | `SKIPPED` | Every gating Check was skipped, so nothing was proven | blocks |
 
-Only `PASS` passes. Advisory (`agentic`) results show up in the Run's failure
-summary under **Advisory** but never change the verdict.
+Only `PASS` passes. Results of advisory checks (`advisory=True` in the script)
+show up in the Run's failure summary under **Advisory** but never change the
+verdict.
 
 ### The safety override (R2 on `prod-for-us`)
 
@@ -155,14 +156,19 @@ the next token picks up the new secret.
 - **New test** opens the test editor on a starter script. A new Test is a
   **Draft**, listed under *Drafts* on the Tests page, and never runs until
   someone clicks **Activate** (or **Accept → Active** on the Tests page).
-- **Open in editor** to change a Test. Each save is a new version. Use
-  **Version history → roll back to vN** to undo.
+- **Open in editor** to change a Test. Each save is a new version. **Dry run**
+  (`⌘↵`) in the editor runs the unsaved script once and records nothing. To
+  undo a save, use **Version history → roll back** and confirm; it saves the
+  old script as a new version.
+- **Run this test** in an Active Test's detail pane runs just that Test on the
+  Target and depth you pick. A Draft can't be run there: activate it, or
+  dry-run it in the editor.
 - **Suites** are the filter chips on the Tests page. **New suite** and
-  **Edit suite** set a Suite's name, Tests and flags by hand.
-- **Promote to examples** adds a good Test to the library the Assistant learns
-  from.
-- **Tests → Reference** lists the stage spine, every failure bucket, and the
-  registered handlers.
+  **Edit suite** set a Suite's name and its ordered Tests by hand.
+- **Tests → Reference** lists the stage spine and every failure bucket.
+- **Settings → Assistant** picks the model behind the test editor's assistant
+  and limits what one turn may do. See
+  [Writing tests → Assistant settings](./writing-tests.md#assistant-settings).
 
 `POST /api/v1/admin/seed` brings the bundled catalog up to date, and the app
 does the same on boot when `seed_on_startup` is on. On a database an older
@@ -191,8 +197,8 @@ lane.
 
 Your deploy pipeline calls the same Run API: `POST /api/v1/runs`, then poll
 `GET /api/v1/runs/{run_id}` until `phase == "terminal"`. Pass the deploy only if
-the verdict is `PASS`. Use the **CI Gate** Suite, which is deterministic-only and
-read-only, and pass the specific Target ids your change touched. Its Tests read
+the verdict is `PASS`. Use the **CI Gate** Suite, which is read-only and has no
+advisory checks, and pass the specific Target ids your change touched. Its Tests read
 the [canary fixtures](./canary-fixtures.md), so provision those in every
 workspace CI gates.
 
@@ -226,7 +232,7 @@ Set `WEBHOOK_DEEP_LINK_BASE_URL` to the app's URL (see
 - Safety-class changes, with before → after; widening changes are flagged
 - Safety overrides, with the typed reason
 - Test create / edit, as a version pointer
-- Branding and webhook edits
+- Branding, webhook and Assistant settings edits
 
 Filter by Target, event type, or actor, and export as **CSV** or **JSON**. Runs
 aren't in the audit log; their history is in **Runs**. Audit records are kept
@@ -263,9 +269,9 @@ redeploy.
 | Run sits in `queued` | Another Run holds the lock on a `prod-for-us`/`sandbox` Target. It frees when that Run ends, when its heartbeat lapses (90 s), or at the 30-minute max run duration. |
 | `BLOCKED_BY_SAFETY` in CI | The Suite contains an operation above the Target's safety class. That's a misconfigured Suite, so fix the selection rather than the Target. |
 | Every Check fails at `AUTHENTICATE` | The identity handle is wrong. Check `scope/key` and `scope/key_client_id`, the app SP's `READ` ACL on the scope, and the Target's Host. |
-| Checks fail with `SERVICE_UNSUPPORTED` | The Check names a Handler that isn't registered. **Tests → Reference** lists the valid ones. |
 | Health Tests fail with `NOT_FOUND` | The canary objects aren't where the Target's tags say. See [Canary fixtures](./canary-fixtures.md). |
 | Posture checks fail with `PERMISSION_DENIED` | They read admin-only settings. Run the posture Suite against a Target whose SP is a workspace admin. |
-| The Assistant doesn't respond | Check the Model Serving endpoint (`model_serving_endpoint`) exists and the App has `CAN_QUERY` on it. The bundle grants both. |
+| The Assistant doesn't respond | Open **Settings → Assistant** and press **Test**: it says whether the model answers and calls tools. The endpoint must exist and the App needs `CAN_QUERY` on it; the bundle grants that for `model_serving_endpoint`, so grant it yourself for any other endpoint you pick. |
+| The editor's assistant stops mid-task | It reached its tool-call or time limit for one turn, and its reply says so. Ask it to continue, or raise the limit under **Settings → Assistant**. |
 | Nightly Job fails instantly | `validation_app_url` isn't set. Redeploy with `--var="validation_app_url=…"`. |
 | App logs disappeared | App logs are ephemeral on Databricks Apps. Durable history is in Lakebase. Enable App telemetry to UC for longer-lived logs (see [Deployment](./deployment.md)). |

@@ -1,3 +1,6 @@
+const fg = (name) => `rgb(var(--fg-${name}) / <alpha-value>)`
+const GRAY_STEPS = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]
+
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
@@ -22,7 +25,15 @@ export default {
         skip: 'rgb(var(--brand-skip) / <alpha-value>)',
         info: 'rgb(var(--brand-info) / <alpha-value>)',
         flaky: 'rgb(var(--brand-flaky) / <alpha-value>)', // advisory / non-deterministic (ADR-0008)
+        'on-accent': 'rgb(var(--on-accent) / <alpha-value>)',
+        // Text colours flip with the colour scheme (src/index.css): `white` is
+        // the strongest text colour and the gray scale inverts in light mode.
+        white: fg('white'),
+        gray: Object.fromEntries(GRAY_STEPS.map((step) => [step, fg(`gray-${step}`)])),
       },
+      // Preflight's default border colour comes from gray-200; keep it the
+      // fixed light gray it always was rather than a text colour.
+      borderColor: { DEFAULT: '#e5e7eb' },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],

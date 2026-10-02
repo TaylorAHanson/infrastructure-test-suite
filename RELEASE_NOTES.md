@@ -22,18 +22,26 @@ target before saving.
 - A Test is a Python script. Each `with check("…"):` block is one result in a run, and `with expect_deny("…"):` proves something is refused. Calls go through `w` (the Databricks SDK), `w.api` (raw REST), `sql()` and `http()`.
 - Every call a script makes still goes through the safety gate: blocklisted calls never run, a `read-only` target only allows reads, and `quick` runs skip anything that changes state. A blocked call records `BLOCKED_BY_SAFETY` against its check.
 - Scripts run in a separate process with no credentials of their own and no direct network access; the platform makes each call on the script's behalf.
-- Existing tests keep working. Opening one in the editor shows it as a script, and saving converts it. Its earlier versions stay in the history, so you can roll back.
+- The old structured tests are removed, along with their results. The Connectivity Suite's three tests (SQL Warehouse validation, Unity Catalog access and Egress connectivity) are now scripts.
+- Removed with them: YAML export, LLM-judged (`agentic`) assertions, the worked-example library, and the suite's deterministic-only flag. The Tests page lists each check a script declares, with the calls it makes.
 
 ### The test editor
 - **New test** and **Open in editor** open the editor: code on the left and the assistant on the right in one box, with a draggable divider.
 - The editor checks the script as you type. It flags unknown SDK methods (with a suggestion), blocklisted calls and duplicate check names on the offending line, and autocompletes `w.<service>.<method>` from the installed SDK.
-- **Run** (`⌘↵`) dry-runs the script once on the selected target and shows each check's outcome, the calls it made, and anything it recorded. Failures are marked on their lines. Nothing is recorded as a run.
-- The assistant looks up SDK methods and Databricks docs before using them. It can query the target with read-only SQL and API calls to see real data, and dry-run its own edits. Every change it suggests appears as a diff you can accept or reject piece by piece; it never saves.
+- **Dry run** (`⌘↵`) runs the script once on the selected target and shows each check's outcome, the calls it made, and anything it recorded. Failures are marked on their lines. Nothing is recorded as a run.
+- The assistant looks up SDK methods and Databricks docs before using them. It can query the target with read-only SQL and API calls to see real data, and dry-run its own edits. It never saves.
+- The assistant shows its work as it goes: each lookup, edit and dry run appears live with how long it took. **Stop** ends its turn at any point, and any edit it already made stays for you to review.
+- It makes targeted edits to the lines that need changing instead of rewriting the whole script.
+- Each edit opens as a diff with **Keep** and **Undo** on every change, plus **Keep all** and **Undo all**. **Save** and **Dry run** wait until every change is reviewed.
 - `⌘S` saves a new version. A draft that has never run can be deleted.
 
+### Assistant settings
+- **Settings → Assistant** picks the assistant's model: a typeahead over the workspace's chat endpoints, with the `system.ai` foundation models first. **Test** checks that the model answers and can call tools.
+- It also sets the reasoning level, the limits for one turn (tool calls, time, output tokens and temperature), and whether the assistant may read live data or dry-run its edits. Every change is audited.
+
 ### Suites
-- Suites are created and edited by hand: **New suite** and **Edit suite** on the Tests page open a dialog to name the suite, pick and order its tests, and set deterministic-only. Suites can now be deleted.
-- The Assistant shelf no longer creates or edits suites. Asking it to write a test opens the test editor instead.
+- Suites are created and edited by hand: **New suite** and **Edit suite** on the Tests page open a dialog to name the suite and pick and order its tests. Suites can now be deleted.
+- The Assistant shelf no longer creates or edits suites. Asking it to write a test opens the test editor instead, and an empty conversation suggests a few tests to start from.
 
 ### Fixes
 - Reordering the tests in a suite no longer fails with a database error.

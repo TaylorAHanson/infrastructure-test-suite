@@ -1,19 +1,13 @@
-"""Check catalog endpoints (the atomic assertion unit)."""
+"""Check catalog endpoints, read-only: a Check is a script Test's ``with check(...)`` block."""
 from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.db.session import get_session
-from app.handlers.registry import OperationBlocked
 from app.models import Check
-from app.schemas.schemas import CheckCreate, CheckUpdate, CompileRequest
-from app.services import pinned_versions, versioning
-from app.services.assertion_compiler import compile_assertion
-from app.services.audit import record_audit
-from app.services.authoring import build_check_fields
 
 router = APIRouter()
 
@@ -34,75 +28,9 @@ def list_checks(
     return rows
 
 
-@router.post("/compile")
-def compile_preview(payload: CompileRequest) -> dict:
-    """Preview how a plain-text assertion compiles (deterministic vs agentic)."""
-    return compile_assertion(payload.assertion).to_dict()
-
-
 @router.get("/{check_id}")
 def get_check(check_id: str, session: Session = Depends(get_session)) -> Check:
     check = session.get(Check, check_id)
     if not check:
         raise HTTPException(404, "check not found")
     return check
-
-
-@router.post("", status_code=201)
-def create_check(
-    payload: CheckCreate,
-    session: Session = Depends(get_session),
-    actor: str = Query("api-user"),
-) -> dict:
-    try:
-        fields = build_check_fields(payload)
-    except OperationBlocked as exc:
-        raise HTTPException(422, str(exc))
-    check = Check(**fields)
-    session.add(check)
-    session.commit()
-    session.refresh(check)
-    out = check.model_dump(mode="json")  # capture before follow-up commits expire the row
-    versioning.snapshot(session, "check", check.id, check.version, out, actor)
-    record_audit(session, actor=actor, action="check.create", entity_type="check", entity_id=check.id,
-                 summary=f"Created check {out['display_name']}", after=out)
-    return out
-
-
-@router.patch("/{check_id}")
-def update_check(
-    check_id: str,
-    payload: CheckUpdate,
-    session: Session = Depends(get_session),
-    actor: str = Query("api-user"),
-) -> dict:
-    check = session.get(Check, check_id)
-    if not check:
-        raise HTTPException(404, "check not found")
-    try:
-        return pinned_versions.edit_check(session, check, payload, actor)
-    except OperationBlocked as exc:
-        raise HTTPException(422, str(exc))
-
-
-@router.get("/{check_id}/versions")
-def list_check_versions(check_id: str, session: Session = Depends(get_session)) -> list[dict]:
-    versions = versioning.list_versions(session, "check", check_id)
-    return [{"version": v.version, "actor": v.actor, "created_at": v.created_at, "snapshot": v.snapshot}
-            for v in versions]
-
-
-@router.post("/{check_id}/rollback/{version}")
-def rollback_check(
-    check_id: str,
-    version: int,
-    session: Session = Depends(get_session),
-    actor: str = Query("api-user"),
-) -> dict:
-    check = session.get(Check, check_id)
-    if not check:
-        raise HTTPException(404, "check not found")
-    try:
-        return pinned_versions.rollback_check(session, check, version, actor)
-    except LookupError as exc:
-        raise HTTPException(404, str(exc))

@@ -12,10 +12,11 @@ served here cannot execute script.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlmodel import Session
 
+from app.api.deps import actor_handle
 from app.core.branding import BrandingValidationError
 from app.db.session import get_session
 from app.schemas.schemas import BrandingOut, BrandingUpdate
@@ -34,7 +35,7 @@ def get_branding(session: Session = Depends(get_session)) -> BrandingOut:
 def update_branding(
     payload: BrandingUpdate,
     session: Session = Depends(get_session),
-    actor: str = Query("api-user", description="Host App identity of the editor"),
+    actor: str = Depends(actor_handle()),
 ) -> BrandingOut:
     """Edit the branding record. Closed-schema (unknown field → 422 by the schema);
     a bad theme/blob → 422; the edit is audited."""
@@ -47,7 +48,11 @@ def update_branding(
 
 def _blob_response(pair, cache: str = "no-cache") -> Response:
     raw, content_type = pair
-    return Response(content=raw, media_type=content_type, headers={"Cache-Control": cache})
+    headers = {"Cache-Control": cache, "X-Content-Type-Options": "nosniff"}
+    if "svg" in (content_type or ""):
+        # An SVG opened directly is a document that can run script in the app's origin.
+        headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    return Response(content=raw, media_type=content_type, headers=headers)
 
 
 @router.get("/logo")

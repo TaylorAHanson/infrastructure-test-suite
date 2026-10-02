@@ -1,42 +1,42 @@
 """A Test's version history pins its member Checks' content (#118, ADR-0001/0006 §8).
 
-**Pin, don't copy.** A Test snapshot records each member's ``check_version``
-beside its ``check_id``; the Check content itself stays versioned on the Check.
-So a Test version is a faithful record of what the Test did, while Check ids —
-which run history, last-good, findings and flaky detection key on — never change.
+**Pin, don't copy.** A Test snapshot records its script and each member's
+``check_version`` beside its ``check_id``; the Check content itself stays
+versioned on the Check. So a Test version is a faithful record of what the Test
+did, while Check ids — which run history, last-good, findings and flaky
+detection key on — never change.
 
-- Editing a member Check *through its Test* (:func:`edit_test`) bumps the Check
-  and the Test together, and the new Test snapshot pins the new Check version.
-- Rolling a Test back (:func:`rollback_test`) restores each member Check to its
-  pinned version (as a new Check version, the same path as a Check rollback) as
-  well as the membership and Test fields. Snapshots written before pins existed
-  carry no ``check_version`` and roll back membership + fields only, as before.
-- A Check may be shared by several Tests; editing or rolling it back affects all
-  of them, so :func:`test_read` exposes ``shared_with`` per member for the UI.
+- Saving a script (:func:`app.services.script_tests.save_script`) or editing the
+  Test's fields (:func:`edit_test`) is a new Test version.
+- Rolling a Test back (:func:`rollback_test`) restores its script, membership
+  and each member Check's pinned content (as a new Check version) — never its
+  status or enabled flag. A version with no script can't be restored.
+- :func:`test_read` exposes ``shared_with`` per member: the other Tests listing
+  the same Check.
 
 Every pinned Check version is restorable: before a Test version is recorded, a
-member Check whose current version was never snapshotted (seeded or
-Assistant-committed Checks) is backfilled. Likewise a Test's own current version
-is backfilled before it is first edited, so a seeded Test's v1 can be restored.
+member Check whose current version was never snapshotted is backfilled.
+Likewise a Test's own current version is backfilled before it is first edited,
+so a seeded Test's v1 can be restored.
 """
 from __future__ import annotations
-
-from typing import Optional
 
 from sqlmodel import Session, select
 
 from app.core.ids import utcnow
 from app.models import Check, Test, TestCheck
-from app.schemas.schemas import CheckUpdate, TestCheckIn, TestUpdate
+from app.schemas.schemas import TestCheckIn, TestUpdate
 from app.services import versioning
 from app.services.audit import record_audit, version_pointer
-from app.services.authoring import apply_check_update
 
 #: Check columns a restore never overwrites (identity + version bookkeeping).
 _CHECK_FIXED = ("id", "version", "created_at", "updated_at")
-#: Test columns a rollback restores from the snapshot.
-_TEST_RESTORED = ("name", "description", "tags", "run_as_role", "status", "origin",
-                  "derivation", "enabled", "script")
+#: Test columns a rollback restores from the snapshot — content only. Lifecycle
+#: (``status``: an Active Test rolled back to its Draft v1 must stay Active) and
+#: the ``enabled`` switch stay as they are now, or a rollback would silently drop
+#: the Test from every run.
+_TEST_RESTORED = ("name", "description", "tags", "run_as_role", "origin",
+                  "derivation", "script")
 _TEST_EDITABLE = ("name", "description", "tags", "run_as_role", "enabled")
 
 
@@ -77,13 +77,6 @@ def test_read(session: Session, test: Test) -> dict:
 # ---------------------------------------------------------------------------
 # Writes
 # ---------------------------------------------------------------------------
-def members_in(payload_members: list[TestCheckIn], check_ids: list[str]) -> list[TestCheckIn]:
-    """Ordered membership from ``members``, else bare ``check_ids`` as assertions."""
-    if payload_members:
-        return payload_members
-    return [TestCheckIn(check_id=cid) for cid in check_ids]
-
-
 def set_members(session: Session, test_id: str, members: list[TestCheckIn]) -> None:
     for m in _member_rows(session, test_id):
         session.delete(m)
@@ -109,40 +102,13 @@ def record_test_version(session: Session, test: Test, actor: str) -> dict:
 
 
 def edit_test(session: Session, test: Test, payload: TestUpdate, actor: str) -> Test:
-    """Apply a Test edit — fields, membership, member Check content — as one new version.
-
-    Everything is validated before anything is written: an unknown member Check
-    or a Check edit naming a non-member raises :class:`ValueError`, and a Check
-    edit the deterministic validator refuses raises ``OperationBlocked``, with
-    nothing persisted either way.
-    """
-    members: Optional[list[TestCheckIn]] = None
-    if payload.members is not None or payload.check_ids is not None:
-        members = members_in(payload.members or [], payload.check_ids or [])
-        for m in members:
-            if session.get(Check, m.check_id) is None:
-                raise ValueError(f"check {m.check_id} not found")
-    member_ids = ({m.check_id for m in members} if members is not None
-                  else {m.check_id for m in _member_rows(session, test.id)})
-    check_edits: list[tuple[str, dict]] = []
-    for edit in payload.check_edits or []:
-        if edit.check_id not in member_ids:
-            raise ValueError(f"check {edit.check_id} is not a member of this test")
-        check_edits.append((edit.check_id, apply_check_update(edit)))  # same validator as PATCH /checks
-
+    """Apply an edit to the Test's fields as one new version."""
     _ensure_test_recorded(session, test)
     before_version = test.version
     data = payload.model_dump(exclude_unset=True)
     for key in _TEST_EDITABLE:
         if key in data and data[key] is not None:
             setattr(test, key, data[key])
-    if members is not None:
-        set_members(session, test.id, members)
-    for check_id, fields in check_edits:
-        if fields:
-            check = session.get(Check, check_id)
-            _write_check_version(session, check, fields, actor, action="check.update",
-                                 summary=f"Updated check {check.display_name} via test {test.name}")
     test.version += 1
     test.updated_at = utcnow()
     session.add(test)
@@ -157,17 +123,19 @@ def edit_test(session: Session, test: Test, payload: TestUpdate, actor: str) -> 
 
 
 def rollback_test(session: Session, test: Test, version: int, actor: str) -> Test:
-    """Restore a prior Test version — fields, membership and pinned Check content.
+    """Restore a prior Test version — script, fields, membership and pinned Check content.
 
     Lands as a new current version (ADR-0001). Each pinned member Check whose
-    content differs from its pin is restored as a new Check version; a snapshot
-    without pins restores membership + fields only. Raises :class:`LookupError`
-    if the version (or a pinned Check version) is missing, before writing.
+    content differs from its pin is restored as a new Check version. Raises
+    :class:`LookupError` if the version (or a pinned Check version) is missing,
+    and :class:`ValueError` if the version has no script, before writing.
     """
     snap = versioning.get_version(session, "test", test.id, version)
     if snap is None:
         raise LookupError("version not found")
     data = snap.snapshot
+    if not data.get("script"):
+        raise ValueError(f"v{version} has no script, so it can't be restored")
     pins: list[tuple[Check, dict]] = []
     for m in data.get("members") or []:
         check = session.get(Check, m["check_id"])
@@ -183,8 +151,6 @@ def rollback_test(session: Session, test: Test, version: int, actor: str) -> Tes
     for key in _TEST_RESTORED:
         if key in data:
             setattr(test, key, data[key])
-    if "script" not in data:
-        test.script = None  # a snapshot from before scripts existed is a structured Test
     if isinstance(data.get("members"), list):
         set_members(session, test.id, [
             TestCheckIn(check_id=m["check_id"], kind=m.get("kind", "assertion"),
@@ -211,22 +177,6 @@ def rollback_test(session: Session, test: Test, version: int, actor: str) -> Tes
                  before=version_pointer("test", test.id, before_version),
                  after=version_pointer("test", test.id, test.version))
     return test
-
-
-def edit_check(session: Session, check: Check, payload: CheckUpdate, actor: str) -> dict:
-    """Edit a Check directly as its next version (raises ``OperationBlocked``)."""
-    fields = apply_check_update(payload)
-    return _write_check_version(session, check, fields, actor, action="check.update",
-                                summary=f"Updated check {check.display_name}")
-
-
-def rollback_check(session: Session, check: Check, version: int, actor: str) -> dict:
-    """Restore a prior Check version as its next version (raises :class:`LookupError`)."""
-    snap = versioning.get_version(session, "check", check.id, version)
-    if snap is None:
-        raise LookupError("version not found")
-    return _write_check_version(session, check, _restorable(check, snap.snapshot), actor,
-                                action="check.rollback", summary=f"Rolled check back to v{version}")
 
 
 # ---------------------------------------------------------------------------

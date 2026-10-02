@@ -3,6 +3,8 @@
 The Guide (src/guide/content.ts) renders docs/*.md, docs/ci/*.md, docs/adr/*.md
 and CONTEXT.md. A relative link to another page, a heading on it, or a repo file
 must resolve; heading anchors use the same slugs the Guide gives its headings.
+An absolute `/guide/<page>#<heading>` link, in the docs or in the app's code,
+must name a Guide page and a heading on it.
 """
 
 import re
@@ -20,6 +22,21 @@ PAGES = sorted(
 )
 # docs/glossary.md is a pointer; the Guide's glossary page is CONTEXT.md.
 ALIASES = {ROOT / "docs" / "glossary.md": ROOT / "CONTEXT.md"}
+
+
+def guide_slug(path: Path) -> str:
+    """The page's route under /guide/, as slugFor in src/guide/content.ts."""
+    rel = path.relative_to(ROOT).as_posix()
+    if rel == "CONTEXT.md":
+        return "glossary"
+    rel = re.sub(r"\.md$", "", re.sub(r"^docs/", "", rel))
+    if rel == "index":
+        return ""
+    return re.sub(r"(^|/)README$", "", rel)
+
+
+GUIDE_PAGES = {guide_slug(p): p for p in PAGES if p not in ALIASES}
+_APP_GUIDE_LINK = re.compile(r"""['"`](/guide(?:/[^'"`$\s]*)?)['"`]""")
 
 _SPECIAL = re.compile(r"""[\s~`!@#$%^&*()\-_+=\[\]{}|\\;:"'“”‘’<>,.?/]+""")
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -64,10 +81,26 @@ def links(path: Path):
             yield m.group(1)
 
 
+def guide_link_problem(href: str) -> str | None:
+    """Why an absolute /guide/... link doesn't resolve, or None if it does."""
+    path, _, anchor = href.partition("#")
+    slug = path.removeprefix("/guide").strip("/")
+    dest = GUIDE_PAGES.get(slug)
+    if dest is None:
+        return f"{href} (no guide page {slug!r})"
+    if anchor and anchor not in heading_slugs(dest):
+        return f"{href} (no heading #{anchor} on {dest.relative_to(ROOT)})"
+    return None
+
+
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: str(p.relative_to(ROOT)))
 def test_every_link_resolves(page: Path):
     broken = []
     for href in links(page):
+        if href == "/guide" or href.startswith(("/guide/", "/guide#")):
+            if problem := guide_link_problem(href):
+                broken.append(problem)
+            continue
         if re.match(r"[a-z][a-z0-9+.-]*:", href, re.I) or href.startswith("/"):
             continue
         target, _, anchor = href.partition("#")
@@ -78,6 +111,25 @@ def test_every_link_resolves(page: Path):
         elif anchor and dest.suffix == ".md" and anchor not in heading_slugs(dest):
             broken.append(f"{href} (no heading #{anchor})")
     assert not broken, f"{page.relative_to(ROOT)} has broken links: {broken}"
+
+
+def test_guide_slugs_match_the_app():
+    # The ADR index on the decisions page links to /guide/adr/<file stem>.
+    assert {"", "glossary", "ci", "decisions", "writing-tests"} <= GUIDE_PAGES.keys()
+    for adr in (ROOT / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md"):
+        assert GUIDE_PAGES.get(f"adr/{adr.stem}") == adr
+
+
+def test_app_links_into_the_guide_resolve():
+    src = ROOT / "src"
+    found, broken = [], []
+    for path in sorted([*src.rglob("*.ts"), *src.rglob("*.tsx")]):
+        for m in _APP_GUIDE_LINK.finditer(path.read_text()):
+            found.append(m.group(1))
+            if problem := guide_link_problem(m.group(1)):
+                broken.append(f"{path.relative_to(ROOT)}: {problem}")
+    assert found, "expected the app to link into the guide (e.g. GUIDE_WRITING_TESTS)"
+    assert not broken, f"app links into the guide that don't resolve: {broken}"
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: str(p.relative_to(ROOT)))

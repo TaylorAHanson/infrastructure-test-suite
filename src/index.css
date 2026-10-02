@@ -24,13 +24,49 @@
   --brand-warn: 210 153 34;
   --brand-skip: 110 118 129;
   --brand-info: 88 166 255;
-  /* Advisory / non-deterministic lane (ADR-0008). A fixed semantic colour, not
-   * part of the re-themeable branding token set. */
+  /* Advisory and flaky results. A fixed semantic colour, not part of the
+   * re-themeable branding token set. */
   --brand-flaky: 163 113 247;
+
+  /* Text colours. Tailwind's `white` and `gray-*` resolve to these
+   * (tailwind.config.js), so `text-white` means "strongest text" and the gray
+   * scale "body text, then softer" in either scheme. Like flaky, they sit
+   * outside the closed branding token set. */
+  --fg-body: 230 237 243;
+  --fg-white: 255 255 255;
+  --fg-gray-50: 249 250 251;
+  --fg-gray-100: 243 244 246;
+  --fg-gray-200: 229 231 235;
+  --fg-gray-300: 209 213 219;
+  --fg-gray-400: 156 163 175;
+  --fg-gray-500: 107 114 128;
+  --fg-gray-600: 75 85 99;
+  --fg-gray-700: 55 65 81;
+  --fg-gray-800: 31 41 55;
+  --fg-gray-900: 17 24 39;
+  --fg-gray-950: 3 7 18;
+  /* Text on an accent fill; applyTheme picks dark or white for the branded accent. */
+  --on-accent: 11 18 32;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
+    color-scheme: light;
+
+    --fg-body: 30 41 59;
+    --fg-white: 15 23 42;
+    --fg-gray-50: 15 23 42;
+    --fg-gray-100: 30 41 59;
+    --fg-gray-200: 51 65 85;
+    --fg-gray-300: 71 85 105;
+    --fg-gray-400: 100 116 139;
+    --fg-gray-500: 148 163 184;
+    --fg-gray-600: 203 213 225;
+    --fg-gray-700: 226 232 240;
+    --fg-gray-800: 241 245 249;
+    --fg-gray-900: 248 250 252;
+    --fg-gray-950: 255 255 255;
+
     --brand-ink: 255 255 255;
     --brand-ink_soft: 241 245 249;
     --brand-panel: 248 250 252;
@@ -54,7 +90,7 @@ body,
 body {
   margin: 0;
   background: rgb(var(--brand-ink));
-  color: #e6edf3;
+  color: rgb(var(--fg-body));
   font-family: Inter, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -76,7 +112,7 @@ body {
     @apply inline-flex items-center gap-2 rounded-lg border border-edge bg-ink-soft px-3 py-2 text-sm font-medium text-white transition hover:border-accent disabled:opacity-50;
   }
   .btn-accent {
-    @apply border-accent bg-accent text-ink hover:opacity-90;
+    @apply border-accent bg-accent text-on-accent hover:opacity-90;
   }
   .input {
     @apply rounded-lg border border-edge bg-ink px-3 py-2 text-sm text-white outline-none focus:border-accent;

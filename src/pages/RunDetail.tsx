@@ -4,23 +4,41 @@ import { ArrowLeft, ChevronDown, ChevronRight } from 'lucide-react'
 
 import { Badge } from '../components/Badge'
 import { PageHeader } from '../components/PageHeader'
-import { useCheckRun, useRunCheckRuns, useRunResource, useTests } from '../hooks/queries'
-import { duration, statusClass, timeAgo, triState, triStateClass } from '../lib/format'
+import { useCheckRun, useRunCheckRuns, useRunResource, useSuites, useTargets, useTests } from '../hooks/queries'
+import { errorMessage } from '../lib/api'
+import {
+  duration, knownSha, runScopeLabel, targetsLabel, timeAgo, triState, triStateClass,
+} from '../lib/format'
 import type { CheckRunRow } from '../types'
 
 export default function RunDetail() {
   const { runId } = useParams()
-  const { data: run, isLoading } = useRunResource(runId)
-  const { data: checkRuns } = useRunCheckRuns(runId)
+  const { data: run, isLoading, error } = useRunResource(runId)
+  const terminal = run?.phase === 'terminal'
+  const checkRunsQ = useRunCheckRuns(run ? runId : undefined, terminal)
   const { data: tests } = useTests()
+  const { data: suites } = useSuites()
+  const { data: targets } = useTargets()
 
+  if (!run && error) {
+    return (
+      <div className="card text-sm text-muted">
+        <span className="text-fail">Couldn't load this run: {errorMessage(error)}</span>{' '}
+        <Link to="/runs" className="text-accent hover:underline">Back to runs</Link>
+      </div>
+    )
+  }
   if (isLoading || !run) return <div className="text-muted">Loading run...</div>
 
-  const testName = (id: string) =>
-    id === '(ad-hoc)' ? 'Ad-hoc Checks' : tests?.find((t) => t.id === id)?.name ?? id
+  const testName = (id: string) => tests?.find((t) => t.id === id)?.name ?? id
   const rollup = Object.entries(run.test_rollup ?? {})
   const gating = Object.entries(run.failure_summary?.gating ?? {})
   const advisory = Object.entries(run.failure_summary?.advisory ?? {})
+  const sha = knownSha(run.git_sha)
+
+  const seen = new Set<string>()
+  const checkRuns = (checkRunsQ.data?.pages.flat() ?? []).filter((cr) => !seen.has(cr.run_id) && !!seen.add(cr.run_id))
+  const total = Math.max(run.run_ids.length, checkRuns.length)
 
   return (
     <div>
@@ -40,14 +58,15 @@ export default function RunDetail() {
           <Meta label="Created" value={timeAgo(run.created_at)} title={run.created_at} />
         </MetaGroup>
         <MetaGroup title="Scope">
+          <Meta label="Ran" value={runScopeLabel(run, suites, tests)} />
           <Meta label="Depth" value={run.depth} />
-          <Meta label="Targets" value={run.target_ids.length ? `${run.target_ids.length} selected` : 'all'} />
+          <Meta label="Targets" value={targetsLabel(run.target_ids, targets)} />
           <Meta label="Check runs" value={String(run.run_ids.length)} />
         </MetaGroup>
         <MetaGroup title="Result">
           <MetaBadge label="Connectable" value={triState(run.connectable)} cls={triStateClass(run.connectable)} />
           <MetaBadge label="Functional" value={triState(run.functional)} cls={triStateClass(run.functional)} />
-          <Meta label="Build" value={`v${run.app_version} · ${run.git_sha}`} mono />
+          <Meta label="Build" value={sha ? `v${run.app_version} · ${sha}` : `v${run.app_version}`} mono />
         </MetaGroup>
       </div>
 
@@ -101,15 +120,42 @@ export default function RunDetail() {
         </div>
       </div>
 
-      <div className="card-title mb-2">Check results</div>
+      <div className="mb-2 flex items-baseline gap-2">
+        <span className="card-title">Check results</span>
+        {checkRuns.length > 0 && checkRuns.length < total && (
+          <span className="text-xs text-muted">Showing {checkRuns.length} of {total}</span>
+        )}
+      </div>
       <div className="space-y-2">
-        {checkRuns?.map((cr) => <CheckRunRowView key={cr.run_id} row={cr} />)}
-        {checkRuns && !checkRuns.length && (
+        {checkRuns.map((cr) => <CheckRunRowView key={cr.run_id} row={cr} />)}
+        {checkRunsQ.isPending && <div className="card text-sm text-muted">Loading check results…</div>}
+        {checkRunsQ.error && !checkRuns.length && (
+          <div className="card text-sm text-fail">Couldn't load the check results: {errorMessage(checkRunsQ.error)}</div>
+        )}
+        {checkRunsQ.isSuccess && !checkRuns.length && (
           <div className="card text-sm text-muted">
-            No CheckRuns yet — the run is still {run.phase === 'queued' ? 'queued on a target lease' : 'running'}.
+            {run.phase === 'terminal'
+              ? 'No checks ran in this run.'
+              : run.phase === 'queued'
+                ? 'No check results yet — the run is queued on a target lease.'
+                : 'No check results yet — the run is still running.'}
           </div>
         )}
       </div>
+      {checkRuns.length > 0 && checkRuns.length < total && (
+        <div className="mt-3 flex items-center gap-3 text-sm text-muted">
+          Showing {checkRuns.length} of {total} check results.
+          {checkRunsQ.hasNextPage && (
+            <button
+              className="btn py-1 text-xs"
+              onClick={() => checkRunsQ.fetchNextPage()}
+              disabled={checkRunsQ.isFetchingNextPage}
+            >
+              {checkRunsQ.isFetchingNextPage ? 'Loading…' : 'Load more'}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -123,20 +169,20 @@ function CheckRunRowView({ row }: { row: CheckRunRow }) {
   return (
     <div className="card">
       <button
-        className="flex w-full items-center justify-between text-left"
+        className="flex w-full items-center justify-between gap-3 text-left"
         onClick={() => setOpen((o) => !o)}
       >
-        <div className="flex items-center gap-3">
-          {open ? <ChevronDown size="14" /> : <ChevronRight size="14" />}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+          {open ? <ChevronDown size="14" className="shrink-0" /> : <ChevronRight size="14" className="shrink-0" />}
           <span className="text-sm text-white">{row.check_name}</span>
           <Badge value={row.verdict} />
-          <span className={`badge ${statusClass(row.evaluator)}`}>
-            {row.evaluator}{row.gating ? '' : ' · advisory'}
-          </span>
+          {!row.gating && (
+            <span className="badge bg-flaky/15 text-flaky" title="Reported, but never changes the run's verdict">advisory</span>
+          )}
           {row.expectation === 'DENY' && <span className="badge bg-info/15 text-info">counterfactual</span>}
           {row.bucket_at_stage && <span className="font-mono text-xs text-fail">{row.bucket_at_stage}</span>}
         </div>
-        <div className="flex items-center gap-3 text-xs text-muted">
+        <div className="flex shrink-0 items-center gap-3 text-xs text-muted">
           <span>{row.workspace_name ?? 'unbound'}</span>
           <span>{duration(row.duration_ms)}</span>
         </div>
@@ -156,7 +202,7 @@ function CheckRunRowView({ row }: { row: CheckRunRow }) {
               </>
             )}
           </div>
-          <div className="overflow-hidden rounded-lg border border-edge">
+          <div className="overflow-x-auto rounded-lg border border-edge">
             <table className="w-full">
               <thead className="bg-ink">
                 <tr>

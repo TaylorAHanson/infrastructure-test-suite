@@ -175,6 +175,10 @@ def get_session() -> Iterator[Session]:
         yield session
 
 
-def session_scope() -> Session:
-    """Return a new session for use outside request scope (poller, jobs)."""
-    return Session(get_engine())
+def session_scope(*, expire_on_commit: bool = True) -> Session:
+    """Return a new session for use outside request scope (poller, jobs).
+
+    ``expire_on_commit=False`` keeps loaded objects readable after the session
+    closes, for work that must not hold a connection while it runs.
+    """
+    return Session(get_engine(), expire_on_commit=expire_on_commit)

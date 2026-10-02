@@ -321,8 +321,9 @@ def _run_fanout(client, test_id: str) -> list[str]:
 
 def test_draft_never_runs_until_accepted(client):
     tid = _commit_sql_draft(client)
-    # Running the draft produces no CheckRuns (a Draft never runs, user story 9).
-    assert _run_fanout(client, tid) == []
+    # A Draft never runs (user story 9): a selection of only Drafts is refused.
+    r = client.post("/api/v1/runs", json={"test_ids": [tid], "depth": "full", "request_source": "UI_MANUAL"})
+    assert r.status_code == 400 and "Draft" in r.text
 
     # Accept → Active, then it runs (at least one fan-out CheckRun).
     acc = client.post(f"/api/v1/tests/{tid}/accept")

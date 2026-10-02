@@ -1,14 +1,15 @@
 """Suite catalog endpoints (a named selection of Tests for a Run)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.api.deps import actor_handle
 from app.core.ids import utcnow
 from app.db.session import get_session
 from app.models import Suite, SuiteMember, Test
 from app.schemas.schemas import SuiteCreate, SuiteUpdate
-from app.services import suite_safety, versioning, yaml_export
+from app.services import versioning
 from app.services.audit import record_audit
 
 router = APIRouter()
@@ -46,26 +47,14 @@ def get_suite(suite_id: str, session: Session = Depends(get_session)) -> dict:
     return _suite_out(session, suite)
 
 
-@router.get("/{suite_id}/yaml")
-def export_suite_yaml(suite_id: str, session: Session = Depends(get_session)) -> dict:
-    suite = session.get(Suite, suite_id)
-    if not suite:
-        raise HTTPException(404, "suite not found")
-    return {"yaml": yaml_export.suite_to_yaml(session, suite)}
-
-
 @router.post("", status_code=201)
 def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
-                 actor: str = Query("api-user")) -> dict:
+                 actor: str = Depends(actor_handle())) -> dict:
     for tid in payload.test_ids:
         if not session.get(Test, tid):
             raise HTTPException(422, f"test {tid} not found")
     suite = Suite(name=payload.name, description=payload.description, tags=payload.tags,
                   deterministic_only=payload.deterministic_only)
-    violation = suite_safety.check_deterministic_violation(
-        session, suite, payload.test_ids, proposed_deterministic_only=payload.deterministic_only)
-    if violation:
-        raise HTTPException(422, violation)
     session.add(suite)
     session.commit()
     session.refresh(suite)
@@ -81,7 +70,7 @@ def create_suite(payload: SuiteCreate, session: Session = Depends(get_session),
 
 @router.patch("/{suite_id}")
 def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends(get_session),
-                 actor: str = Query("api-user")) -> dict:
+                 actor: str = Depends(actor_handle())) -> dict:
     suite = session.get(Suite, suite_id)
     if not suite:
         raise HTTPException(404, "suite not found")
@@ -90,11 +79,6 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
     for tid in payload.test_ids or []:
         if not session.get(Test, tid):
             raise HTTPException(422, f"test {tid} not found")
-    violation = suite_safety.check_deterministic_violation(
-        session, suite, payload.test_ids if payload.test_ids is not None else before["test_ids"],
-        proposed_deterministic_only=payload.deterministic_only)
-    if violation:
-        raise HTTPException(422, violation)
     for key in ("name", "description", "tags", "deterministic_only", "enabled"):
         if key in data and data[key] is not None:
             setattr(suite, key, data[key])
@@ -114,7 +98,7 @@ def update_suite(suite_id: str, payload: SuiteUpdate, session: Session = Depends
 
 @router.delete("/{suite_id}", status_code=204)
 def delete_suite(suite_id: str, session: Session = Depends(get_session),
-                 actor: str = Query("api-user")) -> None:
+                 actor: str = Depends(actor_handle())) -> None:
     """Delete a Suite (its Tests and their history are untouched)."""
     suite = session.get(Suite, suite_id)
     if not suite:

@@ -4,12 +4,12 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Badge } from '../components/Badge'
 import { PageHeader } from '../components/PageHeader'
 import { RunLauncher } from '../components/RunLauncher'
-import { useRuns } from '../hooks/queries'
-import { phaseOf, timeAgo } from '../lib/format'
+import { useRuns, useSuites, useTargets, useTests } from '../hooks/queries'
+import { knownSha, phaseOf, runScopeLabel, targetsLabel, timeAgo } from '../lib/format'
 import type { Phase } from '../types'
 
 const PHASES: (Phase | '')[] = ['', 'queued', 'running', 'terminal']
-const VERDICTS = ['', 'PASS', 'FAIL', 'ERROR', 'BLOCKED_BY_SAFETY']
+const VERDICTS = ['', 'PASS', 'FAIL', 'ERROR', 'BLOCKED_BY_SAFETY', 'SKIPPED', 'CANCELLED']
 const DEPTHS = ['', 'quick', 'full']
 
 interface Filters {
@@ -19,12 +19,11 @@ interface Filters {
   requester?: string
 }
 
-function targetsLabel(ids: string[]): string {
-  return ids.length ? `${ids.length} selected` : 'all'
-}
-
 export default function Runs() {
   const { data: runs, isLoading } = useRuns()
+  const { data: suites } = useSuites()
+  const { data: tests } = useTests()
+  const { data: targets } = useTargets()
   const [filters, setFilters] = useState<Filters>({})
   const navigate = useNavigate()
 
@@ -81,7 +80,7 @@ export default function Runs() {
         </Filter>
       </div>
 
-      <div className="card overflow-hidden p-0">
+      <div className="card overflow-x-auto p-0">
         <table className="w-full">
           <thead className="border-b border-edge bg-ink">
             <tr>
@@ -98,23 +97,28 @@ export default function Runs() {
           <tbody>
             {rows.map((r) => {
               const phase = phaseOf(r.status)
+              const scope = runScopeLabel(r, suites, tests)
+              const sha = knownSha(r.git_sha)
               return (
                 <tr
                   key={r.id}
                   className="cursor-pointer border-b border-edge/50 hover:bg-ink-soft"
                   onClick={openRun(r.id)}
                 >
-                  <td className="td">
-                    <Link to={`/runs/${r.id}`} className="font-mono text-xs text-accent hover:underline">
-                      {r.id}
+                  <td className="td max-w-[320px]">
+                    <Link to={`/runs/${r.id}`} className="block truncate text-sm text-white hover:underline" title={scope}>
+                      {scope}
                     </Link>
-                    <div className="text-xs text-muted">{r.git_sha}</div>
+                    <div className="truncate font-mono text-[11px] text-muted">
+                      {r.id}
+                      {sha && <span title="git sha"> · {sha}</span>}
+                    </div>
                   </td>
                   <td className="td"><Badge value={phase} /></td>
                   <td className="td">{phase === 'terminal' ? <Badge value={r.status} /> : <span className="text-muted">—</span>}</td>
                   <td className="td text-muted">{r.depth}</td>
                   <td className="td text-muted">{r.request_source}</td>
-                  <td className="td text-muted">{targetsLabel(r.target_ids)}</td>
+                  <td className="td text-muted">{targetsLabel(r.target_ids, targets)}</td>
                   <td className="td text-muted">{r.requested_by}</td>
                   <td className="td text-muted">{timeAgo(r.created_at)}</td>
                 </tr>

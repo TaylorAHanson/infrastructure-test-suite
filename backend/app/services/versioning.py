@@ -2,8 +2,7 @@
 
 The store — not YAML, not git — is the source of truth for Checks/Tests/Suites.
 Every save snapshots the entity into :class:`EntityVersion`; a rollback restores
-a prior snapshot as a new current version. YAML is export-only (see
-:mod:`app.services.yaml_export`); there is no authoritative YAML import.
+a prior snapshot as a new current version.
 """
 from __future__ import annotations
 

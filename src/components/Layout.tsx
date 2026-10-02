@@ -14,6 +14,7 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
+  Sparkles,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -45,6 +46,7 @@ const SETTINGS_NAV: NavItem[] = [
   { to: '/settings/targets', label: 'Targets', icon: Database },
   { to: '/settings/schedules', label: 'Schedules', icon: CalendarClock },
   { to: '/settings/notifications', label: 'Notifications', icon: Bell },
+  { to: '/settings/assistant', label: 'Assistant', icon: Sparkles },
   { to: '/settings/release-notes', label: 'Release notes', icon: ScrollText },
 ]
 
@@ -64,12 +66,14 @@ function NavItemLink({ item, rail }: { item: NavItem; rail: boolean }) {
 }
 
 export default function Layout() {
-  const { data: admin } = useAdminSettings()
+  const { data: admin, isError: adminFailed } = useAdminSettings()
   const { data: branding } = useBranding()
   // Instant-apply: title, favicon, and theme follow the branding record + poll.
   useApplyBranding(branding)
   const flags = (admin?.feature_flags ?? {}) as Record<string, boolean>
-  const demo = flags.demo_mode
+  const pending = adminFailed ? 'unknown' : '…'
+  const environment = admin ? String(admin.environment ?? 'unknown') : pending
+  const demo = admin ? !!flags.demo_mode : null
   const appName = branding?.app_name ?? 'Validation Platform'
   const footer = branding?.footer_text
 
@@ -153,11 +157,13 @@ export default function Layout() {
             <div className="mt-4 rounded-lg border border-edge bg-panel p-3 text-[11px] text-muted">
               <div className="flex items-center justify-between">
                 <span>Environment</span>
-                <span className="text-white">{(admin?.environment as string) ?? '...'}</span>
+                <span className="text-white">{environment}</span>
               </div>
               <div className="mt-1 flex items-center justify-between">
                 <span>Mode</span>
-                <span className={demo ? 'text-warn' : 'text-pass'}>{demo ? 'Demo / mock' : 'Live'}</span>
+                <span className={demo === null ? 'text-muted' : demo ? 'text-warn' : 'text-pass'}>
+                  {demo === null ? pending : demo ? 'Demo / mock' : 'Live'}
+                </span>
               </div>
               {footer && <div className="mt-2 border-t border-edge pt-2 text-muted">{footer}</div>}
             </div>

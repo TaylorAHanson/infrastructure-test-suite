@@ -62,7 +62,6 @@ class Settings(BaseSettings):
     # ----- Databricks resource bindings (supplied by app resources) -----
     DATABRICKS_PROFILE: str = os.environ.get("DATABRICKS_PROFILE", "DEFAULT")
     DATABRICKS_HOST: Optional[str] = None
-    DATABRICKS_WAREHOUSE_ID: Optional[str] = None
     MODEL_SERVING_ENDPOINT: Optional[str] = None
     # Job that fans out heavy/scheduled suite execution. Created/updated by the
     # bundle; the app only needs the id to trigger it.
@@ -77,9 +76,16 @@ class Settings(BaseSettings):
 
     # ----- Run engine (ADR-0005/0007/0011) ------------------------------
     # The single configurable concurrency dial (ADR-0007 §5): the max number of
-    # CheckRuns a run may fan out to in parallel. Bounds thundering-herd against
-    # ~100 targets. A latency/scope control, never a cost control (ADR-0007 §6).
+    # CheckRuns executing at once across the whole process (every Run shares
+    # one pool). Bounds thundering-herd against ~100 targets. A latency/scope
+    # control, never a cost control (ADR-0007 §6).
     MAX_RUN_CONCURRENCY: int = 10
+    # Requests are orchestrated on a small dispatcher pool so a long Run never
+    # occupies the API threadpool or the poller tick; its threads mostly wait on
+    # the CheckRun pool above. Inline dispatch (on the caller's thread) is for
+    # tests, which read a run's result right after POST /runs.
+    RUN_DISPATCH_WORKERS: int = 16
+    RUN_DISPATCH_INLINE: bool = False
     # Per-target lease (ADR-0011). The holder renews the lease by heartbeat while
     # alive; a lease whose heartbeat lapses past the TTL is reclaimable, so a
     # crashed holder can't deadlock a target. Heartbeat interval must be well
@@ -94,6 +100,12 @@ class Settings(BaseSettings):
     # Long enough for a classic cluster launch, inside MAX_RUN_DURATION_SECONDS.
     SCRIPT_TIMEOUT_SECONDS: int = 1500
     SCRIPT_MEMORY_MB: int = 1024
+    # Bounds on one brokered SDK call (per HTTP attempt, and across the SDK's
+    # retries). The script timer only stops the sandbox; these stop a hung call
+    # from holding the run, and its target lease, past it. Scripts that wait on
+    # long jobs poll, so each call stays short.
+    SCRIPT_SDK_HTTP_TIMEOUT_SECONDS: int = 60
+    SCRIPT_SDK_RETRY_TIMEOUT_SECONDS: int = 120
     # Output budget for the editor agent's replies (full scripts need room).
     ASSISTANT_MAX_TOKENS: int = 6000
 
@@ -103,6 +115,8 @@ class Settings(BaseSettings):
     # not a tuned budget. The most-recent green per (target, check) is preserved
     # past the window regardless, so long-stable-check provenance stays honest.
     RETENTION_WINDOW_DAYS: int = 90
+    # How often the poller prunes history (its other duties run every tick).
+    RETENTION_SWEEP_INTERVAL_SECONDS: int = 3600
 
     # ----- Findings feed (ADR-0009, #33) --------------------------------
     # The Recent-deployments lane is a rolling window of CI-triggered,
@@ -204,15 +218,22 @@ settings = get_settings()
 # --------------------------------------------------------------------------
 # Databricks SDK helpers (lazy - importing databricks-sdk is optional locally)
 # --------------------------------------------------------------------------
-def get_workspace_client():
+def get_workspace_client(**config):
     """Return an authenticated ``WorkspaceClient``.
 
     Uses injected service-principal OAuth credentials inside a Databricks App;
     falls back to the local CLI profile otherwise. Raises if the SDK cannot
-    authenticate so callers can degrade to demo/mock behaviour.
+    authenticate so callers can degrade to demo/mock behaviour. ``config`` is
+    passed to the SDK ``Config`` (e.g. ``http_timeout_seconds``).
     """
     from databricks.sdk import WorkspaceClient
 
+    if config:
+        from databricks.sdk.config import Config
+
+        if not settings.is_databricks_app:
+            config.setdefault("profile", settings.DATABRICKS_PROFILE)
+        return WorkspaceClient(config=Config(**config))
     if settings.is_databricks_app:
         return WorkspaceClient()
     return WorkspaceClient(profile=settings.DATABRICKS_PROFILE)

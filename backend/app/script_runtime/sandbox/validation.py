@@ -21,6 +21,7 @@ makes the call as the target's service principal (or the check's ``role``).
 """
 from __future__ import annotations
 
+import difflib
 import json
 import sys
 import time
@@ -154,14 +155,26 @@ def _camel(name: str) -> str:
 
 
 class Obj(dict):
-    """A response object. ``me.user_name`` also finds SCIM's camelCase ``userName``."""
+    """A response object. ``me.user_name`` also finds SCIM's camelCase ``userName``.
+
+    A field that isn't there reads as None, because the SDK leaves out fields whose
+    value is None. A name that's a near miss for a field that *is* there is a typo,
+    so it raises instead of quietly reading None.
+    """
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
         if name in self:
             return self[name]
-        return self.get(_camel(name))
+        camel = _camel(name)
+        if camel in self:
+            return self[camel]
+        close = difflib.get_close_matches(name, [k for k in self if isinstance(k, str)], n=1, cutoff=0.8)
+        if close:
+            raise AttributeError(f"this result has no field {name!r}; did you mean {close[0]!r}? "
+                                 f"Use .get({name!r}) for a field that can be missing.")
+        return None
 
     def __setattr__(self, name: str, value: Any) -> None:
         self[name] = value
@@ -345,6 +358,10 @@ class _ExpectDeny(_Check):
         elif issubclass(exc_type, Unauthenticated):
             denied_at = "AUTHENTICATE"
         elif issubclass(exc_type, ConnectionFailed):
+            if exc.bucket == "UPSTREAM_TIMEOUT":
+                self._end("error", exc.stage, exc.bucket,
+                          f"timed out, which looks the same as an outage, so it isn't the denial expected: {exc}")
+                return True
             denied_at = exc.stage
         elif issubclass(exc_type, ApiError):
             denied_at = "OPERATE"
@@ -379,8 +396,9 @@ def expect_deny(name: str, *, at: str = "AUTHORIZE", role: Optional[str] = None,
 
     ``at="AUTHORIZE"`` (default) wants a permission denial (HTTP 403, or a SQL
     ``INSUFFICIENT_PERMISSIONS`` error); ``at="CONNECT"`` wants a network denial
-    (DNS, connect or TLS); ``at="OPERATE"`` accepts a permission denial or any
-    other API error. An authentication failure or an outage never counts.
+    (DNS, refused connection or TLS); ``at="OPERATE"`` accepts a permission denial
+    or any other API error. An authentication failure, an outage or a timeout
+    never counts.
     Succeeding is a failure: it should have been blocked.
     """
     return _ExpectDeny(name, at=at, role=role, advisory=advisory, description=description)

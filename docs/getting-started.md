@@ -37,7 +37,7 @@ workspace you haven't registered.
 - A **SQL warehouse** in that workspace. The bundle looks up
   *Serverless Starter Warehouse* by default.
 - A **Model Serving endpoint** for the Assistant. The default is
-  `databricks-claude-sonnet-4-6`.
+  `databricks-claude-sonnet-5`; you can pick another in **Settings → Assistant**.
 - To build or develop locally: **Node 18+** and **Python 3.11+**.
 
 ## 2. (Optional) Try it locally first
@@ -94,8 +94,8 @@ The bundle variables you're most likely to change:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `sql_warehouse_id` | lookup: *Serverless Starter Warehouse* | Warehouse for SQL-warehouse Checks |
-| `model_serving_endpoint` | `databricks-claude-sonnet-4-6` | Endpoint the Assistant and agentic evaluator call |
+| `sql_warehouse_id` | lookup: *Serverless Starter Warehouse* | A warehouse in the app's workspace that the App is granted `CAN_USE` on |
+| `model_serving_endpoint` | `databricks-claude-sonnet-5` | The Assistant's default endpoint. **Settings → Assistant** can choose another. |
 | `seed_on_startup` | `true` | Seed the bundled Test catalog on boot. On a database an older release seeded, it retires the superseded Tests and adds the new ones. |
 | `nightly_cron` | `0 0 7 * * ?` (07:00 UTC) | Quartz cron for the nightly `full` Run |
 | `schedule_pause_status` | `UNPAUSED` | `PAUSED` to deploy without the nightly schedule |
@@ -244,23 +244,27 @@ every tag.
 
 ## 6. Run the bundled catalog
 
-The app seeds this catalog on boot. All of it except the tutorial Tests is
-Python scripts you can open in the editor:
+The app seeds this catalog on boot. Every Test in it is a Python script you can
+open in the editor:
 
 | Suite | Tests | When to run it |
 | --- | --- | --- |
 | **CI Gate** | Workspace access, Unity Catalog data path | After every apply. Read-only, about a minute, any safety class. |
 | **Post-apply health: compute & network** | Classic compute, Serverless compute, SQL warehouse cold start, Unity Catalog write round-trip | At **full** depth on a `prod-for-us` or `sandbox` Target, after applies that touch networking, and nightly. 5–15 minutes. |
 | **Security posture (drift)** | Exfiltration controls, Token hygiene, Network access controls, User isolation, Admin footprint | On a schedule, as an admin (see above). It's configuration drift, not health, so it isn't part of the CI Gate. |
-| **Connectivity Suite** | Tutorial Tests: SQL warehouse, UC listing, outbound egress | Examples of the older structured form. |
+| **Connectivity Suite** | SQL Warehouse validation, Unity Catalog access, Egress connectivity | Short, read-only scripts that show `sql()`, the SDK and `http()` at work. A good first run, and a good start for your own Tests. |
 
 To run it, open **Runs** and use the launcher at the top:
 
-1. **Suite**: pick **CI Gate**. Leave it blank to run every Active Test.
-2. **Target**: pick the Target you just registered. "All targets" is also safe,
-   because the safety gate runs per Target.
+1. **Suite**: pick **CI Gate**. **All active tests** runs every Active Test.
+2. **Target**: pick the Target you just registered. **All targets** is also
+   safe, because the safety gate runs per Target. There's no default, so
+   **Run** stays disabled until you choose.
 3. **Depth**: leave it on **Quick**.
 4. Click **Run**. You land on the Run page, which updates as Checks finish.
+
+To run a single Active Test, select it on the **Tests** page and use **Run this
+test** in its detail pane: pick a Target and a depth, then click **Run**.
 
 A Run moves through `queued` → `running` → `terminal` and ends with one verdict:
 `PASS`, `FAIL`, `ERROR`, `BLOCKED_BY_SAFETY`, or `SKIPPED` (nothing gating
@@ -297,9 +301,10 @@ with check("every SQL warehouse auto-stops"):
    starter script on the left and the Assistant on the right.
 2. Write the script, or describe what you want to the Assistant, e.g.
    *"check that every SQL warehouse auto-stops"*. It looks up the SDK methods,
-   can query the Target read-only to see real data, and proposes the script as
-   a diff you apply or reject. It never saves anything.
-3. Pick a Target and press **Run** (`⌘↵`) to dry-run the buffer. You see each
+   can query the Target read-only to see real data, and shows each step as it
+   works. Its edits appear as a diff you keep or undo, change by change. It
+   never saves anything.
+3. Pick a Target and press **Dry run** (`⌘↵`) to run the buffer once. You see each
    check's outcome, the calls it made and what it recorded. A dry run isn't
    recorded as a run.
 4. Click **Create draft**. A Draft never runs on its own.
@@ -334,15 +339,18 @@ network block with `at="CONNECT"`. A broken identity or an outage never
 counts. A control that's never tested on its deny path can silently fall open,
 so this is usually the most valuable check in a Test.
 
-### Suites, editing, and examples
+### Suites and editing
 
 - **Suites** are filter chips on the Tests page. **New suite** names one and
-  picks its Tests; **Edit suite** changes it. Tick *deterministic-only* for a
-  Suite CI will run.
+  picks its Tests; **Edit suite** changes it. A Suite CI runs should hold only
+  read-only Tests with no advisory checks, like the CI Gate.
 - **Change a Test**: **Open in editor**, edit, **Save**. Each save is a new
   version, and earlier versions stay in **Version history**, each with
-  **roll back**.
-- **Promote to examples** adds a Test to the library the Assistant learns from.
+  **roll back**. Rolling back asks you to confirm, then saves the old script as
+  a new version.
+- **Tune the Assistant**: **Settings → Assistant** picks its model and limits
+  what one turn may do. See
+  [Writing tests → Assistant settings](./writing-tests.md#assistant-settings).
 
 ## Next steps
 

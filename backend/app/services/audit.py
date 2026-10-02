@@ -10,6 +10,15 @@ from app.models import AuditEvent
 
 logger = logging.getLogger(__name__)
 
+PURGE_RUNS = "admin.purge_runs"
+PURGE_ALL = "admin.purge_all"
+CATALOG_UPGRADE = "catalog.upgrade"
+
+#: Config-plane records written outside :class:`~app.core.enums.AuditAction`'s
+#: vocabulary that the audit view must still surface: bulk purges (purge-all
+#: deletes every Target, Test and Suite) and the seeder's catalog upgrade.
+SYSTEM_ACTIONS: frozenset[str] = frozenset({PURGE_RUNS, PURGE_ALL, CATALOG_UPGRADE})
+
 
 def record_audit(
     session: Session,

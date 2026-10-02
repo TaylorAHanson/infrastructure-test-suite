@@ -110,6 +110,8 @@ export function slugify(text: string): string {
   return text
     .normalize('NFKD')
     .replace(/[\u0300-\u036F]/g, '')
+    // Stripping control characters is the point of this one.
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f]/g, '')
     .replace(rSpecial, '-')
     .replace(/-{2,}/g, '-')

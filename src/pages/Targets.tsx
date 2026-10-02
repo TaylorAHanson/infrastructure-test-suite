@@ -188,7 +188,7 @@ export default function Targets() {
                       onClear={() => setSelectedTags(new Set())} />
       )}
 
-      <div className="card overflow-hidden p-0">
+      <div className="card overflow-x-auto p-0">
         <table className="w-full">
           <thead className="border-b border-edge bg-ink">
             <tr>
@@ -396,7 +396,7 @@ function TagFilterBar({
             type="button"
             aria-pressed={active}
             className={`badge transition ${
-              active ? 'bg-accent text-ink' : 'bg-ink-soft text-muted hover:text-white'
+              active ? 'bg-accent text-on-accent' : 'bg-ink-soft text-muted hover:text-white'
             }`}
             onClick={() => onToggle(tag)}
           >

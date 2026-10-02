@@ -1,17 +1,17 @@
 """Python-script Tests: save, run (one script run → one CheckRun per check), dry-run.
 
-A script Test keeps the same result model as a structured Test. Each
-``with check("name")`` block is a Check row (``handler_key="script"``, keyed
-stably by ``(test, name)``) and a member of the Test, so run history, last-good,
-findings, flaky detection and version pins work unchanged. Saving a script
-re-syncs those rows; running a Test runs its script once per target and writes
-each check's verdict onto its CheckRun.
+Each ``with check("name")`` block is a Check row (``handler_key="script"``,
+keyed stably by ``(test, name)``) and a member of the Test, so run history,
+last-good, findings, flaky detection and version pins hang off it. Saving a
+script re-syncs those rows; running a Test runs its script once per target and
+writes each check's verdict onto its CheckRun.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import uuid
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -28,7 +28,7 @@ from app.core.enums import (
     TestStatus,
 )
 from app.core.ids import utcnow
-from app.models import Check, CheckRun, RunRequest, StageOutcome, Target, Test, TestCheck
+from app.models import Check, CheckRun, RunRequest, StageOutcome, Target, Test
 from app.schemas.schemas import TestCheckIn
 from app.script_runtime import codegen
 from app.script_runtime.analysis import analyze
@@ -55,10 +55,6 @@ class TargetBusy(RuntimeError):
     """A mutating target's lease is held by a run; a dry run would collide with it."""
 
 
-def is_script_test(test: Optional[Test]) -> bool:
-    return bool(test is not None and test.script)
-
-
 def is_script_check(check: Optional[Check]) -> bool:
     return check is not None and check.handler_key == SCRIPT_HANDLER
 
@@ -67,25 +63,9 @@ def script_check_name(check: Check) -> str:
     return (check.hints or {}).get("script_check_name") or check.display_name
 
 
-# ---------------------------------------------------------------------------
-# Reading the script of any Test
-# ---------------------------------------------------------------------------
-def _members(session: Session, test_id: str) -> list[tuple[TestCheck, Check]]:
-    rows = session.exec(select(TestCheck).where(TestCheck.test_id == test_id)
-                        .order_by(TestCheck.sort_order)).all()  # type: ignore[arg-type]
-    out = []
-    for m in rows:
-        check = session.get(Check, m.check_id)
-        if check is not None:
-            out.append((m, check))
-    return out
-
-
-def script_for(session: Session, test: Test) -> tuple[str, bool]:
-    """``(script, converted)`` — a legacy structured Test is rendered as a script."""
-    if test.script:
-        return test.script, False
-    return codegen.structured_to_script(test, _members(session, test.id)), True
+def script_for(test: Test) -> str:
+    """The Test's script; one that has none yet opens as the new-Test template."""
+    return test.script or codegen.new_test_script(test.name, test.description)
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +176,6 @@ def save_script(session: Session, test: Test, script: str, actor: str, **fields:
     analysis = validate_or_raise(script)
     _ensure_test_recorded(session, test)
     before_version = test.version
-    was_script = bool(test.script)
     for key in _EDITABLE:
         if key in fields and fields[key] is not None:
             setattr(test, key, fields[key])
@@ -209,8 +188,7 @@ def save_script(session: Session, test: Test, script: str, actor: str, **fields:
     session.refresh(test)
     record_test_version(session, test, actor)
     record_audit(session, actor=actor, action="test.update", entity_type="test", entity_id=test.id,
-                 summary=(f"{'Edited' if was_script else 'Converted to a script:'} test {test.name} "
-                          f"(v{before_version} → v{test.version})"),
+                 summary=f"Edited test {test.name} (v{before_version} → v{test.version})",
                  before=version_pointer("test", test.id, before_version),
                  after=version_pointer("test", test.id, test.version))
     return test, analysis
@@ -250,27 +228,43 @@ def _target_view(target: Optional[Target]) -> Optional[SimpleNamespace]:
         assumable_roles=list(target.assumable_roles or []), identity_handle=target.identity_handle)
 
 
+def _sdk_timeouts() -> dict:
+    from app.core.config import settings
+
+    return {"http_timeout_seconds": settings.SCRIPT_SDK_HTTP_TIMEOUT_SECONDS,
+            "retry_timeout_seconds": settings.SCRIPT_SDK_RETRY_TIMEOUT_SECONDS}
+
+
 def client_factory(target: Optional[SimpleNamespace]):
     """``role -> WorkspaceClient`` as the target's SP (or an assumed role).
 
-    Unlike the structured handlers this never falls back to the app's own
-    identity when the target has an identity handle that fails to mint: a
-    script result must be about the target's identity, not the app's.
+    This never falls back to the app's own identity when the target has an
+    identity handle that fails to mint: a
+    script result must be about the target's identity, not the app's. A target
+    with no identity handle runs as the developer's CLI profile only in local
+    development; in a deployed app that would test the app's own workspace as
+    the app, so it is an identity error instead. Every client's calls are
+    bounded by the ``SCRIPT_SDK_*_TIMEOUT_SECONDS`` settings.
     """
     def client_for(role: Optional[str]):
         from app.clients.databricks import IdentityError
-        from app.handlers.builtin.generic import _make_workspace_client
+        from app.core.config import get_workspace_client, settings
         from app.services.run_service import _resolve_identity_token
 
         token, _group = _resolve_identity_token(target, role)  # type: ignore[arg-type]
         if token:
-            return _make_workspace_client(target.host if target else None, token)
+            from databricks.sdk import WorkspaceClient
+            from databricks.sdk.config import Config
+
+            return WorkspaceClient(config=Config(host=target.host if target else None, token=token,
+                                                 auth_type="pat", **_sdk_timeouts()))
         if target is not None and target.identity_handle:
             raise IdentityError(f"could not get a token for target '{target.name}'"
                                 + (f" as role '{role}'" if role else ""))
-        from app.core.config import get_workspace_client
-
-        return get_workspace_client()
+        if target is not None and settings.is_databricks_app:
+            raise IdentityError(f"target '{target.name}' has no identity handle, so there is no identity "
+                                "to run as: register its service principal (scope/key) on the target")
+        return get_workspace_client(**_sdk_timeouts())
 
     return client_for
 
@@ -295,10 +289,13 @@ _DENIAL_BUCKET = {"AUTHORIZE": "PERMISSION_DENIED", "AUTHENTICATE": "AUTHENTICAT
 
 
 def _stages(res: CheckResult) -> list[tuple[str, StageStatus, str, Optional[str], dict]]:
-    """Map one check's result onto the canonical stage spine."""
+    """Map one check's result onto the canonical stage spine.
+
+    The calls themselves live once, on the CheckRun's evidence.
+    """
     calls = res.calls
     ops = ", ".join(dict.fromkeys(c["op"] for c in calls[:8])) or "no platform calls"
-    op_evidence = {"calls": calls}
+    op_evidence: dict = {}
     if res.outcome == "pass" and res.kind != "counterfactual":
         return [("AUTHENTICATE", StageStatus.PASS, "Authenticated as the target identity.", None, {}),
                 ("AUTHORIZE", StageStatus.PASS, "Every call was authorized.", None, {}),
@@ -349,7 +346,10 @@ def _unreached(name: str, result: ScriptResult) -> CheckResult:
     return res
 
 
-def _write_result(session: Session, run: CheckRun, res: CheckResult, result: ScriptResult) -> None:
+def _write_result(session: Session, run: CheckRun, res: CheckResult, result: ScriptResult,
+                  logs_on: Optional[str] = None) -> None:
+    """Record one check's result. The script's logs/output go on one CheckRun of the
+    group; the others point at it with ``script_logs_run_id`` (``logs_on``)."""
     now = utcnow()
     run.verdict = _verdict(res)
     run.failure_stage = res.stage if run.verdict not in (RunStatus.PASS, RunStatus.SKIPPED) else None
@@ -357,9 +357,12 @@ def _write_result(session: Session, run: CheckRun, res: CheckResult, result: Scr
     run.message = res.message or ("Passed." if run.verdict == RunStatus.PASS else "")
     if res.calls:
         run.risk_tier = _tier_of(res.calls)
-    run.evidence = {**dict(res.evidence), "calls": res.calls, "line": res.line,
-                    "traceback": res.traceback, "logs": result.logs[-50:],
-                    "script_output": result.output[-4000:] if result.output else ""}
+    evidence = {**dict(res.evidence), "calls": res.calls, "line": res.line, "traceback": res.traceback}
+    if logs_on is None:
+        evidence.update(logs=result.logs[-50:], script_output=result.output[-4000:] if result.output else "")
+    else:
+        evidence["script_logs_run_id"] = logs_on
+    run.evidence = evidence
     run.finished_at = now
     run.duration_ms = res.ms if res.ms is not None else (
         int((now - run.started_at).total_seconds() * 1000) if run.started_at else None)
@@ -399,18 +402,35 @@ def _dynamic_check(session: Session, test: Test, res: CheckResult) -> Check:
         return check
 
 
+def _load_runs(session: Session, run_ids: list[str]) -> list[CheckRun]:
+    rows = {r.run_id: r for r in session.exec(
+        select(CheckRun).where(CheckRun.run_id.in_(run_ids))  # type: ignore[attr-defined]
+    ).all()}
+    return [rows[rid] for rid in run_ids if rid in rows]
+
+
 def execute_script_group(run_ids: list[str]) -> None:
     """Run one Test's script against one target and record every check's CheckRun."""
     from app.db.session import session_scope
+    from app.services.run_service import claim_check_runs, lock_owned_runs, target_display_name
     from app.services.safety import SafetyOverride
 
+    started = utcnow()
+    group_ids = list(run_ids)
     with session_scope() as session:
-        runs = [r for r in (session.get(CheckRun, rid) for rid in run_ids) if r is not None]
-        if not runs:
+        run_ids = claim_check_runs(session, group_ids, started)
+        if not run_ids:
             return
+        group = _load_runs(session, group_ids)
+        runs = [r for r in group if r.run_id in set(run_ids)]
         first = runs[0]
-        checks = {r.run_id: session.get(Check, r.check_id) for r in runs}
-        test_id = first.test_id or (checks[first.run_id].hints or {}).get("script_test_id")
+        checks = {c.id: c for c in session.exec(
+            select(Check).where(Check.id.in_({r.check_id for r in group}))  # type: ignore[attr-defined]
+        ).all()}
+        names = {r.run_id: script_check_name(checks[r.check_id]) if r.check_id in checks else ""
+                 for r in group}
+        first_check = checks.get(first.check_id)
+        test_id = first.test_id or ((first_check.hints or {}).get("script_test_id") if first_check else None)
         test = session.get(Test, test_id) if test_id else None
         target = session.get(Target, first.target_id) if first.target_id else None
         request = session.get(RunRequest, first.request_id) if first.request_id else None
@@ -425,19 +445,15 @@ def execute_script_group(run_ids: list[str]) -> None:
         script, default_role = test.script, test.run_as_role
         target_view = _target_view(target)
         override = SafetyOverride.from_payload(request.override if request else None)
+        params = dict((request.params if request else None) or {})
         depth, source = first.depth, first.request_source
-        started = utcnow()
-        for r in runs:
-            r.started_at = started
-            r.verdict = RunStatus.RUNNING
-            session.add(r)
-        session.commit()
-        first = SimpleNamespace(**{k: getattr(first, k) for k in (
+        header = SimpleNamespace(**{k: getattr(first, k) for k in (
             "test_id", "request_id", "target_id", "requested_by", "request_source", "depth",
-            "workspace_name", "git_sha", "event_ref", "app_version")})
+            "git_sha", "event_ref", "app_version")},
+            workspace_name=target_display_name(target) or first.workspace_name)
 
     ctx = _context(target_view, depth=depth, request_source=source, override=override,
-                   default_role=default_role)
+                   default_role=default_role, params=params)
     try:
         result = run_script(script, ctx)
     except Exception as exc:  # noqa: BLE001 - a runtime failure must still close the runs
@@ -445,38 +461,42 @@ def execute_script_group(run_ids: list[str]) -> None:
         result = ScriptResult(error={"kind": "error", "message": f"script runtime failed: {exc}"})
 
     with session_scope() as session:
-        runs = [r for r in (session.get(CheckRun, rid) for rid in run_ids) if r is not None]
-        recorded: set[str] = set()
+        owned = lock_owned_runs(session, run_ids)
+        runs = [r for r in _load_runs(session, run_ids) if r.run_id in owned]
+        if not runs:
+            logger.info("script group %s was terminated while running; its late result is dropped", run_ids)
+            return
+        logs_on = runs[0].run_id
         for run in runs:
-            check = session.get(Check, run.check_id)
-            name = script_check_name(check) if check else ""
-            recorded.add(name)
+            name = names[run.run_id]
             res = result.check(name)
             if res is None or res.outcome == "not_reached":
                 res = _unreached(name, result)
-            _write_result(session, run, res, result)
+            run.workspace_name = run.workspace_name or header.workspace_name
+            _write_result(session, run, res, result, logs_on=None if run.run_id == logs_on else logs_on)
         session.commit()
 
         # Checks the script produced that weren't declared literally (e.g. in a loop).
-        if first.test_id and first.request_id:
-            test = session.get(Test, first.test_id)
+        recorded = set(names.values())
+        if header.test_id and header.request_id:
+            test = session.get(Test, header.test_id)
             for res in result.checks:
                 if res.name in recorded or test is None:
                     continue
                 check = _dynamic_check(session, test, res)
                 run = CheckRun(
-                    request_id=first.request_id, test_id=first.test_id, check_id=check.id,
-                    target_id=first.target_id, requested_by=first.requested_by,
-                    request_source=first.request_source, depth=first.depth,
+                    request_id=header.request_id, test_id=header.test_id, check_id=check.id,
+                    target_id=header.target_id, requested_by=header.requested_by,
+                    request_source=header.request_source, depth=header.depth,
                     evaluator=Evaluator.DETERMINISTIC,
                     expectation=Expectation.DENY if res.kind == "counterfactual" else Expectation.PASS,
                     gating=not res.advisory, run_as_role=res.role or test.run_as_role,
-                    risk_tier=check.risk_tier, workspace_name=first.workspace_name,
-                    git_sha=first.git_sha, event_ref=first.event_ref, app_version=first.app_version,
+                    risk_tier=check.risk_tier, workspace_name=header.workspace_name,
+                    git_sha=header.git_sha, event_ref=header.event_ref, app_version=header.app_version,
                     started_at=started, verdict=RunStatus.RUNNING)
                 session.add(run)
                 session.flush()
-                _write_result(session, run, res, result)
+                _write_result(session, run, res, result, logs_on=logs_on)
             session.commit()
 
 
@@ -492,22 +512,15 @@ def dry_run(session: Session, *, script: str, target: Optional[Target], depth: D
     analysis = analyze(script)
     if any((e.get("message") or "").startswith("Syntax error") for e in analysis["errors"]):
         return {"analysis": analysis, "result": None}
-    holder = None
-    if target is not None and locking.needs_lock(target.safety_class):
-        holder = f"dryrun-{uuid.uuid4().hex[:12]}"
-        if not locking.acquire(session, target.id, holder=holder):
-            raise TargetBusy(f"target '{target.name}' is busy with another run; try again shortly")
+    lease = (locking.held(target.id, f"dryrun-{uuid.uuid4().hex[:12]}")
+             if target is not None and locking.needs_lock(target.safety_class) else nullcontext(True))
     target_view = _target_view(target)
-    try:
+    with lease as acquired:
+        if not acquired:
+            raise TargetBusy(f"target '{target.name}' is busy with another run; try again shortly")
         ctx = _context(target_view, depth=depth, request_source=request_source, override=override,
                        default_role=run_as_role, params=params)
         result = run_script(script, ctx)
-    finally:
-        if holder is not None:
-            from app.db.session import session_scope
-
-            with session_scope() as s:
-                locking.release(s, target.id, holder=holder)
     if target is not None and target.safety_class.is_mutating and depth == Depth.FULL:
         record_audit(session, actor=actor, action="test.dry_run", entity_type="target",
                      entity_id=target.id, request_source=request_source.value,

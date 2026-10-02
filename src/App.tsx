@@ -11,6 +11,7 @@ import Schedules from './pages/Schedules'
 import Audit from './pages/Audit'
 import Branding from './pages/Branding'
 import Notifications from './pages/Notifications'
+import AssistantSettings from './pages/AssistantSettings'
 import ReleaseNotes from './pages/ReleaseNotes'
 
 // The editor pulls in CodeMirror; load it only when a test is opened for editing.
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="targets" element={<Targets />} />
           <Route path="schedules" element={<Schedules />} />
           <Route path="notifications" element={<Notifications />} />
+          <Route path="assistant" element={<AssistantSettings />} />
           <Route path="release-notes" element={<ReleaseNotes />} />
         </Route>
         {/* Legacy /analytics path kept as an alias so the run-completion webhook's

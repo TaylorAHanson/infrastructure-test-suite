@@ -1,16 +1,16 @@
-"""Test catalog endpoints (target-agnostic bundle of Checks)."""
+"""Test catalog endpoints: script Tests, their versions, and Draft → Active."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
+from app.api.deps import actor_handle
 from app.db.session import get_session
-from app.handlers.registry import OperationBlocked
 from app.models import Check, Test
-from app.schemas.schemas import ScriptSave, ScriptTestCreate, TestCreate, TestUpdate
+from app.schemas.schemas import ScriptSave, ScriptTestCreate, TestUpdate
 from app.script_runtime.analysis import analyze
-from app.services import pinned_versions, script_tests, versioning, yaml_export
-from app.services.audit import record_audit, version_pointer
+from app.services import pinned_versions, script_tests, versioning
+from app.services.audit import record_audit
 
 router = APIRouter()
 
@@ -21,7 +21,7 @@ def _invalid(exc: script_tests.ScriptInvalid) -> HTTPException:
 
 @router.post("/script", status_code=201)
 def create_script_test(payload: ScriptTestCreate, session: Session = Depends(get_session),
-                       actor: str = Query("api-user")) -> dict:
+                       actor: str = Depends(actor_handle())) -> dict:
     """Create a script Test as a Draft (the starter template if no script is given)."""
     try:
         test, _ = script_tests.create_script_test(
@@ -34,7 +34,7 @@ def create_script_test(payload: ScriptTestCreate, session: Session = Depends(get
 
 @router.delete("/{test_id}", status_code=204)
 def delete_draft_test(test_id: str, session: Session = Depends(get_session),
-                      actor: str = Query("api-user")) -> None:
+                      actor: str = Depends(actor_handle())) -> None:
     """Delete a Draft Test. An Active Test has run history; disable it instead."""
     from app.core.enums import TestStatus
     from app.models import CheckRun, SuiteMember, TestCheck
@@ -68,18 +68,18 @@ def delete_draft_test(test_id: str, session: Session = Depends(get_session),
 
 @router.get("/{test_id}/script")
 def get_test_script(test_id: str, session: Session = Depends(get_session)) -> dict:
-    """The Test's script; a structured Test is rendered as one (``converted``)."""
+    """The Test's script, with its static analysis."""
     test = session.get(Test, test_id)
     if not test:
         raise HTTPException(404, "test not found")
-    script, converted = script_tests.script_for(session, test)
-    return {"script": script, "converted": converted, "analysis": analyze(script)}
+    script = script_tests.script_for(test)
+    return {"script": script, "analysis": analyze(script)}
 
 
 @router.put("/{test_id}/script")
 def save_test_script(test_id: str, payload: ScriptSave, session: Session = Depends(get_session),
-                     actor: str = Query("api-user")) -> dict:
-    """Save the script as the Test's next version (converts a structured Test)."""
+                     actor: str = Depends(actor_handle())) -> dict:
+    """Save the script as the Test's next version."""
     test = session.get(Test, test_id)
     if not test:
         raise HTTPException(404, "test not found")
@@ -109,58 +109,20 @@ def get_test(test_id: str, session: Session = Depends(get_session)) -> dict:
     return pinned_versions.test_read(session, test)
 
 
-@router.get("/{test_id}/yaml")
-def export_test_yaml(test_id: str, session: Session = Depends(get_session)) -> dict:
-    test = session.get(Test, test_id)
-    if not test:
-        raise HTTPException(404, "test not found")
-    return {"yaml": yaml_export.test_to_yaml(session, test)}
-
-
-@router.post("", status_code=201)
-def create_test(payload: TestCreate, session: Session = Depends(get_session),
-                actor: str = Query("api-user")) -> dict:
-    members = pinned_versions.members_in(payload.members, payload.check_ids)
-    for m in members:
-        if not session.get(Check, m.check_id):
-            raise HTTPException(422, f"check {m.check_id} not found")
-    test = Test(name=payload.name, description=payload.description, tags=payload.tags,
-                run_as_role=payload.run_as_role)
-    session.add(test)
-    session.commit()
-    session.refresh(test)
-    pinned_versions.set_members(session, test.id, members)
-    session.commit()
-    session.refresh(test)
-    pinned_versions.record_test_version(session, test, actor)
-    # Recorded as a version pointer, not a duplicated diff (ADR-0014 §3): the
-    # snapshot already lives in EntityVersion.
-    record_audit(session, actor=actor, action="test.create", entity_type="test", entity_id=test.id,
-                 summary=f"Created test {test.name}",
-                 after=version_pointer("test", test.id, test.version))
-    return pinned_versions.test_read(session, test)
-
-
 @router.patch("/{test_id}")
 def update_test(test_id: str, payload: TestUpdate, session: Session = Depends(get_session),
-                actor: str = Query("api-user")) -> dict:
-    """Edit a Test — fields, membership and member Check content — as a new version (#118)."""
+                actor: str = Depends(actor_handle())) -> dict:
+    """Edit a Test's fields as a new version; its checks are edited in its script."""
     test = session.get(Test, test_id)
     if not test:
         raise HTTPException(404, "test not found")
-    if script_tests.is_script_test(test) and (
-            payload.members is not None or payload.check_ids is not None or payload.check_edits):
-        raise HTTPException(409, "this test is a script; edit its checks in the script")
-    try:
-        pinned_versions.edit_test(session, test, payload, actor)
-    except (OperationBlocked, ValueError) as exc:
-        raise HTTPException(422, str(exc))
+    pinned_versions.edit_test(session, test, payload, actor)
     return pinned_versions.test_read(session, test)
 
 
 @router.post("/{test_id}/accept")
 def accept_test(test_id: str, session: Session = Depends(get_session),
-                actor: str = Query("api-user")) -> dict:
+                actor: str = Depends(actor_handle())) -> dict:
     """Promote a Draft Test to Active (explicit human accept, ADR-0006 §8)."""
     from app.services.assistant import accept_test as _accept
 
@@ -180,7 +142,7 @@ def list_test_versions(test_id: str, session: Session = Depends(get_session)) ->
 
 @router.post("/{test_id}/rollback/{version}")
 def rollback_test(test_id: str, version: int, session: Session = Depends(get_session),
-                  actor: str = Query("api-user")) -> dict:
+                  actor: str = Depends(actor_handle())) -> dict:
     """Restore a prior Test version — incl. its pinned Check content — as a new version."""
     test = session.get(Test, test_id)
     if not test:
@@ -189,4 +151,6 @@ def rollback_test(test_id: str, version: int, session: Session = Depends(get_ses
         pinned_versions.rollback_test(session, test, version, actor)
     except LookupError as exc:
         raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     return pinned_versions.test_read(session, test)

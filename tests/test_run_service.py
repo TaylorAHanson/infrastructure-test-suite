@@ -28,10 +28,11 @@ def test_agentic_advisory_never_flips_a_pass_to_fail():
     assert run_service.request_verdict(runs) == RunStatus.PASS
 
 
-def test_no_gating_runs_is_a_pass():
-    # An advisory-only selection cannot block CI.
-    runs = [_run(RunStatus.FAIL, gating=False, bucket="JUDGE_UNSURE")]
-    assert run_service.request_verdict(runs) == RunStatus.PASS
+def test_no_gating_runs_is_an_error():
+    # Fail-closed: a request that gated nothing proved nothing, so it can't PASS.
+    runs = [_run(RunStatus.PASS, gating=False, bucket="JUDGE_UNSURE")]
+    assert run_service.request_verdict(runs) == RunStatus.ERROR
+    assert run_service.request_verdict([]) == RunStatus.ERROR
 
 
 def test_a_failed_gating_run_blocks():

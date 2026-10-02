@@ -17,15 +17,23 @@ from app.services.authoring import build_check_fields
 from app.services.seed.contribution import SuiteSpec, TestSpec
 
 
-def make_check(spec: dict, *, tags: list[str] | None = None) -> Check:
-    """Build a Check from a spec, optionally stamping ``hints["tags"]``.
+#: ``hints`` key carrying the catalog key a seeded Check was built from, so an
+#: upgrade wires seeded Tests to the seeder's own Check — never to a person's
+#: Check that happens to share its display name.
+SEED_KEY_HINT = "seed_key"
+
+
+def make_check(spec: dict, *, tags: list[str] | None = None,
+               seed_key: Optional[str] = None) -> Check:
+    """Build a Check from a spec, optionally stamping ``hints["tags"]`` / ``hints["seed_key"]``.
 
     Check has no dedicated tags column (unlike Test/Suite); ``hints`` is the
     existing free-form grounding-metadata field, so tutorial/example tagging
     rides there rather than adding a migration for this prefactor.
     """
-    if tags:
-        spec = {**spec, "hints": {**spec.get("hints", {}), "tags": tags}}
+    extra = {**({"tags": tags} if tags else {}), **({SEED_KEY_HINT: seed_key} if seed_key else {})}
+    if extra:
+        spec = {**spec, "hints": {**spec.get("hints", {}), **extra}}
     return Check(**build_check_fields(CheckCreate(**spec)))
 
 

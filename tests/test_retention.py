@@ -113,6 +113,65 @@ def test_a_series_with_no_green_has_no_anchor(session):
     assert session.get(CheckRun, r2) is None
 
 
+def test_an_in_window_green_supersedes_the_old_anchor(session):
+    old_green = _check_run(session, verdict=RunStatus.PASS, target_id="t1", age_days=200)
+    fresh_green = _check_run(session, verdict=RunStatus.PASS, target_id="t1", age_days=1)
+
+    assert retention.sweep(session) == 1
+    assert _surviving_ids(session) == {fresh_green}
+    assert session.get(CheckRun, old_green) is None
+
+
+def test_target_less_runs_are_their_own_series(session):
+    # A target-unbound green is anchored on its own; a targeted green of the same
+    # check neither covers it nor is covered by it.
+    unbound = _check_run(session, verdict=RunStatus.PASS, target_id=None, age_days=200)
+    bound_old = _check_run(session, verdict=RunStatus.PASS, target_id="t1", age_days=200)
+    bound_new = _check_run(session, verdict=RunStatus.PASS, target_id="t1", age_days=150)
+
+    assert retention.sweep(session) == 1
+    assert _surviving_ids(session) == {unbound, bound_new}
+    assert session.get(CheckRun, bound_old) is None
+
+
+def test_anchor_ties_on_created_at_break_on_run_id(session):
+    created = utcnow() - timedelta(days=200)
+    for run_id in ("run-a", "run-b"):
+        session.add(CheckRun(run_id=run_id, check_id="chk-1", target_id="t1",
+                             verdict=RunStatus.PASS, created_at=created))
+    session.commit()
+
+    assert retention.sweep(session) == 1
+    assert _surviving_ids(session) == {"run-b"}
+    assert retention.sweep(session) == 0
+
+
+def test_a_sweep_with_only_preserved_anchors_reads_one_row_and_writes_nothing(session):
+    # Anchors are normal (a deregistered target, a long-red check). Once they are
+    # all that is old, a sweep must not pull green history into memory again.
+    from sqlalchemy import event
+
+    from app.db.session import get_engine
+
+    for n in range(20):
+        _check_run(session, verdict=RunStatus.PASS, target_id=f"gone-{n}", age_days=200)
+    for n in range(50):
+        _check_run(session, verdict=RunStatus.PASS, target_id="t1", age_days=n / 10)
+
+    seen: list[str] = []
+
+    def _capture(conn, cursor, statement, params, context, executemany):  # noqa: ANN001
+        seen.append(statement)
+
+    engine = get_engine()
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        assert retention.sweep(session) == 0
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+    assert len(seen) == 1 and "LIMIT" in seen[0].upper(), seen
+
+
 # ------------------------------- configurable window -------------------------------
 def test_window_is_configurable(session):
     # A tighter window prunes a row the default would keep — the single knob is

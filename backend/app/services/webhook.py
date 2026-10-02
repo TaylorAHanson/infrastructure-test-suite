@@ -116,7 +116,7 @@ def run_findings(session: Session, request_id: str) -> list[CheckRun]:
 
     Reuses #10's actionability verbatim (:data:`findings.ACTIONABLE_VERDICTS`),
     so a run is "all-green" exactly when it has none — including a failing
-    **advisory** (agentic) check, which the view surfaces as a finding too.
+    **advisory** check, which the view surfaces as a finding too.
     """
     runs = session.exec(
         select(CheckRun).where(CheckRun.request_id == request_id)

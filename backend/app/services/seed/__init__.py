@@ -86,7 +86,7 @@ def seed_all(session: Session, with_demo_targets: bool = True) -> None:
     checks: dict[str, Check] = {}
     for contribution in contributions:
         for key, spec in contribution.check_specs:
-            check = make_check(spec, tags=contribution.check_tags or None)
+            check = make_check(spec, tags=contribution.check_tags or None, seed_key=key)
             session.add(check)
             checks[key] = check
     session.commit()

@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
-  AlertCircle, ArrowLeft, CheckCircle2, CircleHelp, FileDiff, GripVertical, Info, Loader2, Play, Save, Trash2,
+  AlertCircle, ArrowLeft, CheckCircle2, CircleHelp, FileDiff, GripVertical, Loader2, Play, RotateCw, Save, Trash2,
 } from 'lucide-react'
 
-import CodeEditor, { type CodeEditorHandle, type EditorDiagnostic } from '../components/CodeEditor'
+import CodeEditor, { type CodeEditorHandle, type EditorDiagnostic, type ReviewProgress } from '../components/CodeEditor'
 import EditorAssistant, { chatKey, loadChat, saveChat, type ChatEntry } from '../components/editor/EditorAssistant'
 import ResultsPanel, { tierClass, type PanelTab } from '../components/editor/ResultsPanel'
 import {
   useAcceptTest, useCreateScriptTest, useDeleteTest, useDryRun, useSaveScript, useScriptTemplate,
-  useSdkIndex, useStudioTests, useTargets, useTestScript,
+  useSdkIndex, useTargets, useTest, useTests, useTestScript,
 } from '../hooks/queries'
 import { useSplit } from '../hooks/useSplit'
 import { api, ApiError, errorMessage } from '../lib/api'
@@ -44,8 +44,11 @@ export default function TestEditorPage() {
 function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (id: string) => void }) {
   const navigate = useNavigate()
   const [search, setSearch] = useSearchParams()
-  const { data: tests } = useStudioTests()
+  const testsQ = useTests()
+  const tests = testsQ.data
   const test = tests?.find((t) => t.id === testId) ?? null
+  // Not in the list: look it up directly to tell a retired Test from a missing one.
+  const missingQ = useTest(testId ?? undefined, !!tests && !test)
   const scriptQ = useTestScript(testId ?? undefined)
   const template = useScriptTemplate(!testId)
   const { data: sdk } = useSdkIndex()
@@ -60,12 +63,14 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
 
   const [buffer, setBuffer] = useState<string | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
-  const [converted, setConverted] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [savedMeta, setSavedMeta] = useState({ name: '', description: '' })
+  const [savedMeta, setSavedMeta] = useState({ name: '', description: '', role: '' })
   const [analysis, setAnalysis] = useState<ScriptAnalysis | null>(null)
-  const [review, setReview] = useState<{ proposal: EditorProposal; doc: string } | null>(null)
+  // `doc` has every proposed change not yet undone; `original` the buffer plus only the kept ones.
+  const [review, setReview] = useState<{
+    proposal: EditorProposal; doc: string; original: string; remaining: number; total: number
+  } | null>(null)
   const [dryRun, setDryRun] = useState<DryRunState | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [tab, setTab] = useState<PanelTab>('problems')
@@ -87,12 +92,11 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
       setBuffer(template.data.script)
     } else if (testId && scriptQ.data && test) {
       setBuffer(scriptQ.data.script)
-      setConverted(scriptQ.data.converted)
-      setSaved(scriptQ.data.converted ? null : scriptQ.data.script)
+      setSaved(scriptQ.data.script)
       setAnalysis(scriptQ.data.analysis)
       setName(test.name)
       setDescription(test.description)
-      setSavedMeta({ name: test.name, description: test.description })
+      setSavedMeta({ name: test.name, description: test.description, role: test.run_as_role ?? '' })
       setRole(test.run_as_role ?? '')
     }
   }, [buffer, testId, template.data, scriptQ.data, test])
@@ -135,7 +139,8 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
     return () => clearTimeout(h)
   }, [buffer])
 
-  const dirty = buffer !== null && (buffer !== saved || name !== savedMeta.name || description !== savedMeta.description)
+  const dirty = buffer !== null && (buffer !== saved || name !== savedMeta.name ||
+    description !== savedMeta.description || role !== savedMeta.role)
 
   useEffect(() => {
     if (!dirty) return
@@ -177,14 +182,16 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
       return
     }
     if (review) {
-      setNotice({ kind: 'error', text: 'Apply or discard the proposed edit before saving.' })
+      setNotice({ kind: 'error', text: 'Keep or undo the proposed changes before saving.' })
       return
     }
     try {
-      const fields = { name: name.trim(), description, script: buffer }
+      const fields = { name: name.trim(), description, script: buffer, run_as_role: role || null }
       let version: number
       if (!testId) {
-        const t = await create.mutateAsync({ ...fields, run_as_role: role || null })
+        // The create's onSuccess has already put the new test in the list, so
+        // the editor finds it when the URL moves to /tests/:id/edit.
+        const t = await create.mutateAsync(fields)
         onCreated(t.id)
         saveChat(t.id, entries)
         try {
@@ -199,9 +206,8 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
         version = t.version
       }
       setSaved(buffer)
-      setSavedMeta({ name: fields.name, description })
+      setSavedMeta({ name: fields.name, description, role })
       setName(fields.name)
-      setConverted(false)
       setNotice({ kind: 'ok', text: `Saved as v${version}` })
     } catch (e) {
       const detail = e instanceof ApiError ? e.detail : undefined
@@ -290,7 +296,25 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
     return () => clearTimeout(h)
   }, [notice])
 
-  const onProposal = useCallback((p: EditorProposal) => setReview({ proposal: p, doc: p.script }), [])
+  const onProposal = useCallback(
+    (p: EditorProposal) => setReview({ proposal: p, doc: p.script, original: buffer ?? '', remaining: 0, total: 0 }),
+    [buffer],
+  )
+  const finishReview = useCallback((doc: string) => {
+    setBuffer(doc)
+    setReview(null)
+    editor.current?.focus()
+  }, [])
+  const reviewTotal = useRef(0)
+  reviewTotal.current = review?.total ?? 0
+  const onReviewChange = useCallback(
+    ({ remaining, doc, original }: ReviewProgress) => {
+      // Every change kept or undone: there's nothing left to review.
+      if (remaining === 0 && reviewTotal.current > 0) return finishReview(doc)
+      setReview((r) => (r ? { ...r, doc, original, remaining, total: Math.max(r.total, remaining) } : r))
+    },
+    [finishReview],
+  )
   const onAgentDryRun = useCallback(
     (d: DryRunResponse) => {
       setDryRun({ ...d, by: 'assistant', script: d.script ?? buffer ?? '' })
@@ -302,18 +326,34 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
 
   // ---- render
   if (testId && tests && !test) {
+    if (missingQ.isPending) return <EditorLoading />
+    const retired = missingQ.data?.tags.includes('retired')
     return (
       <div className="card text-sm text-muted">
-        That test doesn't exist. <Link to="/tests" className="text-accent hover:underline">Back to tests</Link>
+        {retired ? (
+          <>
+            <span className="text-white">{missingQ.data!.name}</span> was retired: a newer release of the bundled
+            catalog replaced it. Its run history is kept, but it no longer runs and isn't shown in the Tests list.{' '}
+          </>
+        ) : missingQ.error instanceof ApiError && missingQ.error.status === 404 ? (
+          "That test doesn't exist. "
+        ) : (
+          <span className="text-fail">Couldn't load this test: {errorMessage(missingQ.error)}. </span>
+        )}
+        <Link to="/tests" className="text-accent hover:underline">Back to tests</Link>
       </div>
     )
   }
   if (buffer === null) {
-    const err = scriptQ.error ?? template.error
+    const err = testId ? (scriptQ.error ?? (tests ? null : testsQ.error)) : template.error
+    if (!err) return <EditorLoading />
     return (
-      <div className="flex items-center gap-2 p-6 text-sm text-muted">
-        {err ? <span className="text-fail">{errorMessage(err)}</span> : (<><Loader2 size="16" className="animate-spin" /> Loading the editor…</>)}
-      </div>
+      <EditorLoadError
+        what={testId ? "this test's script" : 'the starter script'}
+        error={err}
+        onRetry={() => (testId ? (scriptQ.error ? scriptQ.refetch() : testsQ.refetch()) : template.refetch())}
+        onBlank={testId ? undefined : () => setBuffer('')}
+      />
     )
   }
 
@@ -366,7 +406,7 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
           )}
           <button className="btn" onClick={doSave} disabled={saving || (!dirty && !!testId)} title="Save (⌘S)">
             {saving ? <Loader2 size="15" className="animate-spin" /> : <Save size="15" />}
-            {testId ? (converted ? 'Save as script' : 'Save') : 'Create draft'}
+            {testId ? 'Save' : 'Create draft'}
           </button>
           {test?.status === 'draft' && (
             <button
@@ -381,13 +421,6 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
         </div>
       </div>
 
-      {converted && (
-        <div className="flex shrink-0 items-start gap-2 rounded-lg border border-info/40 bg-info/5 px-3 py-2 text-xs text-gray-200">
-          <Info size="14" className="mt-0.5 shrink-0 text-info" />
-          This test was built before tests were scripts, so this script was generated from its checks. Saving
-          turns it into a script test. Its earlier versions stay in the history, so you can roll back.
-        </div>
-      )}
       {test?.status === 'active' && dirty && (
         <div className="shrink-0 text-[11px] text-warn">
           This test is active: saving it changes what the next run executes.
@@ -428,10 +461,18 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
                 {roles.map((r) => (
                   <option key={r.group_id} value={r.label || r.group_id}>as {r.label || r.group_id}</option>
                 ))}
+                {role && !roles.some((r) => (r.label || r.group_id) === role) && (
+                  <option value={role}>as {role} (not on this target)</option>
+                )}
               </select>
             )}
-            <button className="btn btn-accent px-2.5 py-1 text-xs" onClick={doRun} disabled={dry.isPending || !!review} title="Dry run (⌘↵)">
-              {dry.isPending ? <Loader2 size="13" className="animate-spin" /> : <Play size="13" />} Run
+            <button
+              className="btn btn-accent px-2.5 py-1 text-xs"
+              onClick={doRun}
+              disabled={dry.isPending || !!review}
+              title="Dry run (⌘↵): run this script against the target once. Nothing is recorded."
+            >
+              {dry.isPending ? <Loader2 size="13" className="animate-spin" /> : <Play size="13" />} Dry run
             </button>
             <div className="ml-auto flex items-center gap-2 text-[11px] text-muted">
               <a
@@ -475,27 +516,34 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
             {review && (
               <div className="flex h-full flex-col">
                 <div className="flex shrink-0 items-center gap-2 border-b border-accent/40 bg-accent/10 px-3 py-1.5 text-xs">
-                  <FileDiff size="14" className="text-accent" />
-                  <span className="font-medium text-white">Proposed edit</span>
+                  <FileDiff size="14" className="shrink-0 text-accent" />
+                  <span className="shrink-0 font-medium text-white">Proposed edit</span>
                   <span className="truncate text-gray-300">{review.proposal.summary}</span>
-                  <span className="ml-auto shrink-0 text-muted">accept or reject single changes inline, then</span>
-                  <button className="btn px-2 py-0.5 text-xs" onClick={() => setReview(null)}>Discard</button>
+                  {review.total > 0 && (
+                    <span className="ml-auto shrink-0 text-muted">
+                      {review.remaining} of {review.total} {review.total === 1 ? 'change' : 'changes'} left
+                    </span>
+                  )}
                   <button
-                    className="btn btn-accent px-2 py-0.5 text-xs"
-                    onClick={() => {
-                      setBuffer(review.doc)
-                      setReview(null)
-                      editor.current?.focus()
-                    }}
+                    className={`btn shrink-0 px-2 py-0.5 text-xs ${review.total > 0 ? '' : 'ml-auto'}`}
+                    onClick={() => finishReview(review.original)}
+                    title="Undo every change still highlighted; changes you've kept stay"
                   >
-                    Apply
+                    {review.remaining < review.total ? 'Undo the rest' : 'Undo all'}
+                  </button>
+                  <button
+                    className="btn btn-accent shrink-0 px-2 py-0.5 text-xs"
+                    onClick={() => finishReview(review.doc)}
+                    title="Keep every change still highlighted"
+                  >
+                    {review.remaining < review.total ? 'Keep the rest' : 'Keep all'}
                   </button>
                 </div>
                 <div className="min-h-0 flex-1">
                   <CodeEditor
                     value={review.doc}
                     original={buffer}
-                    onChange={(doc) => setReview((r) => (r ? { ...r, doc } : r))}
+                    onReviewChange={onReviewChange}
                     sdk={sdk}
                     diagnostics={review.proposal.analysis.errors.map((d) => ({ ...d, severity: 'error' as const }))}
                   />
@@ -553,6 +601,43 @@ function TestEditor({ testId, onCreated }: { testId: string | null; onCreated: (
             }}
           />
         </div>
+      </div>
+    </div>
+  )
+}
+
+function EditorLoading() {
+  return (
+    <div className="flex items-center gap-2 p-6 text-sm text-muted">
+      <Loader2 size="16" className="animate-spin" /> Loading the editor…
+    </div>
+  )
+}
+
+function EditorLoadError({ what, error, onRetry, onBlank }: {
+  what: string
+  error: unknown
+  onRetry: () => void
+  onBlank?: () => void
+}) {
+  const status = error instanceof ApiError ? error.status : null
+  return (
+    <div className="card m-6 max-w-xl text-sm">
+      <div className="flex items-center gap-2 font-semibold text-white">
+        <AlertCircle size="16" className="text-fail" /> Couldn't load {what}
+      </div>
+      <p className="mt-2 text-muted">
+        {status ? `The server answered ${status}: ` : ''}
+        <span className="text-gray-200">{errorMessage(error)}</span>
+      </p>
+      <p className="mt-2 text-muted">
+        Try again in a moment.{onBlank ? ' You can also start from an empty script and write the test yourself.' : ''}{' '}
+        If it keeps failing, the backend log has the details.
+      </p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button className="btn" onClick={onRetry}><RotateCw size="14" /> Try again</button>
+        {onBlank && <button className="btn" onClick={onBlank}>Start from an empty script</button>}
+        <Link className="btn" to="/tests"><ArrowLeft size="14" /> Back to tests</Link>
       </div>
     </div>
   )

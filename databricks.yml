@@ -217,7 +217,7 @@ variables:
       warehouse: "Serverless Starter Warehouse"
   model_serving_endpoint:
     description: "Model Serving endpoint for serving probes"
-    default: "databricks-claude-sonnet-4-6"
+    default: "databricks-claude-sonnet-5"
   seed_on_startup:
     description: "Seed the real test catalog (definitions/suites/schedules) on first boot. Idempotent; demo targets stay off."
     default: "true"

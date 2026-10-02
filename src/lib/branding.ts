@@ -3,7 +3,7 @@
 // title, and the favicon. The shell reads branding on load and the poll refreshes
 // it, so calling this from an effect keyed on the record makes a branding edit
 // instant-apply within the poll interval — no rebuild, no push infra.
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 
 import type { Branding, BrandTheme } from '../types'
 
@@ -21,6 +21,25 @@ function prefersDark(): boolean {
   return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-color-scheme: dark)').matches
 }
 
+const ON_ACCENT_DARK = '11 18 32'
+const ON_ACCENT_LIGHT = '255 255 255'
+
+function luminance(channels: string): number {
+  const [r, g, b] = channels.split(' ').map((c) => {
+    const v = Number(c) / 255
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/** Dark or white text, whichever reads better on the accent (WCAG contrast). */
+export function onAccentChannels(accent: string): string {
+  const l = luminance(accent)
+  const vsDark = (l + 0.05) / (luminance(ON_ACCENT_DARK) + 0.05)
+  const vsLight = 1.05 / (l + 0.05)
+  return vsDark >= vsLight ? ON_ACCENT_DARK : ON_ACCENT_LIGHT
+}
+
 /** Paint the theme onto :root as `--brand-*` channel vars for the active scheme. */
 export function applyTheme(theme: BrandTheme | undefined): void {
   if (!theme || typeof document === 'undefined') return
@@ -28,7 +47,10 @@ export function applyTheme(theme: BrandTheme | undefined): void {
   const scheme = prefersDark() ? 'dark' : 'light'
 
   const accent = hexToChannels(theme.accent)
-  if (accent) root.style.setProperty('--brand-accent', accent)
+  if (accent) {
+    root.style.setProperty('--brand-accent', accent)
+    root.style.setProperty('--on-accent', onAccentChannels(accent))
+  }
 
   for (const [name, value] of Object.entries(theme.tokens ?? {})) {
     const channels = hexToChannels(value?.[scheme] ?? value?.dark)
@@ -57,6 +79,19 @@ export function applyBranding(branding: Branding): void {
   }
   applyTheme(branding.theme)
   applyFavicon(branding)
+}
+
+/** The OS colour scheme, kept current as it flips. */
+export function useColorScheme(): 'dark' | 'light' {
+  const [scheme, setScheme] = useState<'dark' | 'light'>(() => (prefersDark() ? 'dark' : 'light'))
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!mq) return
+    const onChange = () => setScheme(mq.matches ? 'dark' : 'light')
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
+  }, [])
+  return scheme
 }
 
 /** Effect hook: (re)apply branding whenever the record changes, and re-apply the

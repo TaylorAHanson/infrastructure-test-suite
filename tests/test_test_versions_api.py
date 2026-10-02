@@ -119,6 +119,39 @@ def test_a_snapshot_without_pins_rolls_back_membership_and_fields_only(client):
     assert client.get(f"/api/v1/checks/{a['id']}").json()["display_name"] == "legacy a, edited"
 
 
+def test_rolling_an_accepted_test_back_to_its_draft_version_keeps_it_active(client):
+    from app.db.session import session_scope
+    from app.models import Test
+    from app.services import pinned_versions
+    from app.services.assistant import accept_test
+
+    with session_scope() as s:
+        draft = Test(name="drafted", description="v1", status="draft")
+        s.add(draft)
+        s.commit()
+        pinned_versions.record_test_version(s, draft, actor="assistant")
+        tid = draft.id
+        accept_test(s, tid)
+    client.patch(f"/api/v1/tests/{tid}", json={"description": "edited after accept"})
+    assert _test(client, tid)["status"] == "active"
+
+    resp = client.post(f"/api/v1/tests/{tid}/rollback/1")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["description"] == "v1"                 # content restored
+    assert body["status"] == "active"                  # lifecycle kept: still runs
+    assert body["enabled"] is True
+
+
+def test_rolling_back_keeps_the_current_enabled_flag(client):
+    tid = client.post("/api/v1/tests", json={"name": "toggled", "description": "v1"}).json()["id"]
+    client.patch(f"/api/v1/tests/{tid}", json={"description": "v2", "enabled": False})
+
+    body = client.post(f"/api/v1/tests/{tid}/rollback/1").json()
+    assert body["description"] == "v1"
+    assert body["enabled"] is False
+
+
 def test_the_api_exposes_which_other_tests_share_a_check(client):
     shared = client.post("/api/v1/checks", json={
         "display_name": "shared", "operation": {"service": "jobs", "method": "list"},

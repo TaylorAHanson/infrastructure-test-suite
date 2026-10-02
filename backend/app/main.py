@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -79,13 +80,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Databricks Regression Validation Platform", version=settings.APP_VERSION, lifespan=lifespan)
 
+_cors_origins = [o.strip() for o in (settings.CORS_ORIGINS or "").split(",") if o.strip() not in ("", "*")]
+# Credentials only go to named origins: with "*" Starlette echoes any caller's
+# Origin back, which would let any site make requests as the signed-in user.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",")] if settings.CORS_ORIGINS else ["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 from app.telemetry.otel import setup_telemetry  # noqa: E402
 
@@ -97,10 +102,19 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 # --------------------------------------------------------------------------
 # Serve the built React SPA (production) with client-side routing fallback.
 # --------------------------------------------------------------------------
+class ImmutableAssets(StaticFiles):
+    """Vite fingerprints every file under /assets, so a URL's bytes never change."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 if STATIC_DIR.exists():
     assets = STATIC_DIR / "assets"
     if assets.exists():
-        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+        app.mount("/assets", ImmutableAssets(directory=assets), name="assets")
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
@@ -108,7 +122,7 @@ if STATIC_DIR.exists():
             return JSONResponse({"detail": "not found"}, status_code=404)
         index = STATIC_DIR / "index.html"
         if index.exists():
-            return FileResponse(index)
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
         return JSONResponse({"detail": "frontend not built"}, status_code=404)
 else:
     @app.get("/")

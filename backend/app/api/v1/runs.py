@@ -19,6 +19,8 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.api.deps import Actor, current_actor
+from app.core.enums import RequestSource
 from app.core.stages import derive_connectivity
 from app.core.taxonomy import bucket_at_stage
 from app.db.session import get_session
@@ -35,12 +37,22 @@ def submit_run(
     payload: RunSubmit,
     background: BackgroundTasks,
     session: Session = Depends(get_session),
+    actor: Actor = Depends(current_actor),
 ) -> RunRequestOut:
     """Start a run and return its ``run_id`` (ADR-0005 §2). Async: the run is
     dispatched by the in-app engine; the caller polls ``GET /runs/{run_id}``.
 
     A named-but-unregistered target is a hard error (``400``), never a silent
-    pass (ADR-0005 §3)."""
+    pass (ADR-0005 §3). The request source and requester come from the caller's
+    identity, not the body: a machine caller is never ``UI_MANUAL`` and can
+    never carry the GUI-only safety override (ADR-0004/0010)."""
+    if not actor.is_human:
+        if payload.override is not None:
+            raise HTTPException(403, "the safety override is GUI-only; a machine identity can't carry one")
+        if payload.request_source == RequestSource.UI_MANUAL:
+            payload = payload.model_copy(update={"request_source": RequestSource.API})
+    if actor.verified:
+        payload = payload.model_copy(update={"requested_by": actor.handle})
     try:
         request = run_service.submit_request(session, payload)
     except run_service.UnknownTargetError as exc:
@@ -61,10 +73,10 @@ def submit_run(
 
 
 @router.get("/requests")
-def list_requests(session: Session = Depends(get_session), limit: int = 50) -> list[RunRequest]:
-    return session.exec(
+def list_requests(session: Session = Depends(get_session), limit: int = 50) -> list[dict]:
+    return [r.model_dump(mode="json", exclude={"claim_token"}) for r in session.exec(
         select(RunRequest).order_by(RunRequest.created_at.desc()).limit(limit)  # type: ignore[union-attr]
-    ).all()
+    ).all()]
 
 
 @router.get("/requests/{request_id}")
@@ -82,6 +94,7 @@ def list_runs(
     check_id: Optional[str] = None,
     target_id: Optional[str] = None,
     limit: int = 200,
+    offset: int = 0,
 ) -> list[dict]:
     stmt = select(CheckRun)
     if request_id:
@@ -90,9 +103,13 @@ def list_runs(
         stmt = stmt.where(CheckRun.check_id == check_id)
     if target_id:
         stmt = stmt.where(CheckRun.target_id == target_id)
-    stmt = stmt.order_by(CheckRun.created_at.desc()).limit(limit)  # type: ignore[union-attr]
+    stmt = (stmt.order_by(CheckRun.created_at.desc(), CheckRun.run_id)  # type: ignore[union-attr]
+            .offset(max(0, offset)).limit(limit))
     runs = session.exec(stmt).all()
-    checks = {c.id: c for c in session.exec(select(Check)).all()}
+    check_ids = {r.check_id for r in runs}
+    checks = {c.id: c for c in session.exec(
+        select(Check).where(Check.id.in_(check_ids))  # type: ignore[attr-defined]
+    ).all()} if check_ids else {}
     return [
         {
             **r.model_dump(mode="json"),

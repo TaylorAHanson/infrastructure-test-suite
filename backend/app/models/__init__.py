@@ -1,5 +1,7 @@
 """SQLModel table definitions (re-exported for convenience)."""
 from app.models.models import (  # noqa: F401
+    ASSISTANT_CONFIG_ID,
+    AssistantConfig,
     AuditEvent,
     Branding,
     Check,
@@ -35,4 +37,6 @@ __all__ = [
     "Branding",
     "WebhookConfig",
     "WEBHOOK_CONFIG_ID",
+    "AssistantConfig",
+    "ASSISTANT_CONFIG_ID",
 ]

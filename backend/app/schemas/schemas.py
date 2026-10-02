@@ -4,87 +4,31 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.enums import Depth, Expectation, RequestSource, SafetyClass
-
-
-# --------------------------- Operation ----------------------------
-class OperationIn(BaseModel):
-    """An open-SDK Databricks call (bounded by the blocklist, not an allowlist)."""
-
-    service: str = ""
-    method: str = ""
-    verb: str = ""
-    params: dict = Field(default_factory=dict)
-
-
-# --------------------------- Checks ----------------------------
-class CheckCreate(BaseModel):
-    display_name: str
-    description: str = ""
-    operation: OperationIn = Field(default_factory=OperationIn)
-    handler_key: str = "databricks_sdk"
-    assertion: str = ""
-    #: Optional; when omitted it is inferred from the compiled assertion
-    #: (a denial assertion → DENY, otherwise PASS).
-    expectation: Optional[Expectation] = None
-    expected_stage: Optional[str] = None
-    #: Optional one-confirm operation-specific tier (mutating targets only).
-    confirmed_risk_tier: Optional[str] = None
-    hints: dict = Field(default_factory=dict)
-    enabled: bool = True
-
-
-class CheckUpdate(BaseModel):
-    display_name: Optional[str] = None
-    description: Optional[str] = None
-    operation: Optional[OperationIn] = None
-    handler_key: Optional[str] = None
-    assertion: Optional[str] = None
-    expectation: Optional[Expectation] = None
-    expected_stage: Optional[str] = None
-    confirmed_risk_tier: Optional[str] = None
-    hints: Optional[dict] = None
-    enabled: Optional[bool] = None
+from app.core.enums import Depth, RequestSource, SafetyClass
 
 
 # --------------------------- Tests ----------------------------
 class TestCheckIn(BaseModel):
+    """One member of a Test: a script check's Check row, in script order."""
+
     check_id: str
     kind: str = "assertion"  # "assertion" | "counterfactual"
     run_as_role: Optional[str] = None
     counterpart_check_id: Optional[str] = None
 
 
-class TestCreate(BaseModel):
-    name: str
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
-    run_as_role: Optional[str] = None
-    #: Ordered membership. A bare list of check ids is also accepted via
-    #: ``check_ids`` for convenience (all treated as ordinary assertions).
-    members: list[TestCheckIn] = Field(default_factory=list)
-    check_ids: list[str] = Field(default_factory=list)
-
-
-class TestCheckEdit(CheckUpdate):
-    """A member Check's content edit made *through* its Test (#118)."""
-
-    check_id: str
-
-
 class TestUpdate(BaseModel):
+    """Edit a Test's fields. Its checks live in its script (``PUT /tests/{id}/script``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     description: Optional[str] = None
     tags: Optional[list[str]] = None
     run_as_role: Optional[str] = None
-    members: Optional[list[TestCheckIn]] = None
-    check_ids: Optional[list[str]] = None
     enabled: Optional[bool] = None
-    #: Content edits to member Checks, applied with the Test edit as one new
-    #: Test version that pins the edited Checks' new versions.
-    check_edits: Optional[list[TestCheckEdit]] = None
 
 
 class ScriptTestCreate(BaseModel):
@@ -232,7 +176,6 @@ class RunSubmit(BaseModel):
 
     suite_ids: list[str] = Field(default_factory=list)
     test_ids: list[str] = Field(default_factory=list)
-    check_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
     depth: Depth = Depth.QUICK
     requested_by: str = "ui-user"
@@ -243,6 +186,17 @@ class RunSubmit(BaseModel):
     event_ref: Optional[str] = None
     #: An optional per-run safety override (honored only for a human GUI caller).
     override: Optional[SafetyOverrideIn] = None
+    #: Run params a Test script reads with ``params`` / ``setting()`` — the same
+    #: params a dry run takes. A run param wins over the Target's tag.
+    params: dict = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_check_selection(cls, data):
+        # Ignored, a stale ``check_ids`` would leave the selection empty — "run all".
+        if isinstance(data, dict) and data.get("check_ids"):
+            raise ValueError("check_ids is no longer a run selection: name the test_ids or suite_ids to run")
+        return data
 
 
 class RunRequestOut(BaseModel):
@@ -263,11 +217,7 @@ class RunRequestOut(BaseModel):
     run_ids: list[str] = Field(default_factory=list)
 
 
-# --------------------------- Assistant / compiler ----------------------------
-class CompileRequest(BaseModel):
-    assertion: str
-
-
+# --------------------------- Assistant ----------------------------
 class PageContextIn(BaseModel):
     """The context a surface hands the Assistant so its help is page-aware.
 
@@ -293,49 +243,6 @@ class AssistantTurnIn(BaseModel):
     mode: str = "auto"
 
 
-class DraftCheckIn(BaseModel):
-    """One Check the human is confirming into a Draft (from a proposal)."""
-
-    operation: OperationIn = Field(default_factory=OperationIn)
-    handler_key: str = "databricks_sdk"
-    assertion: str = ""
-    kind: str = "assertion"  # "assertion" | "counterfactual"
-    counterpart_index: Optional[int] = None
-    run_as_role: Optional[str] = None
-
-
-class DraftCommitIn(BaseModel):
-    """Confirm a suggested Draft into a persisted (but not-yet-Active) Test.
-
-    This is the *confirm* half of suggest-then-human-confirms: the human accepts
-    which Checks/suggestions to persist. The Test is created as a ``Draft`` and
-    **never runs** until a separate accept (user story 7/9).
-    """
-
-    name: str
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
-    checks: list[DraftCheckIn] = Field(default_factory=list)
-    run_as_role: Optional[str] = None
-    suite_id: Optional[str] = None
-    derivation: dict = Field(default_factory=dict)
-
-
-class ExamplePromoteIn(BaseModel):
-    """Promote an accepted Test into the worked-example library (ADR-0006 §9)."""
-
-    test_id: str
-    title: str = ""
-
-
-class AgenticEvalIn(BaseModel):
-    """Judge a plain-text assertion over structured evidence (advisory, ADR-0008)."""
-
-    assertion: str
-    evidence: dict = Field(default_factory=dict)
-    expectation: Expectation = Expectation.PASS
-
-
 class RcaRequestIn(BaseModel):
     """Ask the Assistant's read-path to suggest a cause + lane for a finding."""
 
@@ -344,22 +251,14 @@ class RcaRequestIn(BaseModel):
     turn: str = ""
 
 
-class RunProposalIn(BaseModel):
-    """A human-confirmed run proposal from the Assistant's run-submission turn.
-
-    This is the *confirm* half of suggest-then-human-confirms for run submission:
-    the user accepts the Assistant's proposed parameters and submits them here.
-    The endpoint routes through ``run_service.submit_request()`` — the same path
-    as ``POST /runs`` — so the same safety-class / TargetLease checks fire.
-    """
-
-    target_ids: list[str] = Field(default_factory=list)
-    suite_ids: list[str] = Field(default_factory=list)
-    test_ids: list[str] = Field(default_factory=list)
-    depth: Depth = Depth.QUICK
-
-
 # --------------------------- Findings feed (ADR-0009, #33) ----------------
+class FindingRefOut(BaseModel):
+    """A Test or Suite the finding belongs to — enough to deep-link from triage."""
+
+    id: str
+    name: str
+
+
 class FindingOut(BaseModel):
     """One finding — the current failing state of a ``(target, check)`` series.
 
@@ -373,13 +272,23 @@ class FindingOut(BaseModel):
     target_id: Optional[str] = None
     workspace_name: Optional[str] = None
     run_id: str
+    #: The parent Run request, when the CheckRun was dispatched from one —
+    #: so triage can open ``/runs/{request_id}``.
+    request_id: Optional[str] = None
+    #: Tests that contain this Check. When the CheckRun recorded ``test_id``,
+    #: that Test alone; otherwise every Test that lists the Check.
+    tests: list[FindingRefOut] = Field(default_factory=list)
+    #: Suites that contain those Tests (a Suite is a filter on Tests, not a page).
+    suites: list[FindingRefOut] = Field(default_factory=list)
     verdict: str
     failure_bucket: Optional[str] = None
     failure_stage: Optional[str] = None
     #: The ``bucket @ stage`` label (ADR-0001).
     bucket_at_stage: Optional[str] = None
+    #: The bucket's human label from the taxonomy ("Unexpected result").
+    failure_label: Optional[str] = None
     lane: str
-    #: True = a gating (deterministic) result; False = advisory/agentic (ADR-0008).
+    #: True = a gating result; False = an ``advisory=True`` check's (ADR-0008).
     gating: bool = True
     evaluator: str
     request_source: str
@@ -481,3 +390,44 @@ class WebhookConfigUpdate(BaseModel):
     urls: Optional[list[str]] = None
     enabled: Optional[bool] = None
     fire_on_all_completions: Optional[bool] = None
+
+
+# --------------------------- Assistant settings ------------------------------
+class AssistantConfigOut(BaseModel):
+    """The assistant's model and per-turn limits."""
+
+    #: The chosen endpoint; None means the deployment default below.
+    endpoint: Optional[str] = None
+    #: MODEL_SERVING_ENDPOINT, the deployment's default.
+    default_endpoint: Optional[str] = None
+    #: The endpoint calls actually go to.
+    model: Optional[str] = None
+    reasoning: str = "off"
+    max_tool_calls: int
+    max_output_tokens: int
+    temperature: float
+    turn_timeout_seconds: int
+    allow_live_reads: bool
+    allow_dry_run: bool
+    updated_by: str = "system"
+    updated_at: datetime
+    #: The accepted range of each numeric setting, for the form.
+    limits: dict[str, list[float]] = Field(default_factory=dict)
+
+
+class AssistantConfigUpdate(BaseModel):
+    """Change the given settings; ``endpoint=""`` goes back to the deployment default."""
+
+    endpoint: Optional[str] = None
+    reasoning: Optional[str] = None
+    max_tool_calls: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    turn_timeout_seconds: Optional[int] = None
+    allow_live_reads: Optional[bool] = None
+    allow_dry_run: Optional[bool] = None
+
+
+class ModelTestIn(BaseModel):
+    endpoint: Optional[str] = None
+    reasoning: str = "off"

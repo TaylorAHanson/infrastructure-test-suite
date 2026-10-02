@@ -1,13 +1,12 @@
 // Shared TypeScript types mirroring the backend Pydantic/SQLModel schemas —
-// the rebuilt Check / Test / Suite / Run model (ADR-0001/0005/0007/0017).
+// the Check / Test / Suite / Run model (ADR-0001/0005/0007/0017). Every Test is
+// a Python script; a Check is the result of one `with check(…)` block in it.
 
 // ---------------- Small closed vocab (mirrors app.core.enums) ----------------
 export type Depth = 'quick' | 'full'
 /** Coarse lifecycle phase for the async poll contract (ADR-0005/0011). */
 export type Phase = 'queued' | 'running' | 'terminal'
-/** How a Check's assertion is judged (ADR-0008). */
-export type Evaluator = 'deterministic' | 'agentic'
-/** Whether a Check expects success or a denial/counterfactual. */
+/** `DENY` marks a counterfactual: a `with expect_deny(…)` block. */
 export type Expectation = 'PASS' | 'DENY'
 /** Outcome of a single stage on the canonical spine. */
 export type StageOutcomeStatus = 'PASS' | 'FAIL' | 'SKIP' | 'ERROR'
@@ -23,9 +22,9 @@ export type Verdict =
   | 'SKIPPED'
   | 'CANCELLED'
 
-/** The canonical stage spine, in order (RESOLVE → … → VERIFY). Handlers skip
- *  stages they lack; failure ≤ AUTHORIZE is connectivity, OPERATE/VERIFY is
- *  functional (derived, never stored). */
+/** The canonical stage spine, in order (RESOLVE → … → VERIFY). A check skips
+ *  stages it never reaches; failure ≤ AUTHORIZE is connectivity, OPERATE/VERIFY
+ *  is functional (derived, never stored). */
 export const CANONICAL_STAGES = [
   'RESOLVE',
   'CONNECT',
@@ -37,44 +36,32 @@ export const CANONICAL_STAGES = [
 ] as const
 
 // ---------------- Catalog: Check / Test / Suite ----------------
-/** An open-SDK Databricks call (bounded by the blocklist, not an allowlist). */
-export interface Operation {
-  service: string
-  method: string
-  verb?: string
-  params?: Record<string, unknown>
-}
-
-/** The atomic unit of validation: one operation + its expectation + evaluator. */
+/** One `with check(…)` / `with expect_deny(…)` block of a Test script, as the
+ *  read-only `GET /checks` serves it. Its id follows the block's name, so run
+ *  history survives edits. */
 export interface Check {
   id: string
   display_name: string
   description: string
-  operation: Operation
-  handler_key: string
-  assertion: string
   expectation: Expectation
-  evaluator: Evaluator
-  compiled_predicate: Record<string, unknown>
-  compilable: boolean
   expected_stage?: string | null
+  /** The highest risk tier among the block's calls. */
   risk_tier: string
   confirmed_risk_tier?: string | null
-  hints: Record<string, unknown>
+  /** `calls` (the ops the block makes), `advisory`, `role`. */
+  hints?: Record<string, unknown>
   version: number
   enabled: boolean
   created_at?: string
   updated_at?: string
 }
 
-/** A named selection of Tests for a Run (grouping only; ADR-0007). May be flagged
- *  `deterministic_only` — its fail-closed verdict ignores agentic Checks (ADR-0008). */
+/** A named selection of Tests for a Run (grouping only; ADR-0007). */
 export interface Suite {
   id: string
   name: string
   description: string
   tags: string[]
-  deterministic_only: boolean
   version: number
   enabled: boolean
   test_ids: string[]
@@ -91,7 +78,6 @@ export interface RunRequestSummary {
   request_source: string
   suite_ids: string[]
   test_ids: string[]
-  check_ids: string[]
   target_ids: string[]
   depth: Depth
   status: Verdict
@@ -158,9 +144,8 @@ export interface CheckRunRow {
   requested_by: string
   request_source: string
   depth: Depth
-  evaluator: Evaluator
   expectation: Expectation
-  /** True = deterministic (gates); false = agentic (advisory, never gates). */
+  /** False for an `advisory=True` check: reported, never sets the verdict. */
   gating: boolean
   run_as_role?: string | null
   risk_tier: string
@@ -182,7 +167,6 @@ export interface CheckRunRow {
 
 /** A single CheckRun's detail (`GET /runs/{run_id}`) — stage outcomes + derived view. */
 export interface CheckRunDetail extends CheckRunRow {
-  handler_key?: string | null
   stage_outcomes: StageOutcome[]
   connectable: boolean | null
   functional: boolean | null
@@ -226,6 +210,12 @@ export interface ProvenanceThread {
   total_runs: number
 }
 
+/** A Test or Suite named on a finding so triage can deep-link to it. */
+export interface FindingRef {
+  id: string
+  name: string
+}
+
 /** One finding — the current failing state of a `(target, check)` series. Not a
  *  raw run: a check failing five runs running is one finding (ADR-0009). */
 export interface Finding {
@@ -234,20 +224,24 @@ export interface Finding {
   target_id?: string | null
   workspace_name?: string | null
   run_id: string
+  request_id?: string | null
+  tests?: FindingRef[]
+  suites?: FindingRef[]
   verdict: Verdict
   failure_bucket?: string | null
   failure_stage?: string | null
   /** The `bucket @ stage` label (ADR-0001). */
   bucket_at_stage?: string | null
+  /** The bucket's human label from the taxonomy ("Unexpected result"). */
+  failure_label?: string | null
   lane: FindingLane
-  /** True = gating (deterministic); false = advisory/agentic (ADR-0008). */
+  /** False for an `advisory=True` check: reported, never fails a run. */
   gating: boolean
-  evaluator: Evaluator
   request_source: string
   git_sha: string
   message: string
   provenance?: ProvenanceThread | null
-  /** Advisory only — recent deterministic verdicts alternate. Never gates. */
+  /** Advisory only — recent verdicts alternate. Never gates. */
   flaky: boolean
   finished_at?: string | null
   created_at: string
@@ -305,7 +299,7 @@ export interface Target {
   enabled: boolean
 }
 
-// ---------------- Assistant / Test Studio (spec #22) ----------------
+// ---------------- Tests + the Assistant ----------------
 export type TestStudioStatus = 'draft' | 'active'
 
 export interface StudioTest {
@@ -314,52 +308,19 @@ export interface StudioTest {
   description: string
   tags: string[]
   status: TestStudioStatus
-  origin: string
   run_as_role?: string | null
-  derivation?: Record<string, unknown>
   version: number
   enabled: boolean
   updated_at?: string
-  /** The Python test script, when this Test is script-authored. */
+  /** The Python test script. */
   script?: string | null
+  /** The script's checks, in script order. */
   members: {
     check_id: string
     kind: string
     run_as_role?: string | null
-    counterpart_check_id?: string | null
     sort_order: number
   }[]
-}
-
-export interface CheckProposal {
-  display_name: string
-  operation: Operation
-  handler_key: string
-  assertion: string
-  expectation: string
-  evaluator: string
-  compilable: boolean
-  risk_tier: string
-  kind: string
-  needs_tier_confirmation: boolean
-}
-
-export interface DraftProposal {
-  name: string
-  description: string
-  checks: CheckProposal[]
-  refusals: { operation: Operation; reason: string; tier: string }[]
-  max_risk_tier: string
-  suggested_counterfactual?: {
-    assertion: string
-    operation: Operation
-    handler_key: string
-    why: string
-  } | null
-  suggested_suite?: { suite_id: string; name: string; why: string } | null
-  suggested_run_as_role?: { role: Record<string, string>; why: string } | null
-  clarifying_question?: string | null
-  derivation: Record<string, unknown>
 }
 
 export interface RcaSuggestion {
@@ -393,13 +354,13 @@ export interface NextAction {
   href?: string
 }
 
+/** `authoring` means "write a test": the shelf hands the request to the test
+ *  editor, with an optional short `answer` alongside. */
 export interface AssistantTurnResponse {
   mode: 'authoring' | 'rca' | 'query'
   page: string
-  draft?: DraftProposal
   rca?: RcaSuggestion
   answer?: string | null
-  clarifying_question?: string
   /** Which tools the agent called this turn, with args/result (additive, #65). */
   tool_calls?: ToolCall[]
   /** Contextual follow-up buttons derived from the tools that ran (additive, #65). */
@@ -413,18 +374,6 @@ export interface PageContext {
   test_id?: string | null
   suite_id?: string | null
   finding?: { check_id: string; target_id?: string | null } | null
-}
-
-export interface WorkedExample {
-  id: string
-  intent: string
-  title: string
-  operation: Operation
-  assertion: string
-  expectation: string
-  tags: string[]
-  curated: boolean
-  source_test_id?: string | null
 }
 
 export interface TestVersion {
@@ -470,8 +419,6 @@ export interface ScriptAnalysis {
 
 export interface TestScript {
   script: string
-  /** True when the script was generated from a structured (pre-script) Test. */
-  converted: boolean
   analysis: ScriptAnalysis
 }
 
@@ -545,8 +492,68 @@ export interface EditorChatMessage {
 
 export interface EditorStep {
   tool: string
+  /** What the call did, in words ("Searching the SDK for …"). */
   detail: string
   ok: boolean
+  /** A few words on what came back ("12 results", "failed: …"). */
+  result?: string
+  ms?: number
+}
+
+/** One event of `POST /assistant/editor-turn/stream`; the last is `done`. */
+export type EditorEvent =
+  | { type: 'thinking'; round: number }
+  | { type: 'message'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'notice'; text: string }
+  | { type: 'proposal'; proposal: EditorProposal }
+  | ({ type: 'tool_start'; step: number } & Pick<EditorStep, 'tool' | 'detail'>)
+  | ({ type: 'tool_end'; step: number } & EditorStep)
+  | ({ type: 'done' } & EditorTurnResponse)
+
+/** The assistant's working log for one turn, as shown in the chat. */
+export type EditorWorkItem =
+  | { kind: 'message'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'notice'; text: string }
+  | ({ kind: 'tool'; running: boolean } & EditorStep)
+
+export type ReasoningLevel = 'off' | 'low' | 'medium' | 'high'
+
+export interface AssistantConfig {
+  endpoint: string | null
+  default_endpoint: string | null
+  model: string | null
+  reasoning: ReasoningLevel
+  max_tool_calls: number
+  max_output_tokens: number
+  temperature: number
+  turn_timeout_seconds: number
+  allow_live_reads: boolean
+  allow_dry_run: boolean
+  updated_by: string
+  updated_at: string
+  limits: Record<string, [number, number]>
+}
+
+export type AssistantConfigUpdate = Partial<Omit<AssistantConfig, 'default_endpoint' | 'model' | 'updated_by' | 'updated_at' | 'limits'>>
+
+export interface AssistantModel {
+  name: string
+  /** The served model, e.g. `system.ai.databricks-claude-sonnet-4-5`. */
+  entity: string | null
+  ready: boolean
+  /** A pay-per-token foundation model (`system.ai.*`). */
+  foundation: boolean
+}
+
+export interface ModelTestResult {
+  ok: boolean
+  ms: number
+  error?: string
+  called_tools?: boolean
+  reasoning_shown?: boolean
+  notes?: string[]
 }
 
 export interface EditorProposal {
@@ -562,6 +569,8 @@ export interface EditorTurnResponse {
   dry_run?: DryRunResponse | null
   /** True when the turn failed (e.g. no model endpoint); `reply` says why. */
   error?: boolean
+  /** True when the human stopped the turn. */
+  stopped?: boolean
 }
 
 /** `GET /scripts/sdk/index`: {service: {method: {verb, summary, signature}}}. */

@@ -145,6 +145,39 @@ def test_override_is_rejected_for_a_machine_identity(client):
                        request_source="CI", override=override) == "BLOCKED_BY_SAFETY"
 
 
+def test_a_machine_caller_cannot_claim_to_be_the_gui(client):
+    # The override is keyed on the request source, so the source must come from
+    # the caller's identity: a service principal saying UI_MANUAL is not the GUI.
+    prod = register(client, "ov-spoof", "prod-for-us").json()
+    test = make_test(client, make_check(client, "clusters", "delete")["id"], "ov-s")
+    machine = {"X-Forwarded-Client-Id": "ci-sp"}
+    body = {"test_ids": [test["id"]], "target_ids": [prod["id"]], "depth": "full",
+            "request_source": "UI_MANUAL"}
+
+    with_override = {**body, "override": {"target_name": "ov-spoof", "reason": "r", "confirmed": True}}
+    assert client.post("/api/v1/runs", json=with_override, headers=machine).status_code == 403
+
+    run_id = client.post("/api/v1/runs", json=body, headers=machine).json()["run_id"]
+    resource = client.get(f"/api/v1/runs/{run_id}").json()
+    assert resource["request_source"] == "API"
+    assert resource["requested_by"] == "ci-sp"
+
+
+def test_the_forwarded_identity_is_the_requester_and_the_audit_actor(client):
+    headers = {"X-Forwarded-Email": "eng@example.com"}
+    target = register(client, "who-1", "read-only").json()
+    check = make_check(client, "clusters", "list")
+    client.post("/api/v1/tests?actor=spoofed", json={"name": "who-t", "check_ids": [check["id"]]},
+                headers=headers)
+    run_id = client.post("/api/v1/runs", headers=headers, json={
+        "target_ids": [target["id"]], "requested_by": "ui-user"}).json()["run_id"]
+
+    assert client.get(f"/api/v1/runs/{run_id}").json()["requested_by"] == "eng@example.com"
+    actions = {e["action"] for e in client.get("/api/v1/audit", params={"actor": "eng@example.com"}).json()}
+    assert "test.create" in actions
+    assert not client.get("/api/v1/audit", params={"actor": "spoofed"}).json()
+
+
 # ---------------- 4. R3 global wall ----------------
 def test_r3_is_refused_regardless_of_any_human_capability(client):
     # The R3-never floor is absolute: a blocklisted (catastrophic) operation can

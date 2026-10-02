@@ -34,7 +34,7 @@ jobs:
       APP_URL: ${{ vars.VALIDATION_APP_URL }}      # e.g. https://<app-host>
       # The CI identity is a DISTINCT, trigger+read-only identity (ADR-0005 §6):
       # it can start runs and read verdicts, never change safety class or override.
-      SUITE_ID: ${{ vars.VALIDATION_SUITE_ID }}    # the deterministic-only CI Gate suite
+      SUITE_ID: ${{ vars.VALIDATION_SUITE_ID }}    # the read-only CI Gate suite
       TARGET_IDS: ${{ vars.VALIDATION_TARGET_IDS }} # resolved from your deploy context
       TIMEOUT_SECONDS: "900"
     steps:

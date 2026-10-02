@@ -7,9 +7,10 @@ import { python, pythonLanguage } from '@codemirror/lang-python'
 import { HighlightStyle, indentUnit, syntaxHighlighting } from '@codemirror/language'
 import { snippetCompletion, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
 import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint'
-import { unifiedMergeView } from '@codemirror/merge'
+import { getChunks, getOriginalDoc, unifiedMergeView } from '@codemirror/merge'
 import { tags as t } from '@lezer/highlight'
 
+import { useColorScheme } from '../lib/branding'
 import type { SdkIndex } from '../types'
 
 export interface EditorDiagnostic {
@@ -32,18 +33,40 @@ interface Props {
   sdk?: SdkIndex
   onSave?: () => void
   onRun?: () => void
-  /** Review mode: show `value` as a unified diff against this text, with per-change accept/reject. */
+  /** Review mode: show `value` as a unified diff against this text, with per-change Keep / Undo. */
   original?: string | null
+  /**
+   * Review mode: called as changes are kept or undone. `original` is the text
+   * with only the kept changes applied; `doc` has every change not yet undone.
+   */
+  onReviewChange?: (review: ReviewProgress) => void
   className?: string
   minHeight?: string
+}
+
+export interface ReviewProgress {
+  remaining: number
+  doc: string
+  original: string
+}
+
+function reviewButton(type: 'accept' | 'reject', action: (e: MouseEvent) => void) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = type === 'accept' ? 'cm-review-keep' : 'cm-review-undo'
+  button.textContent = type === 'accept' ? '✓ Keep' : '↶ Undo'
+  button.title = type === 'accept' ? 'Keep this change' : 'Undo this change: put the original lines back'
+  button.onmousedown = action
+  return button
 }
 
 const External = Annotation.define<boolean>()
 
 const rgb = (token: string) => `rgb(var(--brand-${token}))`
+const TEXT = 'rgb(var(--fg-body))'
 
-const theme = EditorView.theme({
-  '&': { height: '100%', fontSize: '13px', backgroundColor: rgb('ink'), color: '#e6edf3' },
+const themeSpec = {
+  '&': { height: '100%', fontSize: '13px', backgroundColor: rgb('ink'), color: TEXT },
   '.cm-scroller': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', lineHeight: '1.55' },
   '.cm-content': { caretColor: rgb('accent'), padding: '8px 0' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: rgb('accent') },
@@ -53,28 +76,39 @@ const theme = EditorView.theme({
   },
   '.cm-gutters': { backgroundColor: rgb('ink'), color: rgb('muted'), border: 'none', borderRight: `1px solid ${rgb('edge')}` },
   '.cm-activeLine': { backgroundColor: 'rgb(var(--brand-ink_soft) / 0.6)' },
-  '.cm-activeLineGutter': { backgroundColor: 'rgb(var(--brand-ink_soft) / 0.6)', color: '#e6edf3' },
+  '.cm-activeLineGutter': { backgroundColor: 'rgb(var(--brand-ink_soft) / 0.6)', color: TEXT },
   '.cm-matchingBracket': { backgroundColor: 'rgb(var(--brand-info) / 0.2)', outline: 'none' },
-  '.cm-tooltip': { backgroundColor: rgb('panel'), border: `1px solid ${rgb('edge')}`, color: '#e6edf3' },
-  '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'rgb(var(--brand-accent) / 0.2)', color: '#fff' },
+  '.cm-tooltip': { backgroundColor: rgb('panel'), border: `1px solid ${rgb('edge')}`, color: TEXT },
+  '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'rgb(var(--brand-accent) / 0.2)', color: 'rgb(var(--fg-white))' },
   '.cm-completionDetail': { color: rgb('muted'), fontStyle: 'normal', marginLeft: '0.75em' },
   '.cm-completionInfo': { maxWidth: '420px', whiteSpace: 'pre-wrap', fontSize: '12px' },
-  '.cm-panels': { backgroundColor: rgb('panel'), color: '#e6edf3' },
+  '.cm-panels': { backgroundColor: rgb('panel'), color: TEXT },
   '.cm-searchMatch': { backgroundColor: 'rgb(var(--brand-warn) / 0.3)' },
   '.cm-foldPlaceholder': { backgroundColor: rgb('ink_soft'), border: 'none', color: rgb('muted') },
   '.cm-changedLine': { backgroundColor: 'rgb(var(--brand-pass) / 0.10) !important' },
   '.cm-changedText': { background: 'rgb(var(--brand-pass) / 0.28) !important' },
   '.cm-deletedChunk': { backgroundColor: 'rgb(var(--brand-fail) / 0.12)' },
   '.cm-deletedChunk .cm-deletedText, .cm-deletedChunk del': { background: 'rgb(var(--brand-fail) / 0.28)', textDecoration: 'none' },
-  '.cm-chunkButtons button': {
-    border: `1px solid ${rgb('edge')}`, borderRadius: '4px', padding: '0 6px', marginLeft: '4px',
-    background: rgb('ink_soft'), color: '#e6edf3', cursor: 'pointer', fontSize: '11px',
+  // Class selectors so these outrank @codemirror/merge's own `.cm-deletedChunk button` colours.
+  '.cm-deletedChunk .cm-chunkButtons': { display: 'flex', gap: '4px', zIndex: '1' },
+  '.cm-deletedChunk .cm-review-keep, .cm-deletedChunk .cm-review-undo': {
+    margin: '0', padding: '0 8px', borderRadius: '4px', cursor: 'pointer',
+    font: '600 11px/1.7 ui-sans-serif, system-ui, sans-serif',
   },
-  '.cm-chunkButtons button[name=accept]': { borderColor: rgb('pass'), color: rgb('pass') },
-  '.cm-chunkButtons button[name=reject]': { borderColor: rgb('fail'), color: rgb('fail') },
+  '.cm-deletedChunk .cm-review-keep': {
+    background: 'rgb(var(--brand-pass) / 0.2)', border: '1px solid rgb(var(--brand-pass) / 0.75)',
+    color: 'rgb(var(--fg-white))',
+  },
+  '.cm-deletedChunk .cm-review-keep:hover': { background: 'rgb(var(--brand-pass) / 0.35)' },
+  '.cm-deletedChunk .cm-review-undo': { background: rgb('panel'), border: `1px solid ${rgb('edge')}`, color: TEXT },
+  '.cm-deletedChunk .cm-review-undo:hover': { borderColor: 'rgb(var(--brand-fail) / 0.75)' },
   '.cm-lintRange-error': { backgroundImage: 'none', textDecoration: `underline wavy ${rgb('fail')}` },
   '.cm-lintRange-warning': { backgroundImage: 'none', textDecoration: `underline wavy ${rgb('warn')}` },
-}, { dark: true })
+}
+// The colours are scheme-aware CSS vars either way; `dark` picks CodeMirror's
+// matching base styles for whatever the spec doesn't cover.
+const darkTheme = EditorView.theme(themeSpec, { dark: true })
+const lightTheme = EditorView.theme(themeSpec, { dark: false })
 
 const highlight = HighlightStyle.define([
   { tag: [t.keyword, t.controlKeyword, t.definitionKeyword, t.moduleKeyword, t.operatorKeyword], color: rgb('flaky') },
@@ -191,17 +225,19 @@ function toDiagnostics(state: EditorState, diags: EditorDiagnostic[]): Diagnosti
 }
 
 const CodeEditor = forwardRef<CodeEditorHandle, Props>(function CodeEditor(
-  { value, onChange, readOnly = false, diagnostics, sdk, onSave, onRun, original, className, minHeight },
+  { value, onChange, readOnly = false, diagnostics, sdk, onSave, onRun, original, onReviewChange, className, minHeight },
   ref,
 ) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
-  const callbacks = useRef({ onChange, onSave, onRun })
-  callbacks.current = { onChange, onSave, onRun }
+  const callbacks = useRef({ onChange, onSave, onRun, onReviewChange })
+  callbacks.current = { onChange, onSave, onRun, onReviewChange }
   const sdkRef = useRef(sdk)
   sdkRef.current = sdk
   const readOnlyC = useRef(new Compartment())
   const mergeC = useRef(new Compartment())
+  const themeC = useRef(new Compartment())
+  const scheme = useColorScheme()
 
   useEffect(() => {
     if (!host.current) return
@@ -220,12 +256,22 @@ const CodeEditor = forwardRef<CodeEditorHandle, Props>(function CodeEditor(
             { key: 'Mod-s', preventDefault: true, run: () => (callbacks.current.onSave?.(), true) },
             { key: 'Mod-Enter', preventDefault: true, run: () => (callbacks.current.onRun?.(), true) },
           ]),
-          theme,
+          themeC.current.of(scheme === 'dark' ? darkTheme : lightTheme),
           syntaxHighlighting(highlight),
           lintGutter(),
           readOnlyC.current.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
           mergeC.current.of([]),
           EditorView.updateListener.of((u) => {
+            const review = getChunks(u.state)
+            if (review && callbacks.current.onReviewChange) {
+              const before = getChunks(u.startState)
+              const original = getOriginalDoc(u.state)
+              if (!before || u.docChanged || before.chunks.length !== review.chunks.length || getOriginalDoc(u.startState) !== original) {
+                callbacks.current.onReviewChange({
+                  remaining: review.chunks.length, doc: u.state.doc.toString(), original: original.toString(),
+                })
+              }
+            }
             if (!u.docChanged) return
             if (u.transactions.some((tr) => tr.annotation(External))) return
             callbacks.current.onChange?.(u.state.doc.toString())
@@ -262,11 +308,18 @@ const CodeEditor = forwardRef<CodeEditorHandle, Props>(function CodeEditor(
   }, [readOnly])
 
   useEffect(() => {
+    view.current?.dispatch({ effects: themeC.current.reconfigure(scheme === 'dark' ? darkTheme : lightTheme) })
+  }, [scheme])
+
+  useEffect(() => {
     view.current?.dispatch({
       effects: mergeC.current.reconfigure(
         original == null
           ? []
-          : unifiedMergeView({ original, mergeControls: !readOnly, highlightChanges: true, gutter: true, syntaxHighlightDeletions: true }),
+          : unifiedMergeView({
+              original, mergeControls: readOnly ? false : reviewButton, highlightChanges: true, gutter: true,
+              syntaxHighlightDeletions: true,
+            }),
       ),
     })
   }, [original, readOnly])

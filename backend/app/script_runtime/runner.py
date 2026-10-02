@@ -41,10 +41,21 @@ logger = logging.getLogger(__name__)
 SANDBOX_DIR = Path(__file__).resolve().parent / "sandbox"
 BOOTSTRAP = SANDBOX_DIR / "bootstrap.py"
 
-_SQL_READ = re.compile(r"^\s*(select|with|show|describe|desc|explain|values|list)\b", re.I)
-_SQL_DESTRUCTIVE = re.compile(r"\b(drop|truncate|delete)\b", re.I)
-_SQL_CATASTROPHIC = re.compile(r"\bdrop\s+(catalog|schema|database)\b", re.I)
-_SQL_WRITE = re.compile(r"\b(insert|update|merge|create|alter|grant|revoke|copy|optimize|vacuum|replace|set|use)\b", re.I)
+_SQL_STRIP = re.compile(r"--[^\n]*|/\*.*?\*/|'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|`[^`]*`", re.S)
+# Statements that only read (USE/SET/RESET/DECLARE change session state, nothing stored).
+_SQL_READ_LEADS = {"select", "show", "describe", "desc", "explain", "values", "list", "table", "from",
+                   "use", "set", "reset", "declare"}
+_SQL_DYNAMIC = re.compile(r"\bexecute\s+immediate\b")
+_SQL_CATASTROPHIC = re.compile(r"\bdrop\s+(catalog|schema|database)\b")
+# A keyword followed by "(" is a function call (replace(...)), not a statement.
+# CREATE OR REPLACE stays a write: it's the idempotent way to (re)create your own
+# table, and Delta keeps the replaced version's history.
+_SQL_DESTRUCTIVE = re.compile(r"\b(drop|truncate|delete|vacuum|overwrite)\b(?!\s*\()|\breplace\s+where\b")
+_SQL_DML = re.compile(r"\b(insert|update|merge|delete|drop|truncate|overwrite)\b(?!\s*\()")
+
+# The last segment of a raw REST path that makes a POST/PUT/PATCH destructive.
+_RAW_DESTRUCTIVE_ACTION = re.compile(r"(^|_)(delete|remove|destroy|purge|wipe|drop|uninstall|terminate)(_|$)")
+_RAW_STATEMENTS_PATH = re.compile(r"^/api/2\.\d+/sql/statements/?$")
 
 
 @dataclass
@@ -111,16 +122,40 @@ class ScriptResult:
 # ---------------------------------------------------------------------------
 # Classifying a call
 # ---------------------------------------------------------------------------
-def sql_verb(statement: str) -> str:
-    """The coarse verb a SQL statement deserves (reads are R0, DROP CATALOG is R3)."""
-    text = re.sub(r"--[^\n]*|/\*.*?\*/", " ", statement or "", flags=re.S)
-    if _SQL_CATASTROPHIC.search(text):
-        return "PURGE"
-    if _SQL_READ.match(text) and not (_SQL_DESTRUCTIVE.search(text) or _SQL_WRITE.search(text)):
+_SQL_SEVERITY = ["GET", "POST", "DELETE", "DROP_CATALOG", "DYNAMIC"]
+
+
+def _statement_class(stmt: str) -> str:
+    if _SQL_DYNAMIC.search(stmt):
+        return "DYNAMIC"
+    if _SQL_CATASTROPHIC.search(stmt):
+        return "DROP_CATALOG"
+    first = re.match(r"[\s(]*(\w+)", stmt)
+    lead = first.group(1) if first else ""
+    if lead in _SQL_READ_LEADS:
         return "GET"
-    if _SQL_DESTRUCTIVE.search(text):
+    if lead == "with" and not _SQL_DML.search(stmt):
+        return "GET"
+    if _SQL_DESTRUCTIVE.search(stmt):
         return "DELETE"
     return "POST"
+
+
+def _sql_class(statement: str) -> str:
+    """The most dangerous class across every statement in ``statement``.
+
+    Comments and quoted text are removed first, so a keyword inside a string or
+    comment doesn't count and ``SELECT 1; DROP TABLE t`` is judged by its DROP.
+    """
+    text = _SQL_STRIP.sub(" ", (statement or "").lower())
+    classes = [_statement_class(s) for s in text.split(";") if s.strip()]
+    return max(classes, key=_SQL_SEVERITY.index) if classes else "POST"
+
+
+def sql_verb(statement: str) -> str:
+    """The coarse verb a SQL statement deserves: reads GET (R0), writes POST, drops DELETE."""
+    cls = _sql_class(statement)
+    return "DELETE" if cls in ("DROP_CATALOG", "DYNAMIC") else cls
 
 
 def effective_verb(service: str, method: str, kwargs: dict) -> str:
@@ -130,16 +165,36 @@ def effective_verb(service: str, method: str, kwargs: dict) -> str:
 
 
 def _sql_operation(statement: str) -> Operation:
-    verb = sql_verb(statement)
-    if verb == "PURGE":
-        return Operation(service="statement_execution", method="purge_drop_catalog", verb="DELETE")
-    return Operation(service="statement_execution", method="execute_statement", verb=verb)
+    """``DROP CATALOG`` and ``EXECUTE IMMEDIATE`` map onto blocklisted (R3) operations."""
+    cls = _sql_class(statement)
+    if cls == "DROP_CATALOG":
+        return Operation(service="statement_execution", method="drop_catalog", verb="DELETE")
+    if cls == "DYNAMIC":
+        return Operation(service="statement_execution", method="execute_immediate", verb="DELETE")
+    return Operation(service="statement_execution", method="execute_statement", verb=cls)
 
 
-def raw_api_operation(verb: str, path: str) -> Operation:
-    norm = path.lower().replace("-", "_")
-    last = [p for p in norm.split("/") if p][-1] if norm.strip("/") else ""
-    return Operation(service=norm, method=f"{verb.lower()}_{last}", verb=verb.upper())
+def raw_api_operation(verb: str, path: str, body: Any = None) -> Operation:
+    """Classify a ``w.api`` call the way the equivalent SDK call would be.
+
+    A statement POSTed to ``/api/2.x/sql/statements`` is judged by its SQL, a POST
+    to an action like ``clusters/permanent-delete`` is destructive, and reading a
+    secret's value (``secrets/get``) maps onto the blocklisted ``get_secret``.
+    """
+    clean = path.split("?", 1)[0].lower()
+    verb = verb.upper()
+    if verb == "POST" and _RAW_STATEMENTS_PATH.match(clean):
+        statement = body.get("statement") if isinstance(body, dict) else None
+        return _sql_operation(str(statement or ""))
+    norm = clean.replace("-", "_")
+    segments = [p for p in norm.split("/") if p]
+    last = segments[-1] if segments else ""
+    if verb in ("POST", "PUT", "PATCH") and _RAW_DESTRUCTIVE_ACTION.search(last):
+        verb = "DELETE"
+    method = f"{verb.lower()}_{last}"
+    if "secrets" in segments and last == "get":
+        method = "get_secret"
+    return Operation(service=norm, method=method, verb=verb)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +206,7 @@ class _Broker:
         self.result = result
         self.blocked_in: set[str] = set()
         self.depth_skipped_in: set[str] = set()
+        self.duplicates: set[str] = set()
         self._clients: dict[Optional[str], Any] = {}
         self._demo: Any = None
 
@@ -224,7 +280,7 @@ class _Broker:
                 err = {"kind": "invalid", "message": "w.api paths must start with /api/"}
                 self._record(check, {"op": label, "outcome": "invalid", "message": err["message"]})
                 return {"ok": False, "error": err}
-            op = raw_api_operation(verb, path)
+            op = raw_api_operation(verb, path, msg.get("body"))
         elif kind == "http":
             method = str(msg.get("method", "GET")).upper()
             url = str(msg.get("url", ""))
@@ -275,7 +331,10 @@ class _Broker:
 
                 tags = dict(getattr(self.ctx.target, "tags", None) or {})
                 self._demo = DemoWorkspace(tags, self.ctx.params)
-            value, err = self._demo.respond(kind, msg)
+            try:
+                value, err = self._demo.respond(kind, msg)
+            except Exception as exc:  # noqa: BLE001 - a bad argument is the script's error, not the run's
+                value, err = None, classify_exception(exc)
             entry.update(demo=True, ms=0)
             if err:
                 entry.update(outcome="error", message=err["message"][:500], error_kind=err["kind"])
@@ -286,6 +345,13 @@ class _Broker:
             return {"ok": True, "value": value}
 
         if kind == "http":
+            problem = _internal_destination(str(msg.get("url", "")))
+            if problem:
+                entry.update(outcome="blocked", message=problem)
+                self._record(check, entry)
+                if check:
+                    self.blocked_in.add(check)
+                return {"ok": False, "error": {"kind": "blocked", "message": problem}}
             value, err = _http_request(msg)
             entry["ms"] = int((time.monotonic() - t0) * 1000)
             if err:
@@ -316,6 +382,32 @@ class _Broker:
         entry["response_excerpt"] = excerpt[:600]
         self._record(check, entry)
         return {"ok": True, "value": value}
+
+
+def _internal_destination(url: str) -> Optional[str]:
+    """Why ``url`` must not be probed from the app's network, or None if it may.
+
+    ``http()`` runs in the app's process: loopback reaches the app's own API and
+    anything else on the host, and link-local reaches the cloud metadata service.
+    Private ranges stay reachable because egress tests probe them on purpose.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    host = urlparse(url).hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None  # _http_request reports the DNS failure as the probe's result
+    for info in infos:
+        ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+            return (f"http() can't reach {host} ({ip}): loopback, link-local and cloud-metadata "
+                    "addresses are off-limits to test scripts")
+    return None
 
 
 def _http_request(msg: dict) -> tuple[Optional[dict], Optional[dict]]:
@@ -514,8 +606,11 @@ def _converse(proc, script: str, ctx: RunContext, broker: _Broker, result: Scrip
             name = str(msg.get("name", ""))
             existing = result.check(name)
             if existing is not None and existing.outcome != "not_reached":
-                # The same name twice: keep the first result, flag the duplicate.
-                result.logs.append(f"check '{name}' ran more than once; only the first result is kept")
+                if name not in broker.duplicates:
+                    broker.duplicates.add(name)
+                    existing.outcome, existing.stage, existing.bucket = "error", "OPERATE", "SCRIPT_ERROR"
+                    existing.message = (f"check '{name}' ran more than once (in a loop?), so its runs can't "
+                                        "be told apart. Give each check its own name, or loop inside one check.")
                 continue
             result.checks.append(CheckResult(
                 name=name, kind=msg.get("kind") or "assertion", role=msg.get("role"),
@@ -545,6 +640,8 @@ def _converse(proc, script: str, ctx: RunContext, broker: _Broker, result: Scrip
 def _finalize(result: ScriptResult, broker: _Broker) -> None:
     """Apply the broker's ground truth over what the script reported."""
     for res in result.checks:
+        if res.name in broker.duplicates:
+            continue
         if res.outcome == "running":
             # The script died inside this check.
             res.outcome = "error"
