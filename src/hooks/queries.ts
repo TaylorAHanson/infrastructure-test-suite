@@ -50,6 +50,13 @@ export const useTestVersions = (testId?: string) =>
     enabled: !!testId,
   })
 
+// Keyed on the Test's version so an accept or rollback refetches the export.
+export const useTestYaml = (testId: string, version: number) =>
+  useQuery({
+    queryKey: ['test-yaml', testId, version],
+    queryFn: () => api.get<{ yaml: string }>(`/tests/${testId}/yaml`),
+  })
+
 export const useAssistantTurn = () =>
   useMutation({
     mutationFn: (body: { turn: string; page_context: PageContext; mode?: string }) =>

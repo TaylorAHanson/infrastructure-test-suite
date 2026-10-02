@@ -1,7 +1,11 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  FileCode,
   History,
   MessageSquarePlus,
   Plus,
@@ -22,6 +26,7 @@ import {
   useStudioTests,
   useSuites,
   useTestVersions,
+  useTestYaml,
 } from '../hooks/queries'
 import { statusClass } from '../lib/format'
 import type { Check, Operation, StudioTest, Suite } from '../types'
@@ -252,6 +257,14 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
   const promote = usePromoteExample()
   const { data: versions } = useTestVersions(test.id)
   const [promoted, setPromoted] = useState(false)
+  const [showYaml, setShowYaml] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const toggle = (checkId: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(checkId)) next.add(checkId)
+      return next
+    })
   const members = [...test.members].sort((a, b) => a.sort_order - b.sort_order)
 
   return (
@@ -290,7 +303,14 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
       </div>
 
       <div className="card">
-        <div className="mb-2 card-title">Checks ({members.length})</div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="card-title">Checks ({members.length})</span>
+          <span className="text-[11px] text-muted">click a check for its full definition</span>
+          <button className="ml-auto text-xs text-accent hover:underline" onClick={() => setShowYaml((v) => !v)}>
+            <FileCode size="12" className="mr-1 inline" /> {showYaml ? 'Hide YAML' : 'View YAML'}
+          </button>
+        </div>
+        {showYaml && <TestYaml test={test} />}
         <div className="overflow-hidden rounded-lg border border-edge">
           <table className="w-full">
             <thead className="bg-ink">
@@ -307,29 +327,46 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
               {members.map((m, i) => {
                 const check = checkById.get(m.check_id)
                 const isCf = m.kind === 'counterfactual' || check?.expectation === 'DENY'
+                const open = expanded.has(m.check_id)
                 return (
-                  <tr key={m.check_id} className="border-t border-edge/50 align-top">
-                    <td className="td text-xs text-muted">{i + 1}</td>
-                    <td className="td">
-                      <div className="text-sm text-white">{check?.display_name ?? m.check_id}</div>
-                      {check?.assertion && <div className="text-xs text-muted">{check.assertion}</div>}
-                    </td>
-                    <td className="td font-mono text-xs text-info">{opLabel(check?.operation)}</td>
-                    <td className="td">
-                      {check && <span className={`badge ${statusClass(check.evaluator)}`}>{check.evaluator}</span>}
-                    </td>
-                    <td className="td">
-                      {isCf ? (
-                        <span className="badge bg-info/15 text-info">
-                          counterfactual{check?.expected_stage ? ` @ ${check.expected_stage}` : ''}
+                  <Fragment key={m.check_id}>
+                    <tr
+                      className={`border-t border-edge/50 align-top ${check ? 'cursor-pointer hover:bg-ink-soft/50' : ''}`}
+                      onClick={check ? () => toggle(m.check_id) : undefined}
+                      aria-expanded={check ? open : undefined}
+                    >
+                      <td className="td text-xs text-muted">
+                        <span className="inline-flex items-center gap-1">
+                          {check && (open ? <ChevronDown size="12" /> : <ChevronRight size="12" />)}
+                          {i + 1}
                         </span>
-                      ) : (
-                        <span className="text-xs text-muted">assertion</span>
-                      )}
-                      {m.run_as_role && <div className="mt-1 text-[11px] text-accent">as {m.run_as_role}</div>}
-                    </td>
-                    <td className="td text-xs text-muted">{check?.risk_tier ?? '-'}</td>
-                  </tr>
+                      </td>
+                      <td className="td">
+                        <div className="text-sm text-white">{check?.display_name ?? m.check_id}</div>
+                        {check?.assertion && <div className="text-xs text-muted">{check.assertion}</div>}
+                      </td>
+                      <td className="td font-mono text-xs text-info">{opLabel(check?.operation)}</td>
+                      <td className="td">
+                        {check && <span className={`badge ${statusClass(check.evaluator)}`}>{check.evaluator}</span>}
+                      </td>
+                      <td className="td">
+                        {isCf ? (
+                          <span className="badge bg-info/15 text-info">
+                            counterfactual{check?.expected_stage ? ` @ ${check.expected_stage}` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted">assertion</span>
+                        )}
+                        {m.run_as_role && <div className="mt-1 text-[11px] text-accent">as {m.run_as_role}</div>}
+                      </td>
+                      <td className="td text-xs text-muted">{check?.risk_tier ?? '-'}</td>
+                    </tr>
+                    {open && check && (
+                      <tr className="bg-ink/40">
+                        <td className="td" colSpan={6}><CheckDefinition check={check} /></td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
               {!members.length && (
@@ -364,6 +401,88 @@ function TestDetail({ test, checkById }: { test: StudioTest; checkById: Map<stri
           {!versions?.length && <div className="text-xs text-muted">no versions recorded</div>}
         </div>
       </div>
+    </div>
+  )
+}
+
+// A Check's full definition — what it calls, with which params, and how the
+// result is judged — for every Test, not just Assistant-authored ones (#117).
+function CheckDefinition({ check }: { check: Check }) {
+  const params = check.operation?.params ?? {}
+  const hasHints = Object.keys(check.hints ?? {}).length > 0
+  return (
+    <dl className="grid grid-cols-[150px_1fr] gap-y-1 text-sm">
+      {check.description && (
+        <>
+          <dt className="text-muted">Description</dt>
+          <dd className="text-gray-200">{check.description}</dd>
+        </>
+      )}
+      <dt className="text-muted">Handler</dt>
+      <dd className="font-mono text-xs text-gray-200">{check.handler_key}</dd>
+      <dt className="text-muted">Operation</dt>
+      <dd className="font-mono text-xs text-info">{opLabel(check.operation)}</dd>
+      <dt className="text-muted">Params</dt>
+      <dd>
+        {Object.keys(params).length ? (
+          <pre className="overflow-x-auto rounded bg-ink p-2 text-[11px] text-gray-200">
+            {JSON.stringify(params, null, 2)}
+          </pre>
+        ) : (
+          <span className="text-xs text-muted">none</span>
+        )}
+      </dd>
+      <dt className="text-muted">Assertion</dt>
+      <dd className="text-gray-200">{check.assertion || '—'}</dd>
+      <dt className="text-muted">Expectation</dt>
+      <dd className="text-gray-200">
+        {check.expectation === 'DENY'
+          ? `denied${check.expected_stage ? ` at ${check.expected_stage}` : ''}`
+          : 'succeeds'}
+      </dd>
+      <dt className="text-muted">Evaluator</dt>
+      <dd className="text-gray-200">
+        {check.evaluator}
+        <span className="text-muted">
+          {' — '}{check.compilable ? 'compiled to a structured check' : 'not compilable; judged agentically'}
+        </span>
+      </dd>
+      {hasHints && (
+        <>
+          <dt className="text-muted">Hints</dt>
+          <dd className="font-mono text-[11px] text-gray-200">{JSON.stringify(check.hints)}</dd>
+        </>
+      )}
+      <dt className="text-muted">Check id</dt>
+      <dd className="font-mono text-xs text-muted">{check.id} · v{check.version}</dd>
+    </dl>
+  )
+}
+
+// The Test's YAML export (ADR-0001 §8: a review/portability format, never the
+// source of truth), read-only with copy.
+function TestYaml({ test }: { test: StudioTest }) {
+  const { data, isLoading, error } = useTestYaml(test.id, test.version)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copy = () => {
+    if (!data) return
+    // The clipboard API can be denied (no permission, non-secure context);
+    // say so rather than fail silently — the text stays selectable.
+    navigator.clipboard.writeText(data.yaml).then(
+      () => setCopyState('copied'),
+      () => setCopyState('failed'),
+    ).finally(() => setTimeout(() => setCopyState('idle'), 1500))
+  }
+  return (
+    <div className="relative mb-3">
+      {data && (
+        <button className="btn absolute right-2 top-2 px-2 py-1 text-xs" onClick={copy}>
+          <Copy size="12" /> {copyState === 'copied' ? 'Copied ✓' : copyState === 'failed' ? 'Copy failed — select the text' : 'Copy'}
+        </button>
+      )}
+      <pre className="max-h-96 overflow-auto rounded-lg border border-edge bg-ink p-3 text-[11px] text-gray-200">
+        {isLoading ? 'Loading…' : error ? `Couldn't load the YAML export: ${(error as Error).message}` : data?.yaml}
+      </pre>
     </div>
   )
 }
