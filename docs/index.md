@@ -9,8 +9,9 @@ the daily loop.
 
 ## What the platform does
 
-**One Run API, three triggers.** CI, the app, and the nightly Job all call the
-same `POST /runs`. Only a PASS verdict passes, so gating is fail-closed.
+**One run engine, three triggers.** CI and the app call the same `POST /runs`,
+and the nightly run goes through the same engine. Only a PASS verdict passes, so
+gating is fail-closed.
 [Gate a deploy from CI](./ci/README.md).
 
 **Safe by construction.** Each Target has a least-privilege service principal and

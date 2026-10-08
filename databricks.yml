@@ -71,6 +71,10 @@ resources:
             value: "25"
           - name: POLLER_MAX_CONCURRENT
             value: "10"
+          - name: NIGHTLY_CRON
+            value: "${var.nightly_cron}"
+          - name: NIGHTLY_SCHEDULE_STATUS
+            value: "${var.schedule_pause_status}"
           - name: OTEL_ENABLED
             value: "${var.otel_enabled}"
           # SQL warehouse id (also injected by the resource; set explicitly so
@@ -79,10 +83,6 @@ resources:
             value: "${var.sql_warehouse_id}"
           - name: MODEL_SERVING_ENDPOINT
             value: "${var.model_serving_endpoint}"
-          # The scheduled suite-runner job id (created below); lets the app
-          # offload heavy/scheduled fan-out instead of running it inline.
-          - name: SUITE_RUNNER_JOB_ID
-            value: "${resources.jobs.suite_runner.id}"
           # NOTE: remote-agent result signing is optional. To enable it, create a
           # secret scope/key, declare a `secret` app resource above, and add an
           # env entry with `value_from: <resource-name>`. Left out by default so
@@ -107,39 +107,8 @@ resources:
         - level: CAN_USE
           group_name: "account users"
 
-  # Nightly regression trigger. It is NOT a scheduled-only engine — it is just
-  # another authenticated caller of the shared Run API the CI Action and GUI use
-  # (ADR-0005), starting a run and polling it fail-closed. Nightly opts into
-  # depth=full (CI defaults to quick); one engine behind all three triggers.
-  jobs:
-    suite_runner:
-      name: "${var.app_name}-suite-runner-${var.environment}"
-      schedule:
-        quartz_cron_expression: "${var.nightly_cron}"
-        timezone_id: "UTC"
-        pause_status: "${var.schedule_pause_status}"
-      tasks:
-        - task_key: run_full_regression
-          environment_key: default
-          spark_python_task:
-            python_file: "databricks/jobs/run_suite.py"
-            parameters: ["--app-url", "${var.validation_app_url}", "--depth", "full"]
-      environments:
-        - environment_key: default
-          spec:
-            client: "3"
-            dependencies:
-              - sqlmodel>=0.0.22
-              - psycopg2-binary>=2.9.9
-              - databricks-sdk>=0.30.0
-              - croniter>=2.0.0
-              - httpx>=0.27.0
-      permissions:
-        - level: CAN_MANAGE
-          user_name: "${workspace.current_user.userName}"
-
 # ---------------------------------------------------------------------------
-# Sync: ship the frontend SOURCE + backend + job code. The Databricks Apps Node
+# Sync: ship the frontend SOURCE + backend. The Databricks Apps Node
 # buildpack detects package.json and runs `npm install && npm run build` at
 # deploy time; Vite (vite.config.ts build.outDir) emits to backend/static, which
 # the FastAPI `command` then serves. The Guide tab bundles docs/*.md and
@@ -164,7 +133,6 @@ sync:
     - src/**
     - public/**
     - backend/**
-    - databricks/**
     - app.yaml
   exclude:
     # Local CLI/terraform working dir - contains the ~64MB databricks provider
@@ -233,14 +201,11 @@ variables:
     description: "Enable OpenTelemetry -> Unity Catalog app telemetry"
     default: "true"
   nightly_cron:
-    description: "Quartz cron for the nightly full regression run"
-    default: "0 0 7 * * ?"
+    description: "Five-field cron in UTC (minute hour day month weekday) for the app's nightly full run; empty turns it off"
+    default: "0 7 * * *"
   schedule_pause_status:
-    description: "PAUSED or UNPAUSED for the suite-runner schedule"
+    description: "PAUSED or UNPAUSED for the nightly run"
     default: "UNPAUSED"
-  validation_app_url:
-    description: "Base URL of the deployed validation app; the nightly job calls its shared Run API (ADR-0005)."
-    default: ""
 
 targets:
 

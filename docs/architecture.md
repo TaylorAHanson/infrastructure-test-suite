@@ -11,20 +11,19 @@ context. Design rationale for anything non-obvious lives in
 The platform is a Databricks App: a single **FastAPI** process acting as the
 **control plane** and **durable result store**. It serves the REST API and the
 built React SPA. Runs execute **in-app**, concurrently, with bounded
-parallelism — there is no Databricks Job fan-out for ordinary Runs and no
-remote-agent subsystem; the only Databricks Job in the system is the nightly
-suite runner, and it is just another authenticated caller of the same Run API
-everything else uses.
+parallelism — there is no Databricks Job fan-out and no remote-agent
+subsystem. The nightly run is started by the in-app poller on a cron, through
+the same run service as the Run API.
 
 ```mermaid
 flowchart TD
-  caller["CI trigger / GUI / nightly Job"] -->|"POST /api/v1/runs, GET /api/v1/runs/{run_id}"| api["FastAPI control plane"]
+  caller["CI trigger / GUI / API"] -->|"POST /api/v1/runs, GET /api/v1/runs/{run_id}"| api["FastAPI control plane"]
   api --> lakebase[("Lakebase Postgres\ntargets, checks, tests, suites,\nrun requests, check runs, stage outcomes,\ntarget leases, audit, branding")]
   api -->|dispatch| poller["In-app poller / run engine\n(bounded concurrency)"]
   poller -->|"one script per Test x Target"| sandbox["Test script\n(credential-less subprocess)"]
   sandbox -->|"every call brokered"| gate["Safety gate +\nclient wrapper"]
   gate --> dbx["Databricks resources"]
-  job["Databricks Job (nightly, depth=full)"] -->|same Run API| api
+  cron["Nightly cron (depth=full)"] -->|same run service| poller
   api --> assistant["The Assistant\n(LangGraph tool-calling loop)"]
   api -->|"run completes with findings"| webhook["Outbound webhook POST"]
   api --> ucviews[("UC views + Databricks SQL\nfailure rate, flaky, root-cause buckets")]
@@ -112,9 +111,9 @@ view computed from the stage reached, not a stored field.
    A completed Run with ≥ 1 finding fires the best-effort outbound webhook and
    feeds the "What's Interesting" view.
 
-The nightly **suite runner** (`databricks/jobs/run_suite.py`, a Databricks
-Job on a cron schedule) is not a separate execution path — it calls the same
-Run API at `depth=full` against the deployed app's URL.
+The **nightly run** (`app/services/nightly.py`) is not a separate execution
+path. On `nightly_cron` the poller submits a `depth=full` run of everything
+through the same run service as `POST /runs`, once per cron slot.
 
 ### Storage split
 

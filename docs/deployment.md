@@ -31,7 +31,6 @@ The bundle ([`../databricks.yml`](../databricks.yml)) creates:
   `postgres` resource is attached with `CAN_CONNECT_AND_CREATE`.
 - `apps.regression-validation` - the app, with `postgres` + `sql-warehouse`
   resources, minimal `user_api_scopes`, and `config.command: [python, backend/run.py]`.
-- `jobs.suite_runner` - the scheduled suite runner (`databricks/jobs/run_suite.py`).
 
 ### Resource injection (no hardcoded IDs/secrets)
 
@@ -79,8 +78,7 @@ SQL warehouse, and secret resources in the app UI, then redeploy.
 
 ## Scheduling
 
-Do not rely on the in-process poller as the primary scheduler. The
-`suite_runner` Databricks Job owns timing (cron); each fire materialises a
-`run_request` and executes the selection, writing results back to Lakebase. The
-in-app poller is the dispatcher and a local-dev fallback. Manual ad hoc runs use
-the same orchestration path (`POST /api/v1/runs`, or `Fire` on a schedule).
+The in-app poller starts the nightly run on `nightly_cron` (five-field cron,
+UTC) and dispatches every run. Each cron slot fires once, even when two app
+instances overlap during a deploy, and a slot missed while the app was stopped is
+skipped. Manual and CI runs use the same orchestration path (`POST /api/v1/runs`).

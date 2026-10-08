@@ -63,9 +63,6 @@ class Settings(BaseSettings):
     DATABRICKS_PROFILE: str = os.environ.get("DATABRICKS_PROFILE", "DEFAULT")
     DATABRICKS_HOST: Optional[str] = None
     MODEL_SERVING_ENDPOINT: Optional[str] = None
-    # Job that fans out heavy/scheduled suite execution. Created/updated by the
-    # bundle; the app only needs the id to trigger it.
-    SUITE_RUNNER_JOB_ID: Optional[str] = None
 
     # ----- Poller (async run processor) ---------------------------------
     POLLER_ENABLED: bool = True
@@ -73,6 +70,11 @@ class Settings(BaseSettings):
     POLLER_BATCH_SIZE: int = 25
     POLLER_MAX_CONCURRENT: int = 10
     POLLER_LOCK_TIMEOUT_MINUTES: int = 15
+    # The nightly full run of every active Test against every Target, which the
+    # poller starts (app.services.nightly). Five-field cron in UTC; empty turns
+    # it off, as does a schedule status of PAUSED.
+    NIGHTLY_CRON: str = ""
+    NIGHTLY_SCHEDULE_STATUS: str = "UNPAUSED"
 
     # ----- Run engine (ADR-0005/0007/0011) ------------------------------
     # The single configurable concurrency dial (ADR-0007 §5): the max number of

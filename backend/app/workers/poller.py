@@ -4,9 +4,10 @@ Each tick the poller (1) **sweeps** lapsed/wedged target leases so a crashed or
 overrunning run frees its lock (ADR-0011 §5), (2) **prunes** retained check-result
 history past the rolling window while preserving each series' last-green anchor
 (ADR-0015) — at most once per ``RETENTION_SWEEP_INTERVAL_SECONDS``, (3) reaps
-wedged runs, (4) hands new **PENDING** requests to the dispatcher, and (5)
-**drains QUEUED** requests (FIFO by age) so a run that was waiting on a busy
-target picks up the freed lease. Requests run on the engine's dispatcher pool,
+wedged runs, (4) submits the **nightly run** when its cron slot comes round, (5)
+hands new **PENDING** requests to the dispatcher, and (6) **drains QUEUED**
+requests (FIFO by age) so a run that was waiting on a busy target picks up the
+freed lease. Requests run on the engine's dispatcher pool,
 so a long Run never stalls the tick; ``run_service`` owns the per-target locking
 and fan-out concurrency.
 """
@@ -22,7 +23,7 @@ from sqlmodel import select
 
 from app.core.enums import RunStatus
 from app.models import RunRequest
-from app.services import locking, retention, run_service
+from app.services import locking, nightly, retention, run_service
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,10 @@ def tick() -> None:
     _sweep_leases()
     _sweep_history_if_due()
     run_service.reap_wedged_runs()
+    try:
+        nightly.fire_if_due()
+    except Exception as exc:  # noqa: BLE001 - never hold up dispatching the runs already submitted
+        logger.error("Nightly run check failed: %s", exc, exc_info=True)
     for request_id in _pending_ids(settings.POLLER_BATCH_SIZE):
         run_service.process_request(request_id, _WORKER_ID)
     run_service.drain_queued(_WORKER_ID, settings.POLLER_BATCH_SIZE)

@@ -21,8 +21,7 @@ creates three things:
 | Resource | What it's for |
 | --- | --- |
 | Lakebase database instance | Targets, the Test catalog, Run history, the audit log, branding. Survives redeploys (`prevent_destroy`). |
-| The App | UI + Run API + the in-app run engine. Runs as its own service principal. |
-| `suite_runner` Job | The nightly regression trigger. It calls the same Run API as everything else, at `depth=full`. |
+| The App | UI + Run API + the in-app run engine, which also starts the nightly `depth=full` run. Runs as its own service principal. |
 
 You then register each workspace you want to validate as a **Target** and give
 it its own **least-privilege service principal**. The platform never touches a
@@ -97,9 +96,8 @@ The bundle variables you're most likely to change:
 | `sql_warehouse_id` | lookup: *Serverless Starter Warehouse* | A warehouse in the app's workspace that the App is granted `CAN_USE` on |
 | `model_serving_endpoint` | `databricks-claude-sonnet-5` | The Assistant's default endpoint. **Settings → Assistant** can choose another. |
 | `seed_on_startup` | `true` | Seed the bundled Test catalog on boot. On a database an older release seeded, it retires the superseded Tests and adds the new ones. |
-| `nightly_cron` | `0 0 7 * * ?` (07:00 UTC) | Quartz cron for the nightly `full` Run |
-| `schedule_pause_status` | `UNPAUSED` | `PAUSED` to deploy without the nightly schedule |
-| `validation_app_url` | *(empty)* | The app's URL. The nightly Job needs it (see below). |
+| `nightly_cron` | `0 7 * * *` (07:00 UTC) | Five-field cron in UTC for the nightly `full` Run; empty turns it off |
+| `schedule_pause_status` | `UNPAUSED` | `PAUSED` to deploy without the nightly run |
 
 ### Deploy
 
@@ -113,20 +111,6 @@ You don't need to build the frontend yourself. The bundle syncs the source, and
 the Databricks Apps Node buildpack runs `npm install && npm run build` at deploy
 time. That build produces both the UI and this guide. Running `npm run build`
 locally first is harmless and catches build errors earlier.
-
-### Tell the nightly Job where the app is
-
-The `suite_runner` Job reaches the app over HTTP, so it needs the app's URL.
-That URL only exists after the first deploy:
-
-```bash
-databricks apps get regression-validation-dev   # copy the "url" field
-databricks bundle deploy -t dev --var="validation_app_url=https://<app-url>"
-```
-
-To make it permanent, set `validation_app_url` under your target's `variables:`
-in `databricks.yml`. Until it's set, each nightly fire fails immediately with
-`--app-url (or VALIDATION_APP_URL) is required`.
 
 ### Optional: analytics views and telemetry
 

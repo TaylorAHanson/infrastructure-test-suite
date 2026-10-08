@@ -114,7 +114,7 @@ contains an R2 Check. The launcher shows a warning with **Override & run**.
 
 The override requires a reason and the typed phrase `i understand`. It applies
 to that **one Run** on that **one Target**, and it's written to the audit log.
-It's GUI-only: CI, the nightly Job, and API callers can never use it, even if
+It's GUI-only: CI, the nightly run, and API callers can never use it, even if
 they send one. R3 stays forbidden.
 
 ## 4. Manage Targets
@@ -179,19 +179,19 @@ it. Tests you wrote are never touched.
 
 ## 6. The nightly regression
 
-The `suite_runner` Databricks Job fires on `nightly_cron` (07:00 UTC by default)
+The app starts the nightly run itself on `nightly_cron` (07:00 UTC by default)
 and runs **every Active Test against every Target at `depth=full`**. It shows up
 in **Runs** with source `NIGHTLY`, and its findings land in the **Overnight**
-lane.
+lane. To be told when it fails, point the run-completion webhook at your
+alerting.
 
-- **The Job fails** (non-zero exit) whenever the verdict isn't `PASS`. A red
-  nightly Job run in the Jobs UI means "go look at What's Interesting", or that
-  the Job couldn't reach the app.
 - **Pause or reschedule** by setting `schedule_pause_status` or `nightly_cron` in
-  `databricks.yml` and redeploying. Edits made in the Jobs UI are overwritten on
-  the next bundle deploy.
-- **Prerequisite**: `validation_app_url` must be set. See
-  [Tell the nightly Job where the app is](./getting-started.md#tell-the-nightly-job-where-the-app-is).
+  `databricks.yml` and redeploying. `nightly_cron` is a five-field cron in UTC
+  (`minute hour day month weekday`); the app logs an error and skips the nightly
+  run if it isn't one.
+- **A missed night isn't made up.** If the app is stopped at the scheduled
+  time, that night's run is skipped, so a restart never starts a surprise full
+  run.
 
 ## 7. CI gating
 
@@ -273,5 +273,5 @@ redeploy.
 | Posture checks fail with `PERMISSION_DENIED` | They read admin-only settings. Run the posture Suite against a Target whose SP is a workspace admin. |
 | The Assistant doesn't respond | Open **Settings → Assistant** and press **Test**: it says whether the model answers and calls tools. The endpoint must exist and the App needs `CAN_QUERY` on it; the bundle grants that for `model_serving_endpoint`, so grant it yourself for any other endpoint you pick. |
 | The editor's assistant stops mid-task | It reached its tool-call or time limit for one turn, and its reply says so. Ask it to continue, or raise the limit under **Settings → Assistant**. |
-| Nightly Job fails instantly | `validation_app_url` isn't set. Redeploy with `--var="validation_app_url=…"`. |
+| No nightly run appeared | Check the app logs around the scheduled time: a `nightly_cron` that isn't a five-field cron is logged as an error, and a night when the app was stopped is skipped. `schedule_pause_status: PAUSED` turns it off. |
 | App logs disappeared | App logs are ephemeral on Databricks Apps. Durable history is in Lakebase. Enable App telemetry to UC for longer-lived logs (see [Deployment](./deployment.md)). |

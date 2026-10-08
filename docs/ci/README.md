@@ -1,7 +1,7 @@
 # Gating a deploy on validation (the CI contract)
 
-The validation platform exposes **one shared Run API** behind all three triggers
-— the CI Action, the manual GUI, and the nightly job (ADR-0005). CI is **just an
+The validation platform has **one run engine** behind all three triggers — the
+CI Action, the manual GUI, and the nightly run (ADR-0005). CI is **just an
 authenticated caller**; there is no CI-only path, no idempotency key, and no
 synchronous shortcut.
 
@@ -46,5 +46,5 @@ blast radius (ADR-0004 §5, enforced in `app/services/safety.py`).
   workflow snippet. **Not** a maintained first-party Action (ADR-0005 §8): the
   plain-HTTP API is the product, and any IaC/CI system that can make an
   authenticated HTTP call gates the same way.
-- The nightly Databricks Job (`databricks/jobs/run_suite.py`) calls this same API
-  with `depth=full` — one engine behind all three triggers.
+- The app's nightly run goes through the same run service at `depth=full` — one
+  engine behind all three triggers.
